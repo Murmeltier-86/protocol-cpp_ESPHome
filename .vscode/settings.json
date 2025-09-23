@@ -1,5 +1,0 @@
-{
-    "cmake.configureArgs": [
-        "-DJUTTA_PROTO_BUILD_TEST_EXEC=ON"
-    ]
-}
