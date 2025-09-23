@@ -13,7 +13,7 @@
 //---------------------------------------------------------------------------
 namespace jutta_proto {
 //---------------------------------------------------------------------------
-JuttaConnection::JuttaConnection(std::string&& device) : serial(std::move(device)) {}
+JuttaConnection::JuttaConnection(esphome::uart::UARTComponent* parent) : serial(parent) {}
 
 void JuttaConnection::init() {
     actionLock.lock();
@@ -212,11 +212,11 @@ bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData
 
 bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const {
     size_t size = serial.read_serial(buffer);
-    if (size <= 0 || size > 4) {
+    if (size == 0 || size > buffer.size()) {
         SPDLOG_TRACE("No serial data found.");
         return false;
     }
-    if (size < 4) {
+    if (size < buffer.size()) {
         SPDLOG_WARN("Invalid amount of UART data found ({} byte) - ignoring.", size);
         return false;
     }
