@@ -1,54 +1,98 @@
 #include "jutta_proto/CoffeeMaker.hpp"
 
+#include "esphome/core/time.h"
+#include "jutta_proto/JuttaCommands.hpp"
 #include "logger/Logger.hpp"
 #include <cassert>
-#include <chrono>
 #include <cstddef>
-#include <iomanip>
 #include <limits>
-#include <ratio>
 #include <string>
-#include <thread>
-
-#include "jutta_proto/JuttaCommands.hpp"
+#include <utility>
 
 //---------------------------------------------------------------------------
 namespace jutta_proto {
 //---------------------------------------------------------------------------
-CoffeeMaker::CoffeeMaker(std::unique_ptr<JuttaConnection>&& connection) : connection(std::move(connection)) {}
 
-void CoffeeMaker::switch_page() {
-    press_button(jutta_button_t::BUTTON_6);
-    if (++pageNum >= NUM_PAGES) {
-        pageNum = 0;
-    }
+void CoffeeMaker::CommandState::reset() {
+    this->active = false;
+    this->command.clear();
+    this->delay_ms = 0;
+    this->delay_target = 0;
+    this->sent = false;
+    this->timeout = std::chrono::milliseconds{5000};
 }
 
+CoffeeMaker::CoffeeMaker(std::unique_ptr<JuttaConnection>&& connection) : connection(std::move(connection)) {
+    this->reset_states();
+}
+
+void CoffeeMaker::switch_page() { this->switch_page((this->pageNum + 1) % NUM_PAGES); }
+
 void CoffeeMaker::switch_page(size_t pageNum) {
-    if (this->pageNum == pageNum) {
+    if (this->locked) {
+        SPDLOG_WARN("Coffee maker busy - cannot switch page right now.");
         return;
     }
 
-    press_button(jutta_button_t::BUTTON_6);
-    if (++pageNum >= NUM_PAGES) {
-        pageNum = 0;
+    size_t target_page = pageNum % NUM_PAGES;
+    if (this->pageNum == target_page) {
+        return;
     }
-    switch_page(pageNum);
+
+    this->switch_state_.target_page = target_page;
+    this->start_operation(OperationType::SwitchPage);
 }
 
 void CoffeeMaker::brew_coffee(coffee_t coffee) {
-    assert(!locked);
-    locked = true;
+    if (this->locked) {
+        SPDLOG_WARN("Coffee maker busy - cannot brew new coffee right now.");
+        return;
+    }
 
-    size_t pageNum = get_page_num(coffee);
-    switch_page(pageNum);
-    jutta_button_t button = get_button_num(coffee);
-    press_button(button);
-    locked = false;
+    this->brew_state_.coffee = coffee;
+    this->brew_state_.target_page = this->get_page_num(coffee);
+    this->brew_state_.button = this->get_button_num(coffee);
+    this->brew_state_.stage = BrewCoffeeState::Stage::EnsurePage;
+    this->start_operation(OperationType::BrewCoffee);
+}
+
+void CoffeeMaker::brew_custom_coffee(const bool* cancel, const std::chrono::milliseconds& grindTime,
+                                     const std::chrono::milliseconds& waterTime) {
+    if (this->locked) {
+        SPDLOG_WARN("Coffee maker busy - cannot brew custom coffee right now.");
+        return;
+    }
+
+    this->custom_state_.cancel_flag = cancel;
+    this->custom_state_.grind_duration = static_cast<uint32_t>(grindTime.count());
+    this->custom_state_.water_duration = static_cast<uint32_t>(waterTime.count());
+    this->custom_state_.wait_target = 0;
+    this->custom_state_.stage = CustomBrewState::Stage::Start;
+
+    SPDLOG_INFO("Brewing custom coffee with {} ms grind time and {} ms ms water time...",
+                std::to_string(grindTime.count()), std::to_string(waterTime.count()));
+
+    this->start_operation(OperationType::BrewCustomCoffee);
+}
+
+void CoffeeMaker::loop() {
+    switch (this->current_operation_) {
+        case OperationType::Idle:
+            break;
+        case OperationType::SwitchPage:
+            this->handle_switch_page();
+            break;
+        case OperationType::BrewCoffee:
+            this->handle_brew_coffee();
+            break;
+        case OperationType::BrewCustomCoffee:
+            this->handle_custom_brew();
+            break;
+    }
 }
 
 size_t CoffeeMaker::get_page_num(coffee_t coffee) const {
-    for (const std::pair<const coffee_t, size_t>& c : coffee_page_map) {
+    for (const std::pair<const coffee_t, size_t>& c : this->coffee_page_map) {
         if (c.first == coffee) {
             return c.second;
         }
@@ -58,7 +102,7 @@ size_t CoffeeMaker::get_page_num(coffee_t coffee) const {
 }
 
 CoffeeMaker::jutta_button_t CoffeeMaker::get_button_num(coffee_t coffee) const {
-    for (const std::pair<const coffee_t, jutta_button_t>& c : coffee_button_map) {
+    for (const std::pair<const coffee_t, jutta_button_t>& c : this->coffee_button_map) {
         if (c.first == coffee) {
             return c.second;
         }
@@ -67,138 +111,487 @@ CoffeeMaker::jutta_button_t CoffeeMaker::get_button_num(coffee_t coffee) const {
     return jutta_button_t::BUTTON_6;
 }
 
-void CoffeeMaker::press_button(jutta_button_t button) const {
+const std::string& CoffeeMaker::command_for_button(jutta_button_t button) const {
     switch (button) {
         case jutta_button_t::BUTTON_1:
-            static_cast<void>(write_and_wait(JUTTA_BUTTON_1));
-            break;
-
+            return JUTTA_BUTTON_1;
         case jutta_button_t::BUTTON_2:
-            static_cast<void>(write_and_wait(JUTTA_BUTTON_2));
-            break;
-
+            return JUTTA_BUTTON_2;
         case jutta_button_t::BUTTON_3:
-            static_cast<void>(write_and_wait(JUTTA_BUTTON_3));
-            break;
-
+            return JUTTA_BUTTON_3;
         case jutta_button_t::BUTTON_4:
-            static_cast<void>(write_and_wait(JUTTA_BUTTON_4));
-            break;
-
+            return JUTTA_BUTTON_4;
         case jutta_button_t::BUTTON_5:
-            static_cast<void>(write_and_wait(JUTTA_BUTTON_5));
-            break;
-
+            return JUTTA_BUTTON_5;
         case jutta_button_t::BUTTON_6:
-            static_cast<void>(write_and_wait(JUTTA_BUTTON_6));
-            break;
-
-        default:
-            assert(false);  // Should not happen
-            break;
+            return JUTTA_BUTTON_6;
     }
-
-    // Give the coffee maker time to react:
-    std::this_thread::sleep_for(std::chrono::milliseconds{500});
+    assert(false);
+    return JUTTA_BUTTON_6;
 }
 
-void CoffeeMaker::brew_custom_coffee(const bool* cancel, const std::chrono::milliseconds& grindTime, const std::chrono::milliseconds& waterTime) {
-    assert(!locked);
-    locked = true;
-    SPDLOG_INFO("Brewing custom coffee with {} ms grind time and {} ms ms water time...", std::to_string(grindTime.count()), std::to_string(waterTime.count()));
-
-    // Grind:
-    SPDLOG_INFO("Custom coffee grinding...");
-    static_cast<void>(write_and_wait(JUTTA_GRINDER_ON));
-    if (!sleep_cancelable(grindTime, cancel)) {
-        static_cast<void>(write_and_wait(JUTTA_BREW_GROUP_RESET));
-        locked = false;
-        return;
-    }
-    static_cast<void>(write_and_wait(JUTTA_GRINDER_OFF));
-    static_cast<void>(write_and_wait(JUTTA_BREW_GROUP_TO_BREWING_POSITION));
-
-    // Compress:
-    SPDLOG_INFO("Custom coffee compressing...");
-    static_cast<void>(write_and_wait(JUTTA_COFFEE_PRESS_ON));
-    if (!sleep_cancelable(grindTime, cancel)) {
-        static_cast<void>(write_and_wait(JUTTA_COFFEE_PRESS_OFF));
-        static_cast<void>(write_and_wait(JUTTA_BREW_GROUP_RESET));
-        locked = false;
-        return;
-    }
-    sleep_cancelable(std::chrono::milliseconds{500}, cancel);
-    static_cast<void>(write_and_wait(JUTTA_COFFEE_PRESS_OFF));
-
-    // Brew step 1:
-    SPDLOG_INFO("Custom coffee brewing...");
-    static_cast<void>(write_and_wait(JUTTA_COFFEE_WATER_PUMP_ON));
-    if (!sleep_cancelable(std::chrono::milliseconds{2000}, cancel)) {
-        static_cast<void>(write_and_wait(JUTTA_COFFEE_WATER_PUMP_OFF));
-        static_cast<void>(write_and_wait(JUTTA_BREW_GROUP_RESET));
-        locked = false;
-        return;
-    }
-    static_cast<void>(write_and_wait(JUTTA_COFFEE_WATER_PUMP_OFF));
-    if (!sleep_cancelable(std::chrono::milliseconds{2000}, cancel)) {
-        static_cast<void>(write_and_wait(JUTTA_BREW_GROUP_RESET));
-        locked = false;
-        return;
+CoffeeMaker::CommandResult CoffeeMaker::run_command(const std::string& command, uint32_t delay_ms,
+                                                    const std::chrono::milliseconds& timeout) {
+    if (!this->command_state_.active) {
+        this->command_state_.active = true;
+        this->command_state_.command = command;
+        this->command_state_.delay_ms = delay_ms;
+        this->command_state_.delay_target = 0;
+        this->command_state_.sent = false;
+        this->command_state_.timeout = timeout;
     }
 
-    // Brew setp 2:
-    pump_hot_water(waterTime, cancel);
-
-    // Reset:
-    SPDLOG_INFO("Custom coffee finishing up...");
-    static_cast<void>(write_and_wait(JUTTA_BREW_GROUP_RESET));
-    SPDLOG_INFO("Custom coffee done.");
-
-    locked = false;
-}
-
-bool CoffeeMaker::write_and_wait(const std::string& s) const {
-    static_cast<void>(connection->write_decoded(s));
-    return connection->wait_for_ok();
-}
-
-bool CoffeeMaker::pump_hot_water(const std::chrono::milliseconds& waterTime, const bool* cancel) const {
-    static_cast<void>(write_and_wait(JUTTA_COFFEE_WATER_PUMP_ON));
-    std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now() + waterTime;
-    // NOLINTNEXTLINE (hicpp-use-nullptr, modernize-use-nullptr)
-    while (std::chrono::steady_clock::now() < end) {
-        static_cast<void>(write_and_wait(JUTTA_COFFEE_WATER_HEATER_ON));
-        SPDLOG_INFO("Heater turned on.");
-        if (!sleep_cancelable(waterTime / 8, cancel)) {
-            static_cast<void>(write_and_wait(JUTTA_COFFEE_WATER_HEATER_OFF));
-            static_cast<void>(write_and_wait(JUTTA_COFFEE_WATER_PUMP_OFF));
-            return false;
+    if (!this->command_state_.sent) {
+        if (!this->connection->write_decoded(this->command_state_.command)) {
+            return CommandResult::InProgress;
         }
-        static_cast<void>(write_and_wait(JUTTA_COFFEE_WATER_HEATER_OFF));
-        SPDLOG_INFO("Heater turned off.");
-        if (!sleep_cancelable(waterTime / 20, cancel)) {
-            static_cast<void>(write_and_wait(JUTTA_COFFEE_WATER_PUMP_OFF));
-            return false;
-        }
+        this->command_state_.sent = true;
     }
-    static_cast<void>(write_and_wait(JUTTA_COFFEE_WATER_PUMP_OFF));
-    return !(*cancel);
+
+    auto wait_result = this->connection->wait_for_ok(this->command_state_.timeout);
+    if (wait_result == JuttaConnection::WaitResult::Pending) {
+        return CommandResult::InProgress;
+    }
+
+    if (wait_result == JuttaConnection::WaitResult::Success) {
+        if (this->command_state_.delay_ms > 0) {
+            uint32_t now = esphome::millis();
+            if (this->command_state_.delay_target == 0) {
+                this->command_state_.delay_target = now + this->command_state_.delay_ms;
+            }
+            if (!time_reached(now, this->command_state_.delay_target)) {
+                return CommandResult::InProgress;
+            }
+        }
+        this->command_state_.reset();
+        return CommandResult::Success;
+    }
+
+    this->command_state_.reset();
+    if (wait_result == JuttaConnection::WaitResult::Timeout) {
+        return CommandResult::Timeout;
+    }
+    return CommandResult::Error;
 }
 
-bool CoffeeMaker::is_locked() const { return locked; }
+CoffeeMaker::CommandResult CoffeeMaker::run_press_button(jutta_button_t button) {
+    return this->run_command(this->command_for_button(button), 500);
+}
 
-bool CoffeeMaker::sleep_cancelable(const std::chrono::milliseconds& time, const bool* cancel) {
-    // By default we perform 100ms increment steps:
-    constexpr size_t TIME_STEPS = 100;
+bool CoffeeMaker::handle_command(CommandResult result, const char* description) {
+    switch (result) {
+        case CommandResult::InProgress:
+            return false;
+        case CommandResult::Success:
+            return true;
+        case CommandResult::Timeout:
+            SPDLOG_WARN("{} timed out.", description);
+            this->operation_failed_ = true;
+            return false;
+        case CommandResult::Error:
+            SPDLOG_ERROR("{} failed.", description);
+            this->operation_failed_ = true;
+            return false;
+    }
+    return false;
+}
 
-    const size_t duration = time.count();
-    for (size_t i = 0; i < duration && !(*cancel); i += TIME_STEPS) {
-        std::this_thread::sleep_for(std::chrono::milliseconds{TIME_STEPS});
+CoffeeMaker::StepResult CoffeeMaker::ensure_page(size_t target_page) {
+    if (this->pageNum == target_page) {
+        return StepResult::Done;
     }
-    if (!(*cancel) && (duration % TIME_STEPS != 0)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds{duration % TIME_STEPS});
+
+    CommandResult result = this->run_press_button(jutta_button_t::BUTTON_6);
+    if (result == CommandResult::Success) {
+        this->pageNum = (this->pageNum + 1) % NUM_PAGES;
+        if (this->pageNum == target_page) {
+            return StepResult::Done;
+        }
+        return StepResult::InProgress;
     }
-    return !(*cancel);
+
+    if (result == CommandResult::InProgress) {
+        return StepResult::InProgress;
+    }
+
+    this->handle_command(result, "Switching page");
+    return StepResult::Failed;
+}
+
+void CoffeeMaker::handle_switch_page() {
+    if (this->operation_failed_) {
+        this->finish_operation();
+        return;
+    }
+
+    StepResult result = this->ensure_page(this->switch_state_.target_page);
+    if (result == StepResult::Done) {
+        this->finish_operation();
+    } else if (result == StepResult::Failed) {
+        this->finish_operation();
+    }
+}
+
+void CoffeeMaker::handle_brew_coffee() {
+    if (this->operation_failed_) {
+        this->finish_operation();
+        return;
+    }
+
+    switch (this->brew_state_.stage) {
+        case BrewCoffeeState::Stage::EnsurePage: {
+            StepResult page_result = this->ensure_page(this->brew_state_.target_page);
+            if (page_result == StepResult::Done) {
+                this->brew_state_.stage = BrewCoffeeState::Stage::PressButton;
+            } else if (page_result == StepResult::Failed) {
+                this->finish_operation();
+            }
+            break;
+        }
+        case BrewCoffeeState::Stage::PressButton: {
+            CommandResult command_result = this->run_press_button(this->brew_state_.button);
+            if (this->handle_command(command_result, "Pressing brew button")) {
+                this->brew_state_.stage = BrewCoffeeState::Stage::Done;
+            }
+            break;
+        }
+        case BrewCoffeeState::Stage::Done:
+            this->finish_operation();
+            break;
+    }
+
+    if (this->operation_failed_) {
+        this->finish_operation();
+    }
+}
+
+bool CoffeeMaker::cancel_requested() const {
+    return (this->custom_state_.cancel_flag != nullptr) && *(this->custom_state_.cancel_flag);
+}
+
+void CoffeeMaker::start_hot_water() {
+    this->hot_water_state_.stage = HotWaterState::Stage::PumpOn;
+    this->hot_water_state_.end_time = esphome::millis() + this->custom_state_.water_duration;
+    this->hot_water_state_.wait_target = 0;
+    this->hot_water_state_.heater_on_duration = this->custom_state_.water_duration / 8;
+    this->hot_water_state_.heater_off_duration = this->custom_state_.water_duration / 20;
+}
+
+CoffeeMaker::HotWaterResult CoffeeMaker::run_hot_water() {
+    if (this->operation_failed_) {
+        return HotWaterResult::Failed;
+    }
+
+    uint32_t now = esphome::millis();
+
+    switch (this->hot_water_state_.stage) {
+        case HotWaterState::Stage::PumpOn: {
+            CommandResult result = this->run_command(JUTTA_COFFEE_WATER_PUMP_ON);
+            if (this->handle_command(result, "Turning water pump on")) {
+                this->hot_water_state_.stage = HotWaterState::Stage::CycleStart;
+            }
+            break;
+        }
+        case HotWaterState::Stage::CycleStart:
+            if (this->cancel_requested()) {
+                this->hot_water_state_.stage = HotWaterState::Stage::CancelPumpOff;
+            } else if (time_reached(now, this->hot_water_state_.end_time)) {
+                this->hot_water_state_.stage = HotWaterState::Stage::PumpOff;
+            } else {
+                this->hot_water_state_.stage = HotWaterState::Stage::HeaterOn;
+            }
+            break;
+        case HotWaterState::Stage::HeaterOn: {
+            CommandResult result = this->run_command(JUTTA_COFFEE_WATER_HEATER_ON);
+            if (this->handle_command(result, "Turning water heater on")) {
+                if (this->hot_water_state_.heater_on_duration == 0) {
+                    this->hot_water_state_.stage = HotWaterState::Stage::HeaterOff;
+                } else {
+                    this->hot_water_state_.wait_target = now + this->hot_water_state_.heater_on_duration;
+                    this->hot_water_state_.stage = HotWaterState::Stage::WaitHeaterOn;
+                }
+            }
+            break;
+        }
+        case HotWaterState::Stage::WaitHeaterOn:
+            if (this->cancel_requested()) {
+                this->hot_water_state_.stage = HotWaterState::Stage::CancelHeaterOff;
+            } else if (time_reached(now, this->hot_water_state_.wait_target)) {
+                this->hot_water_state_.stage = HotWaterState::Stage::HeaterOff;
+            }
+            break;
+        case HotWaterState::Stage::HeaterOff: {
+            CommandResult result = this->run_command(JUTTA_COFFEE_WATER_HEATER_OFF);
+            if (this->handle_command(result, "Turning water heater off")) {
+                if (this->hot_water_state_.heater_off_duration == 0) {
+                    this->hot_water_state_.stage = HotWaterState::Stage::CycleStart;
+                } else {
+                    this->hot_water_state_.wait_target = now + this->hot_water_state_.heater_off_duration;
+                    this->hot_water_state_.stage = HotWaterState::Stage::WaitHeaterOff;
+                }
+            }
+            break;
+        }
+        case HotWaterState::Stage::WaitHeaterOff:
+            if (this->cancel_requested()) {
+                this->hot_water_state_.stage = HotWaterState::Stage::CancelPumpOff;
+            } else if (time_reached(now, this->hot_water_state_.wait_target)) {
+                this->hot_water_state_.stage = HotWaterState::Stage::CycleStart;
+            }
+            break;
+        case HotWaterState::Stage::PumpOff: {
+            CommandResult result = this->run_command(JUTTA_COFFEE_WATER_PUMP_OFF);
+            if (this->handle_command(result, "Turning water pump off")) {
+                this->hot_water_state_.stage = HotWaterState::Stage::Done;
+                return HotWaterResult::Completed;
+            }
+            break;
+        }
+        case HotWaterState::Stage::WaitPumpOff:
+            // Should never be reached with current state machine
+            break;
+        case HotWaterState::Stage::CancelHeaterOff: {
+            CommandResult result = this->run_command(JUTTA_COFFEE_WATER_HEATER_OFF);
+            if (this->handle_command(result, "Turning water heater off after cancel")) {
+                this->hot_water_state_.stage = HotWaterState::Stage::CancelPumpOff;
+            }
+            break;
+        }
+        case HotWaterState::Stage::CancelPumpOff: {
+            CommandResult result = this->run_command(JUTTA_COFFEE_WATER_PUMP_OFF);
+            if (this->handle_command(result, "Turning water pump off after cancel")) {
+                this->hot_water_state_.stage = HotWaterState::Stage::Cancelled;
+                return HotWaterResult::Cancelled;
+            }
+            break;
+        }
+        case HotWaterState::Stage::Done:
+            return HotWaterResult::Completed;
+        case HotWaterState::Stage::Cancelled:
+            return HotWaterResult::Cancelled;
+        case HotWaterState::Stage::Error:
+            return HotWaterResult::Failed;
+    }
+
+    if (this->operation_failed_) {
+        this->hot_water_state_.stage = HotWaterState::Stage::Error;
+        return HotWaterResult::Failed;
+    }
+
+    return HotWaterResult::InProgress;
+}
+
+void CoffeeMaker::handle_custom_brew() {
+    if (this->operation_failed_) {
+        this->finish_operation();
+        return;
+    }
+
+    uint32_t now = esphome::millis();
+
+    switch (this->custom_state_.stage) {
+        case CustomBrewState::Stage::Idle:
+            this->finish_operation();
+            return;
+        case CustomBrewState::Stage::Start:
+            SPDLOG_INFO("Custom coffee grinding...");
+            this->custom_state_.stage = CustomBrewState::Stage::GrinderOn;
+            break;
+        case CustomBrewState::Stage::GrinderOn: {
+            CommandResult result = this->run_command(JUTTA_GRINDER_ON);
+            if (this->handle_command(result, "Turning grinder on")) {
+                this->custom_state_.wait_target = now + this->custom_state_.grind_duration;
+                this->custom_state_.stage = CustomBrewState::Stage::WaitGrinding;
+            }
+            break;
+        }
+        case CustomBrewState::Stage::WaitGrinding:
+            if (this->cancel_requested()) {
+                this->custom_state_.stage = CustomBrewState::Stage::CancelGrindingReset;
+            } else if (time_reached(now, this->custom_state_.wait_target)) {
+                this->custom_state_.stage = CustomBrewState::Stage::GrinderOff;
+            }
+            break;
+        case CustomBrewState::Stage::CancelGrindingReset:
+            if (this->handle_command(this->run_command(JUTTA_BREW_GROUP_RESET),
+                                     "Reset brew group after grind cancel")) {
+                this->custom_state_.stage = CustomBrewState::Stage::Cancelled;
+            }
+            break;
+        case CustomBrewState::Stage::GrinderOff:
+            if (this->handle_command(this->run_command(JUTTA_GRINDER_OFF), "Turning grinder off")) {
+                this->custom_state_.stage = CustomBrewState::Stage::MoveBrewGroup;
+            }
+            break;
+        case CustomBrewState::Stage::MoveBrewGroup:
+            if (this->handle_command(this->run_command(JUTTA_BREW_GROUP_TO_BREWING_POSITION),
+                                     "Moving brew group")) {
+                SPDLOG_INFO("Custom coffee compressing...");
+                this->custom_state_.stage = CustomBrewState::Stage::PressOn;
+            }
+            break;
+        case CustomBrewState::Stage::PressOn:
+            if (this->handle_command(this->run_command(JUTTA_COFFEE_PRESS_ON), "Turning coffee press on")) {
+                this->custom_state_.wait_target = now + this->custom_state_.grind_duration;
+                this->custom_state_.stage = CustomBrewState::Stage::WaitCompression;
+            }
+            break;
+        case CustomBrewState::Stage::WaitCompression:
+            if (this->cancel_requested()) {
+                this->custom_state_.stage = CustomBrewState::Stage::CancelPressOff;
+            } else if (time_reached(now, this->custom_state_.wait_target)) {
+                this->custom_state_.wait_target = now + 500;
+                this->custom_state_.stage = CustomBrewState::Stage::DelayAfterPress;
+            }
+            break;
+        case CustomBrewState::Stage::CancelPressOff:
+            if (this->handle_command(this->run_command(JUTTA_COFFEE_PRESS_OFF),
+                                     "Turning coffee press off after cancel")) {
+                this->custom_state_.stage = CustomBrewState::Stage::CancelPressReset;
+            }
+            break;
+        case CustomBrewState::Stage::CancelPressReset:
+            if (this->handle_command(this->run_command(JUTTA_BREW_GROUP_RESET),
+                                     "Reset brew group after press cancel")) {
+                this->custom_state_.stage = CustomBrewState::Stage::Cancelled;
+            }
+            break;
+        case CustomBrewState::Stage::DelayAfterPress:
+            if (time_reached(now, this->custom_state_.wait_target)) {
+                this->custom_state_.stage = CustomBrewState::Stage::PressOff;
+            }
+            break;
+        case CustomBrewState::Stage::PressOff:
+            if (this->handle_command(this->run_command(JUTTA_COFFEE_PRESS_OFF), "Turning coffee press off")) {
+                SPDLOG_INFO("Custom coffee brewing...");
+                this->custom_state_.stage = CustomBrewState::Stage::PumpOn;
+            }
+            break;
+        case CustomBrewState::Stage::PumpOn:
+            if (this->handle_command(this->run_command(JUTTA_COFFEE_WATER_PUMP_ON), "Turning water pump on")) {
+                this->custom_state_.wait_target = now + 2000;
+                this->custom_state_.stage = CustomBrewState::Stage::WaitPreBrew;
+            }
+            break;
+        case CustomBrewState::Stage::WaitPreBrew:
+            if (this->cancel_requested()) {
+                this->custom_state_.stage = CustomBrewState::Stage::CancelPreBrewPumpOff;
+            } else if (time_reached(now, this->custom_state_.wait_target)) {
+                this->custom_state_.stage = CustomBrewState::Stage::PumpOff;
+            }
+            break;
+        case CustomBrewState::Stage::CancelPreBrewPumpOff:
+            if (this->handle_command(this->run_command(JUTTA_COFFEE_WATER_PUMP_OFF),
+                                     "Turning water pump off after cancel")) {
+                this->custom_state_.stage = CustomBrewState::Stage::CancelPreBrewReset;
+            }
+            break;
+        case CustomBrewState::Stage::CancelPreBrewReset:
+            if (this->handle_command(this->run_command(JUTTA_BREW_GROUP_RESET),
+                                     "Reset brew group after pump cancel")) {
+                this->custom_state_.stage = CustomBrewState::Stage::Cancelled;
+            }
+            break;
+        case CustomBrewState::Stage::PumpOff:
+            if (this->handle_command(this->run_command(JUTTA_COFFEE_WATER_PUMP_OFF), "Turning water pump off")) {
+                this->custom_state_.wait_target = now + 2000;
+                this->custom_state_.stage = CustomBrewState::Stage::WaitBetweenBrews;
+            }
+            break;
+        case CustomBrewState::Stage::WaitBetweenBrews:
+            if (this->cancel_requested()) {
+                this->custom_state_.stage = CustomBrewState::Stage::CancelAfterPreBrewReset;
+            } else if (time_reached(now, this->custom_state_.wait_target)) {
+                this->custom_state_.stage = CustomBrewState::Stage::HotWaterInit;
+            }
+            break;
+        case CustomBrewState::Stage::CancelAfterPreBrewReset:
+            if (this->handle_command(this->run_command(JUTTA_BREW_GROUP_RESET),
+                                     "Reset brew group after pre-brew cancel")) {
+                this->custom_state_.stage = CustomBrewState::Stage::Cancelled;
+            }
+            break;
+        case CustomBrewState::Stage::HotWaterInit:
+            this->start_hot_water();
+            this->custom_state_.stage = CustomBrewState::Stage::HotWaterActive;
+            break;
+        case CustomBrewState::Stage::HotWaterActive: {
+            HotWaterResult hw_result = this->run_hot_water();
+            if (hw_result == HotWaterResult::Completed) {
+                SPDLOG_INFO("Custom coffee finishing up...");
+                this->custom_state_.stage = CustomBrewState::Stage::Reset;
+            } else if (hw_result == HotWaterResult::Cancelled) {
+                this->custom_state_.stage = CustomBrewState::Stage::CancelAfterHotWaterReset;
+            } else if (hw_result == HotWaterResult::Failed) {
+                this->operation_failed_ = true;
+            }
+            break;
+        }
+        case CustomBrewState::Stage::CancelAfterHotWaterReset:
+            if (this->handle_command(this->run_command(JUTTA_BREW_GROUP_RESET),
+                                     "Reset brew group after hot water cancel")) {
+                this->custom_state_.stage = CustomBrewState::Stage::Cancelled;
+            }
+            break;
+        case CustomBrewState::Stage::Reset:
+            if (this->handle_command(this->run_command(JUTTA_BREW_GROUP_RESET), "Reset brew group")) {
+                this->custom_state_.stage = CustomBrewState::Stage::Done;
+            }
+            break;
+        case CustomBrewState::Stage::Done:
+            SPDLOG_INFO("Custom coffee done.");
+            this->finish_operation();
+            break;
+        case CustomBrewState::Stage::Cancelled:
+            SPDLOG_INFO("Custom coffee cancelled.");
+            this->finish_operation();
+            break;
+        case CustomBrewState::Stage::Error:
+            this->operation_failed_ = true;
+            break;
+    }
+
+    if (this->operation_failed_) {
+        SPDLOG_ERROR("Custom coffee failed.");
+        this->finish_operation();
+    }
+}
+
+bool CoffeeMaker::is_locked() const { return this->locked; }
+
+void CoffeeMaker::start_operation(OperationType operation) {
+    this->current_operation_ = operation;
+    this->operation_failed_ = false;
+    this->command_state_.reset();
+    this->hot_water_state_ = {};
+    this->locked = true;
+}
+
+void CoffeeMaker::finish_operation() {
+    this->command_state_.reset();
+    this->hot_water_state_ = {};
+    this->custom_state_.stage = CustomBrewState::Stage::Idle;
+    this->custom_state_.cancel_flag = nullptr;
+    this->brew_state_ = {};
+    this->switch_state_ = {};
+    this->current_operation_ = OperationType::Idle;
+    this->operation_failed_ = false;
+    this->locked = false;
+}
+
+void CoffeeMaker::reset_states() {
+    this->command_state_.reset();
+    this->hot_water_state_ = {};
+    this->custom_state_ = {};
+    this->brew_state_ = {};
+    this->switch_state_ = {};
+    this->current_operation_ = OperationType::Idle;
+    this->operation_failed_ = false;
+    this->locked = false;
+}
+
+bool CoffeeMaker::time_reached(uint32_t now, uint32_t target) {
+    return static_cast<int32_t>(now - target) >= 0;
 }
 
 //---------------------------------------------------------------------------

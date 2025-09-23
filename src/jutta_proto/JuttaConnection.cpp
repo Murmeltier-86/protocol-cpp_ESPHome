@@ -4,10 +4,9 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdio>
-#include <optional>
 #include <sstream>
 #include <string>
-#include <thread>
+#include "esphome/core/time.h"
 #include <spdlog/spdlog.h>
 
 //---------------------------------------------------------------------------
@@ -16,23 +15,15 @@ namespace jutta_proto {
 JuttaConnection::JuttaConnection(esphome::uart::UARTComponent* parent) : serial(parent) {}
 
 void JuttaConnection::init() {
-    actionLock.lock();
     serial.init();
-    actionLock.unlock();
 }
 
 bool JuttaConnection::read_decoded(std::vector<uint8_t>& data) {
-    actionLock.lock();
-    bool result = read_decoded_unsafe(data);
-    actionLock.unlock();
-    return result;
+    return read_decoded_unsafe(data);
 }
 
 bool JuttaConnection::read_decoded(uint8_t* byte) {
-    actionLock.lock();
-    bool result = read_decoded_unsafe(byte);
-    actionLock.unlock();
-    return result;
+    return read_decoded_unsafe(byte);
 }
 
 bool JuttaConnection::read_decoded_unsafe(uint8_t* byte) const {
@@ -90,24 +81,15 @@ bool JuttaConnection::write_decoded_unsafe(const std::string& data) const {
 }
 
 bool JuttaConnection::write_decoded(const uint8_t& byte) {
-    actionLock.lock();
-    bool result = write_decoded_unsafe(byte);
-    actionLock.unlock();
-    return result;
+    return write_decoded_unsafe(byte);
 }
 
 bool JuttaConnection::write_decoded(const std::vector<uint8_t>& data) {
-    actionLock.lock();
-    bool result = write_decoded_unsafe(data);
-    actionLock.unlock();
-    return result;
+    return write_decoded_unsafe(data);
 }
 
 bool JuttaConnection::write_decoded(const std::string& data) {
-    actionLock.lock();
-    bool result = write_decoded_unsafe(data);
-    actionLock.unlock();
-    return result;
+    return write_decoded_unsafe(data);
 }
 
 void JuttaConnection::print_byte(const uint8_t& byte) {
@@ -206,7 +188,6 @@ uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
 bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData) const {
     bool result = serial.write_serial(encData);
     serial.flush();
-    std::this_thread::sleep_for(std::chrono::milliseconds{8});
     return result;
 }
 
@@ -225,95 +206,128 @@ bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const 
 }
 
 size_t JuttaConnection::read_encoded_unsafe(std::vector<std::array<uint8_t, 4>>& data) const {
+    size_t count = 0;
     while (true) {
         std::array<uint8_t, 4> buffer{};
         if (!read_encoded_unsafe(buffer)) {
-            // Wait 100 ms for the next bunch of data to arrive:
-            std::this_thread::sleep_for(std::chrono::milliseconds{100});
-            if (!read_encoded_unsafe(buffer)) {
-                break;
-            }
-        }
-        data.push_back(buffer);
-    }
-    return data.size();
-}
-
-bool JuttaConnection::wait_for_ok(const std::chrono::milliseconds& timeout) {
-    actionLock.lock();
-    bool result = wait_for_response_unsafe("ok:\r\n", timeout);
-    actionLock.unlock();
-    return result;
-}
-
-std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const std::vector<uint8_t>& data, const std::chrono::milliseconds& timeout) {
-    std::shared_ptr<std::string> result{nullptr};
-    actionLock.lock();
-    if (write_decoded_unsafe(data)) {
-        result = wait_for_str_unsafe(timeout);
-    }
-    actionLock.unlock();
-    return result;
-}
-
-std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const std::string& data, const std::chrono::milliseconds& timeout) {
-    std::shared_ptr<std::string> result{nullptr};
-    actionLock.lock();
-    if (write_decoded_unsafe(data)) {
-        result = wait_for_str_unsafe(timeout);
-    }
-    actionLock.unlock();
-    return result;
-}
-
-std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chrono::milliseconds& timeout) const {
-    std::shared_ptr<std::string> result{nullptr};
-    std::vector<uint8_t> buffer;
-    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-    // NOLINTNEXTLINE (hicpp-use-nullptr, modernize-use-nullptr)
-    while ((timeout.count() <= 0) || ((std::chrono::steady_clock::now() - start) < timeout)) {
-        if (read_decoded_unsafe(buffer)) {
-            result = std::make_shared<std::string>(vec_to_string(buffer));
             break;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds{250});
+        data.push_back(buffer);
+        ++count;
     }
-    return result;
+    return count;
 }
 
-bool JuttaConnection::wait_for_response_unsafe(const std::string& response, const std::chrono::milliseconds& timeout) const {
-    std::vector<uint8_t> buffer;
-    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-    // NOLINTNEXTLINE (hicpp-use-nullptr, modernize-use-nullptr)
-    while ((timeout.count() <= 0) || ((std::chrono::steady_clock::now() - start) < timeout)) {
-        if (read_decoded_unsafe(buffer)) {
-            for (size_t i = 0; (buffer.size() >= response.size()) && (i < buffer.size() - (response.size() - 1)); i++) {
-                bool success = true;
-                for (size_t e = 0; e < response.size(); e++) {
-                    if (static_cast<char>(buffer[i + e]) != response[e]) {
-                        success = false;
-                        break;
-                    }
-                }
-                if (success) {
-                    return true;
-                }
-            }
-            buffer.clear();
+JuttaConnection::WaitResult JuttaConnection::wait_for_ok(const std::chrono::milliseconds& timeout) {
+    return wait_for_response_unsafe("ok:\r\n", timeout);
+}
+
+std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const std::vector<uint8_t>& data,
+                                                                         const std::chrono::milliseconds& timeout) {
+    if (!this->wait_string_context_.active) {
+        if (!write_decoded_unsafe(data)) {
+            return nullptr;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds{250});
     }
-    return false;
+    return wait_for_str_unsafe(timeout);
 }
 
-bool JuttaConnection::write_decoded_wait_for(const std::string& data, const std::string& response, const std::chrono::milliseconds& timeout) {
-    actionLock.lock();
-    bool result = write_decoded_unsafe(data);
-    if (result) {
-        result = wait_for_response_unsafe(response, timeout);
+std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const std::string& data,
+                                                                         const std::chrono::milliseconds& timeout) {
+    if (!this->wait_string_context_.active) {
+        if (!write_decoded_unsafe(data)) {
+            return nullptr;
+        }
     }
-    actionLock.unlock();
-    return result;
+    return wait_for_str_unsafe(timeout);
+}
+
+std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chrono::milliseconds& timeout) {
+    if (!this->wait_string_context_.active) {
+        this->wait_string_context_.active = true;
+        this->wait_string_context_.timeout = timeout;
+        this->wait_string_context_.start_time = esphome::millis();
+    }
+
+    std::vector<uint8_t> buffer;
+    if (read_decoded_unsafe(buffer) && !buffer.empty()) {
+        this->wait_string_context_.active = false;
+        return std::make_shared<std::string>(vec_to_string(buffer));
+    }
+
+    if (timeout.count() > 0) {
+        uint32_t now = esphome::millis();
+        uint32_t elapsed = now - this->wait_string_context_.start_time;
+        if (elapsed >= static_cast<uint32_t>(timeout.count())) {
+            this->wait_string_context_.active = false;
+        }
+    }
+
+    return nullptr;
+}
+
+JuttaConnection::WaitResult JuttaConnection::wait_for_response_unsafe(const std::string& response,
+                                                                      const std::chrono::milliseconds& timeout) {
+    if (!this->wait_context_.active || this->wait_context_.expected != response) {
+        this->wait_context_.active = true;
+        this->wait_context_.expected = response;
+        this->wait_context_.recent.clear();
+        this->wait_context_.timeout = timeout;
+        this->wait_context_.start_time = esphome::millis();
+    }
+
+    if (response.empty()) {
+        this->wait_context_.active = false;
+        this->wait_context_.recent.clear();
+        return WaitResult::Success;
+    }
+
+    if (timeout.count() > 0) {
+        uint32_t now = esphome::millis();
+        uint32_t elapsed = now - this->wait_context_.start_time;
+        if (elapsed >= static_cast<uint32_t>(timeout.count())) {
+            this->wait_context_.active = false;
+            this->wait_context_.recent.clear();
+            return WaitResult::Timeout;
+        }
+    }
+
+    std::vector<uint8_t> buffer;
+    if (read_decoded_unsafe(buffer) && !buffer.empty()) {
+        std::string incoming(buffer.begin(), buffer.end());
+        this->wait_context_.recent.append(incoming);
+        if (this->wait_context_.recent.find(response) != std::string::npos) {
+            this->wait_context_.active = false;
+            this->wait_context_.recent.clear();
+            return WaitResult::Success;
+        }
+        if (this->wait_context_.recent.size() > response.size()) {
+            this->wait_context_.recent.erase(0, this->wait_context_.recent.size() - response.size());
+        }
+    }
+
+    return WaitResult::Pending;
+}
+
+JuttaConnection::WaitResult JuttaConnection::write_decoded_wait_for(const std::vector<uint8_t>& data,
+                                                                    const std::string& response,
+                                                                    const std::chrono::milliseconds& timeout) {
+    if (!this->wait_context_.active || this->wait_context_.expected != response) {
+        if (!write_decoded_unsafe(data)) {
+            return WaitResult::Error;
+        }
+    }
+    return wait_for_response_unsafe(response, timeout);
+}
+
+JuttaConnection::WaitResult JuttaConnection::write_decoded_wait_for(const std::string& data, const std::string& response,
+                                                                    const std::chrono::milliseconds& timeout) {
+    if (!this->wait_context_.active || this->wait_context_.expected != response) {
+        if (!write_decoded_unsafe(data)) {
+            return WaitResult::Error;
+        }
+    }
+    return wait_for_response_unsafe(response, timeout);
 }
 
 std::string JuttaConnection::vec_to_string(const std::vector<uint8_t>& data) {

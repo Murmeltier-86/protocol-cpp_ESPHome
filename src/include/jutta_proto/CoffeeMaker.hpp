@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -86,9 +87,10 @@ class CoffeeMaker {
      **/
     void brew_custom_coffee(const bool* cancel, const std::chrono::milliseconds& grindTime = std::chrono::milliseconds{3600}, const std::chrono::milliseconds& waterTime = std::chrono::milliseconds{40000});
     /**
-     * Simulates a button press of the given button.
+     * Progresses the internal state machine.
+     * Has to be called regularly from the ESPHome loop.
      **/
-    void press_button(jutta_button_t button) const;
+    void loop();
 
     /**
      * Returns true in case the coffee maker is locked due to it currently interacting with the coffee maker e.g. brewing a coffee.
@@ -96,6 +98,96 @@ class CoffeeMaker {
     [[nodiscard]] bool is_locked() const;
 
  private:
+    enum class CommandResult { InProgress, Success, Timeout, Error };
+    enum class StepResult { InProgress, Done, Failed };
+    enum class OperationType { Idle, SwitchPage, BrewCoffee, BrewCustomCoffee };
+
+    struct CommandState {
+        bool active{false};
+        std::string command{};
+        uint32_t delay_ms{0};
+        uint32_t delay_target{0};
+        bool sent{false};
+        std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
+
+        void reset();
+    };
+
+    struct SwitchPageState {
+        size_t target_page{0};
+    };
+
+    struct BrewCoffeeState {
+        enum class Stage { EnsurePage, PressButton, Done } stage{Stage::EnsurePage};
+        coffee_t coffee{ESPRESSO};
+        size_t target_page{0};
+        jutta_button_t button{jutta_button_t::BUTTON_1};
+    };
+
+    struct CustomBrewState {
+        enum class Stage {
+            Idle,
+            Start,
+            GrinderOn,
+            WaitGrinding,
+            CancelGrindingReset,
+            GrinderOff,
+            MoveBrewGroup,
+            PressOn,
+            WaitCompression,
+            CancelPressOff,
+            CancelPressReset,
+            DelayAfterPress,
+            PressOff,
+            PumpOn,
+            WaitPreBrew,
+            CancelPreBrewPumpOff,
+            CancelPreBrewReset,
+            PumpOff,
+            WaitBetweenBrews,
+            CancelAfterPreBrewReset,
+            HotWaterInit,
+            HotWaterActive,
+            CancelAfterHotWaterReset,
+            Reset,
+            Done,
+            Cancelled,
+            Error
+        } stage{Stage::Idle};
+
+        const bool* cancel_flag{nullptr};
+        uint32_t grind_duration{0};
+        uint32_t water_duration{0};
+        uint32_t wait_target{0};
+    };
+
+    struct HotWaterState {
+        enum class Stage {
+            Idle,
+            PumpOn,
+            WaitPumpOn,
+            CycleStart,
+            HeaterOn,
+            WaitHeaterOn,
+            HeaterOff,
+            WaitHeaterOff,
+            PumpOff,
+            WaitPumpOff,
+            CancelHeaterOff,
+            CancelPumpOff,
+            Done,
+            Cancelled,
+            Error
+        } stage{Stage::Idle};
+
+        uint32_t end_time{0};
+        uint32_t wait_target{0};
+        uint32_t heater_on_duration{0};
+        uint32_t heater_off_duration{0};
+    };
+
+    enum class HotWaterResult { InProgress, Completed, Cancelled, Failed };
+
     /**
      * Returns the page number for the given coffee type.
      **/
@@ -105,27 +197,30 @@ class CoffeeMaker {
      * Returns the button number for the given coffee type.
      **/
     [[nodiscard]] jutta_button_t get_button_num(coffee_t coffee) const;
-    /**
-     * Writes the given string to the coffee maker and waits for an "ok:\r\n"
-     **/
-    [[nodiscard]] bool write_and_wait(const std::string& s) const;
-    /**
-     * Turns on the water pump and heater for the given amount of time.
-     * As long as cancel is set to true, the process will continue.
-     * In case it changes from true to false, the coffee maker will cancel pumping returns.
-     *
-     * Returns true in case pumping was successfull and has not returned early.
-     **/
-    bool pump_hot_water(const std::chrono::milliseconds& waterTime, const bool* cancel) const;
+    void start_operation(OperationType operation);
+    void finish_operation();
+    [[nodiscard]] static bool time_reached(uint32_t now, uint32_t target);
+    [[nodiscard]] StepResult ensure_page(size_t target_page);
+    [[nodiscard]] CommandResult run_command(const std::string& command, uint32_t delay_ms = 0,
+                                            const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
+    [[nodiscard]] CommandResult run_press_button(jutta_button_t button);
+    [[nodiscard]] bool handle_command(CommandResult result, const char* description);
+    [[nodiscard]] const std::string& command_for_button(jutta_button_t button) const;
+    void handle_switch_page();
+    void handle_brew_coffee();
+    void handle_custom_brew();
+    [[nodiscard]] bool cancel_requested() const;
+    void start_hot_water();
+    HotWaterResult run_hot_water();
+    void reset_states();
 
-    /**
-     * Tries to sleep the given amount of milliseconds before returning.
-     * In case cancel will be set to true, the sleep will return after roughly 100ms
-     * Since the check happens every <= 100ms.
-     *
-     * Returns true in case the sleep was successfull and has not returned early.
-     **/
-    static bool sleep_cancelable(const std::chrono::milliseconds& time, const bool* cancel);
+    OperationType current_operation_{OperationType::Idle};
+    SwitchPageState switch_state_{};
+    BrewCoffeeState brew_state_{};
+    CustomBrewState custom_state_{};
+    HotWaterState hot_water_state_{};
+    CommandState command_state_{};
+    bool operation_failed_{false};
 };
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto

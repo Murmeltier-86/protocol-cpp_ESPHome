@@ -158,7 +158,14 @@ int main(int /*argc*/, char** /*argv*/) {
         // Handshake:
         SPDLOG_INFO("Continuing with the handshake...");
         SPDLOG_INFO("Sending '@T1'...");
-        if (!connection.write_decoded_wait_for("@T1\r\n", "@t1\r\n")) {
+        auto wait_result = jutta_proto::JuttaConnection::WaitResult::Pending;
+        while (wait_result == jutta_proto::JuttaConnection::WaitResult::Pending) {
+            wait_result = connection.write_decoded_wait_for("@T1\r\n", "@t1\r\n");
+            if (wait_result == jutta_proto::JuttaConnection::WaitResult::Pending) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{50});
+            }
+        }
+        if (wait_result != jutta_proto::JuttaConnection::WaitResult::Success) {
             SPDLOG_WARN("Failed to receive '@t1'");
             continue;
         }

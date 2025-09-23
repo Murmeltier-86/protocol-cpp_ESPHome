@@ -3,7 +3,6 @@
 #include <array>
 #include <chrono>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -13,12 +12,10 @@
 namespace jutta_proto {
 //---------------------------------------------------------------------------
 class JuttaConnection {
+ public:
+    enum class WaitResult { Pending, Success, Timeout, Error };
+
  private:
-    /**
-     * Mutex that prevents multiple threads from accessing the serial connection at the same time.
-     * Usefull, when using 'wait_for_ok()' to prevent other threads from manipulating the result.
-     **/
-    std::mutex actionLock{};
     serial::SerialConnection serial;
 
  public:
@@ -53,11 +50,9 @@ class JuttaConnection {
      * Waits until the coffee maker responded with a "ok:\r\n".
      * The default timeout for this operation is 5 seconds.
      * To disable the timeout, set the timeout to 0 seconds.
-     * Returns true on success.
-     * Returns false when a timeout occurred.
-     * [Thread Safe]
+     * Returns the current wait status.
      **/
-    bool wait_for_ok(const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
+    WaitResult wait_for_ok(const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
     /**
      * Writes the given data to the coffee maker and then waits for the given response with an optional timeout.
      * The response has to include the "\r\n" at the end of a message.
@@ -67,7 +62,8 @@ class JuttaConnection {
      * Returns false when a timeout occurred or writing failed.
      * [Thread Safe]
      **/
-    bool write_decoded_wait_for(const std::vector<uint8_t>& data, const std::string& response, const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
+    WaitResult write_decoded_wait_for(const std::vector<uint8_t>& data, const std::string& response,
+                                      const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
     /**
      * Writes the given data to the coffee maker and then waits for the given response with an optional timeout.
      * The response has to include the "\r\n" at the end of a message.
@@ -77,7 +73,8 @@ class JuttaConnection {
      * Returns false when a timeout occurred or writing failed.
      * [Thread Safe]
      **/
-    bool write_decoded_wait_for(const std::string& data, const std::string& response, const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
+    WaitResult write_decoded_wait_for(const std::string& data, const std::string& response,
+                                      const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
 
     /**
      * Writes the given data to the coffee maker and then waits for any response with an optional timeout.
@@ -226,7 +223,8 @@ class JuttaConnection {
      * Returns false when a timeout occurred.
      * Not thread safe!
      **/
-    [[nodiscard]] bool wait_for_response_unsafe(const std::string& response, const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000}) const;
+    [[nodiscard]] WaitResult wait_for_response_unsafe(const std::string& response,
+                                                      const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
 
     /**
      * Waits for any response with an optional timeout.
@@ -235,7 +233,25 @@ class JuttaConnection {
      * Returns the string on success.
      * Not thread safe!
      **/
-    [[nodiscard]] std::shared_ptr<std::string> wait_for_str_unsafe(const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000}) const;
+    [[nodiscard]] std::shared_ptr<std::string> wait_for_str_unsafe(const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
+
+    struct WaitContext {
+        bool active{false};
+        std::string expected{};
+        std::string recent{};
+        std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
+        uint32_t start_time{0};
+    };
+
+    WaitContext wait_context_{};
+
+    struct StringWaitContext {
+        bool active{false};
+        std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
+        uint32_t start_time{0};
+    };
+
+    StringWaitContext wait_string_context_{};
 };
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto
