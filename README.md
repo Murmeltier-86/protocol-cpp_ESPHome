@@ -226,38 +226,24 @@ The following list of commands has been tested on an `Jura E6 2019 platin (15326
 * `FN:0D` # Reset the brew group and throw out the old coffee grain
 
 ## Requirements
-The following requirements are required to build this project.
-* A C++20 compatible compiler like [gcc](https://gcc.gnu.org/) or [clang](https://clang.llvm.org/)
-* The build system is written using [CMake](https://cmake.org/)
-* For managing dependencies in CMake, we are using [conan](https://conan.io/)
+This repository now focuses on the ESPHome integration of the protocol implementation. To compile the firmware and flash it to
+your ESP32 you need:
+* Python 3.9 or newer with `pip`
+* The [ESPHome CLI](https://esphome.io/guides/getting_started_command_line.html) (installable via `pip install esphome`)
+* An ESP32 development board with a free hardware UART for communicating with the coffee maker
 
-### Fedora
-To install those dependencies on Fedora, run the following commands:
-```bash
-sudo dnf install -y gcc clang cmake python3 python3-pip
-pip install --user conan==1.59.0 # conan 2.x.x is not supported right now
-```
-
-### Raspberry Pi
-To install those dependencies on a Raspberry Pi, running the [Raspberry Pi OS](https://www.raspberrypi.org/software/), run the following commands:
-```bash
-sudo apt install -y cmake python3 python3-pip
-pip3 install --user conan==1.59.0 # conan 2.x.x is not supported right now
-```
-For all the other requirements, head over here: https://github.com/Jutta-Proto/hardware-pi#raspberry-pi-os
+On Fedora, Raspberry Pi OS, or other Linux distributions install Python and the `esphome` package using your preferred package
+manager and `pip`. Refer to the [ESPHome installation guide](https://esphome.io/guides/installing_esphome.html) for
+platform-specific details.
 
 ## Building
-Run the following commands to build this project:
+Use ESPHome to build and upload the firmware. The custom component lives in `esphome/components/jutta_proto` and can either be
+copied into an existing ESPHome project or referenced via [`external_components`](https://esphome.io/components/external_components.html).
+After adding the component to your YAML configuration (see [docs/components/jutta_proto.md](docs/components/jutta_proto.md) for
+an example) run:
 ```bash
-# Clone the repository:
-git clone https://github.com/Jutta-Proto/protocol-cpp.git
-# Switch into the newly cloned repository:
-cd protocol-cpp
-# Build the project:
-mkdir build
-cd build
-cmake ..
-cmake --build .
+esphome run your_config.yaml
 ```
+ESPHome handles dependency management, compilation, and flashing of the firmware for you.
 
 `[1]`: https://uk.jura.com/en/homeproducts/accessories/SmartConnect-Main-72167
