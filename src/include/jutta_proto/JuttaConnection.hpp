@@ -24,8 +24,9 @@ class JuttaConnection {
  public:
     /**
      * Initializes a new Jutta (UART) connection.
+     * ESPHome provides the configured UART component.
      **/
-    explicit JuttaConnection(std::string&& device);
+    explicit JuttaConnection(esphome::uart::UARTComponent* parent);
 
     /**
      * Tries to initializes the Jutta serial (UART) connection.

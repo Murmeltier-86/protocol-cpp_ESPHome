@@ -142,7 +142,8 @@ int main(int /*argc*/, char** /*argv*/) {
     logger::setup_logger(spdlog::level::debug);
     SPDLOG_INFO("Starting handshake test...");
 
-    jutta_proto::JuttaConnection connection("/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A5047JSK-if00-port0");
+    // Provide the ESPHome UART component when running this executable on a device.
+    jutta_proto::JuttaConnection connection(nullptr);
     connection.init();
     while (true) {
         std::shared_ptr<std::string> coffeeMakerType = nullptr;
