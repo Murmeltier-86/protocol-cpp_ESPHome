@@ -1,11 +1,14 @@
 #include "jutta_proto/JuttaCommands.hpp"
 #include "jutta_proto/JuttaConnection.hpp"
-#include "logger/Logger.hpp"
+
+#include "esphome/core/log.h"
+#include <array>
 #include <cstdint>
 #include <string>
 #include <thread>
 #include <vector>
-#include <spdlog/spdlog.h>
+
+static const char* TAG = "handshake_test";
 
 const std::array<uint8_t, 16> disc1 = {0x08, 0x0E, 0x0C, 0x04, 0x03, 0x0D, 0x0A, 0x0B, 0x00, 0x0F, 0x06, 0x07, 0x02, 0x05, 0x01, 0x09};
 const std::array<uint8_t, 16> disc2 = {0x04, 0x0B, 0x0D, 0x0A, 0x00, 0x07, 0x0F, 0x05, 0x09, 0x08, 0x03, 0x01, 0x0E, 0x02, 0x0C, 0x06};
@@ -139,8 +142,7 @@ void test(uint8_t key) {
 }
 
 int main(int /*argc*/, char** /*argv*/) {
-    logger::setup_logger(spdlog::level::debug);
-    SPDLOG_INFO("Starting handshake test...");
+    ESP_LOGI(TAG, "Starting handshake test...");
 
     // Provide the ESPHome UART component when running this executable on a device.
     jutta_proto::JuttaConnection connection(nullptr);
@@ -153,11 +155,11 @@ int main(int /*argc*/, char** /*argv*/) {
                 std::this_thread::sleep_for(std::chrono::milliseconds{500});
             }
         }
-        SPDLOG_INFO("Found coffee maker: {}", *coffeeMakerType);
+        ESP_LOGI(TAG, "Found coffee maker: %s", coffeeMakerType->c_str());
 
         // Handshake:
-        SPDLOG_INFO("Continuing with the handshake...");
-        SPDLOG_INFO("Sending '@T1'...");
+        ESP_LOGI(TAG, "Continuing with the handshake...");
+        ESP_LOGI(TAG, "Sending '@T1'...");
         auto wait_result = jutta_proto::JuttaConnection::WaitResult::Pending;
         while (wait_result == jutta_proto::JuttaConnection::WaitResult::Pending) {
             wait_result = connection.write_decoded_wait_for("@T1\r\n", "@t1\r\n");
@@ -166,18 +168,18 @@ int main(int /*argc*/, char** /*argv*/) {
             }
         }
         if (wait_result != jutta_proto::JuttaConnection::WaitResult::Success) {
-            SPDLOG_WARN("Failed to receive '@t1'");
+            ESP_LOGW(TAG, "Failed to receive '@t1'");
             continue;
         }
 
-        SPDLOG_INFO("Waiting for '@T2:...'...");
+        ESP_LOGI(TAG, "Waiting for '@T2:...'...");
         std::vector<uint8_t> buf;
         // NOLINTNEXTLINE (abseil-string-find-str-contains)
         while (connection.vec_to_string(buf).find("@T2") == std::string::npos) {
             connection.read_decoded(buf);
         }
 
-        SPDLOG_INFO("Sending '@t2:...'...");
+        ESP_LOGI(TAG, "Sending '@t2:...'...");
         buf.clear();
         connection.write_decoded("@t2:8120000000\r\n");
         // NOLINTNEXTLINE (abseil-string-find-str-contains)
@@ -185,9 +187,9 @@ int main(int /*argc*/, char** /*argv*/) {
             connection.read_decoded(buf);
         }
 
-        SPDLOG_INFO("Sending '@t3'...");
+        ESP_LOGI(TAG, "Sending '@t3'...");
         connection.write_decoded("@t3\r\n");
-        SPDLOG_INFO("Handshake done!");
+        ESP_LOGI(TAG, "Handshake done!");
         break;
     }
 
@@ -200,10 +202,10 @@ int main(int /*argc*/, char** /*argv*/) {
             if (response[0] == '&') {
                 std::vector<uint8_t> dec1 = decode(response);
                 std::string s1 = jutta_proto::JuttaConnection::vec_to_string(dec1);
-                SPDLOG_INFO("Received1: {}", s1);
+                ESP_LOGI(TAG, "Received1: %s", s1.c_str());
                 std::vector<uint8_t> dec2 = encDecBytes(response);
                 std::string s2 = jutta_proto::JuttaConnection::vec_to_string(dec2);
-                SPDLOG_INFO("Received2: {}", s2);
+                ESP_LOGI(TAG, "Received2: %s", s2.c_str());
             }
             response.clear();
         }

@@ -6,12 +6,13 @@
 #include <cstdio>
 #include <sstream>
 #include <string>
+#include "esphome/core/log.h"
 #include "esphome/core/time.h"
-#include <spdlog/spdlog.h>
 
 //---------------------------------------------------------------------------
 namespace jutta_proto {
 //---------------------------------------------------------------------------
+static const char* TAG = "jutta_connection";
 JuttaConnection::JuttaConnection(esphome::uart::UARTComponent* parent) : serial(parent) {}
 
 void JuttaConnection::init() {
@@ -46,7 +47,8 @@ bool JuttaConnection::read_decoded_unsafe(std::vector<uint8_t>& data) const {
     for (const std::array<uint8_t, 4>& buffer : dataBuffer) {
         data.push_back(decode(buffer));
     }
-    SPDLOG_DEBUG("Read: {}", vec_to_string(data));
+    std::string decoded = vec_to_string(data);
+    ESP_LOGD(TAG, "Read: %s", decoded.c_str());
     return true;
 }
 
@@ -94,7 +96,7 @@ bool JuttaConnection::write_decoded(const std::string& data) {
 
 void JuttaConnection::print_byte(const uint8_t& byte) {
     for (size_t i = 0; i < 8; i++) {
-        SPDLOG_INFO("{} ", ((byte >> (7 - i)) & 0b00000001));
+        ESP_LOGI(TAG, "%d ", ((byte >> (7 - i)) & 0b00000001));
     }
     // printf("-> %d\t%02x\t%c", byte, byte, byte);
     printf("-> %d\t%02x", byte, byte);
@@ -112,22 +114,22 @@ void JuttaConnection::run_encode_decode_test() {
     for (uint16_t i = 0b00000000; i <= 0b11111111; i++) {
         if (i != decode(encode(i))) {
             success = false;
-            SPDLOG_ERROR("data:");
+            ESP_LOGE(TAG, "data:");
             print_byte(i);
 
             std::array<uint8_t, 4> dataEnc = encode(i);
             for (size_t i = 0; i < 4; i++) {
-                SPDLOG_ERROR("dataEnc[{}]", i);
+                ESP_LOGE(TAG, "dataEnc[%zu]", i);
                 print_byte(dataEnc.at(i));
             }
 
             uint8_t dataDec = decode(dataEnc);
-            SPDLOG_ERROR("dataDec:");
+            ESP_LOGE(TAG, "dataDec:");
             print_byte(dataDec);
         }
     }
     // Flush the stdout to ensure the result gets printed when assert(success) fails:
-    SPDLOG_INFO("Encode decode test: {}", success);
+    ESP_LOGI(TAG, "Encode decode test: %s", success ? "true" : "false");
     assert(success);
 }
 
@@ -194,14 +196,14 @@ bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData
 bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const {
     size_t size = serial.read_serial(buffer);
     if (size == 0 || size > buffer.size()) {
-        SPDLOG_TRACE("No serial data found.");
+        ESP_LOGV(TAG, "No serial data found.");
         return false;
     }
     if (size < buffer.size()) {
-        SPDLOG_WARN("Invalid amount of UART data found ({} byte) - ignoring.", size);
+        ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - ignoring.", size);
         return false;
     }
-    SPDLOG_TRACE("Read 4 encoded bytes.");
+    ESP_LOGV(TAG, "Read 4 encoded bytes.");
     return true;
 }
 

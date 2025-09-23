@@ -66,7 +66,6 @@ else()
 endif()
 
 conan_cmake_configure(REQUIRES catch2/2.13.8
-                               spdlog/1.10.0
                       GENERATORS cmake_find_package
                       BUILD missing)
 conan_cmake_autodetect(settings)
@@ -74,8 +73,6 @@ conan_cmake_install(PATH_OR_REFERENCE .
                     BUILD missing
                     REMOTE conancenter
                     SETTINGS ${settings})
-
-find_package(spdlog REQUIRED)
 
 include_directories(${CMAKE_SOURCE_DIR}/src)
 
