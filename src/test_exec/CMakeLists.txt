@@ -8,6 +8,6 @@ if(JUTTA_PROTO_BUILD_TEST_EXEC)
     set(EXECUTABLE_MAIN "handshake_test.cpp")
 
     add_executable(${EXECUTABLE_NAME} ${EXECUTABLE_MAIN})
-    target_link_libraries(${EXECUTABLE_NAME} PRIVATE logger jutta_proto)
+    target_link_libraries(${EXECUTABLE_NAME} PRIVATE jutta_proto)
     set_property(SOURCE ${EXECUTABLE_MAIN} PROPERTY COMPILE_DEFINITIONS)
 endif()

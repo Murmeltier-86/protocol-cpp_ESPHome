@@ -1,8 +1,8 @@
 #include "jutta_proto/CoffeeMaker.hpp"
 
+#include "esphome/core/log.h"
 #include "esphome/core/time.h"
 #include "jutta_proto/JuttaCommands.hpp"
-#include "logger/Logger.hpp"
 #include <cassert>
 #include <cstddef>
 #include <limits>
@@ -12,6 +12,8 @@
 //---------------------------------------------------------------------------
 namespace jutta_proto {
 //---------------------------------------------------------------------------
+
+static const char* TAG = "coffee_maker";
 
 void CoffeeMaker::CommandState::reset() {
     this->active = false;
@@ -30,7 +32,7 @@ void CoffeeMaker::switch_page() { this->switch_page((this->pageNum + 1) % NUM_PA
 
 void CoffeeMaker::switch_page(size_t pageNum) {
     if (this->locked) {
-        SPDLOG_WARN("Coffee maker busy - cannot switch page right now.");
+        ESP_LOGW(TAG, "Coffee maker busy - cannot switch page right now.");
         return;
     }
 
@@ -45,7 +47,7 @@ void CoffeeMaker::switch_page(size_t pageNum) {
 
 void CoffeeMaker::brew_coffee(coffee_t coffee) {
     if (this->locked) {
-        SPDLOG_WARN("Coffee maker busy - cannot brew new coffee right now.");
+        ESP_LOGW(TAG, "Coffee maker busy - cannot brew new coffee right now.");
         return;
     }
 
@@ -59,7 +61,7 @@ void CoffeeMaker::brew_coffee(coffee_t coffee) {
 void CoffeeMaker::brew_custom_coffee(const bool* cancel, const std::chrono::milliseconds& grindTime,
                                      const std::chrono::milliseconds& waterTime) {
     if (this->locked) {
-        SPDLOG_WARN("Coffee maker busy - cannot brew custom coffee right now.");
+        ESP_LOGW(TAG, "Coffee maker busy - cannot brew custom coffee right now.");
         return;
     }
 
@@ -69,8 +71,8 @@ void CoffeeMaker::brew_custom_coffee(const bool* cancel, const std::chrono::mill
     this->custom_state_.wait_target = 0;
     this->custom_state_.stage = CustomBrewState::Stage::Start;
 
-    SPDLOG_INFO("Brewing custom coffee with {} ms grind time and {} ms ms water time...",
-                std::to_string(grindTime.count()), std::to_string(waterTime.count()));
+    ESP_LOGI(TAG, "Brewing custom coffee with %lld ms grind time and %lld ms water time...",
+             static_cast<long long>(grindTime.count()), static_cast<long long>(waterTime.count()));
 
     this->start_operation(OperationType::BrewCustomCoffee);
 }
@@ -185,11 +187,11 @@ bool CoffeeMaker::handle_command(CommandResult result, const char* description) 
         case CommandResult::Success:
             return true;
         case CommandResult::Timeout:
-            SPDLOG_WARN("{} timed out.", description);
+            ESP_LOGW(TAG, "%s timed out.", description);
             this->operation_failed_ = true;
             return false;
         case CommandResult::Error:
-            SPDLOG_ERROR("{} failed.", description);
+            ESP_LOGE(TAG, "%s failed.", description);
             this->operation_failed_ = true;
             return false;
     }
@@ -394,7 +396,7 @@ void CoffeeMaker::handle_custom_brew() {
             this->finish_operation();
             return;
         case CustomBrewState::Stage::Start:
-            SPDLOG_INFO("Custom coffee grinding...");
+            ESP_LOGI(TAG, "Custom coffee grinding...");
             this->custom_state_.stage = CustomBrewState::Stage::GrinderOn;
             break;
         case CustomBrewState::Stage::GrinderOn: {
@@ -426,7 +428,7 @@ void CoffeeMaker::handle_custom_brew() {
         case CustomBrewState::Stage::MoveBrewGroup:
             if (this->handle_command(this->run_command(JUTTA_BREW_GROUP_TO_BREWING_POSITION),
                                      "Moving brew group")) {
-                SPDLOG_INFO("Custom coffee compressing...");
+                ESP_LOGI(TAG, "Custom coffee compressing...");
                 this->custom_state_.stage = CustomBrewState::Stage::PressOn;
             }
             break;
@@ -463,7 +465,7 @@ void CoffeeMaker::handle_custom_brew() {
             break;
         case CustomBrewState::Stage::PressOff:
             if (this->handle_command(this->run_command(JUTTA_COFFEE_PRESS_OFF), "Turning coffee press off")) {
-                SPDLOG_INFO("Custom coffee brewing...");
+                ESP_LOGI(TAG, "Custom coffee brewing...");
                 this->custom_state_.stage = CustomBrewState::Stage::PumpOn;
             }
             break;
@@ -518,7 +520,7 @@ void CoffeeMaker::handle_custom_brew() {
         case CustomBrewState::Stage::HotWaterActive: {
             HotWaterResult hw_result = this->run_hot_water();
             if (hw_result == HotWaterResult::Completed) {
-                SPDLOG_INFO("Custom coffee finishing up...");
+                ESP_LOGI(TAG, "Custom coffee finishing up...");
                 this->custom_state_.stage = CustomBrewState::Stage::Reset;
             } else if (hw_result == HotWaterResult::Cancelled) {
                 this->custom_state_.stage = CustomBrewState::Stage::CancelAfterHotWaterReset;
@@ -539,11 +541,11 @@ void CoffeeMaker::handle_custom_brew() {
             }
             break;
         case CustomBrewState::Stage::Done:
-            SPDLOG_INFO("Custom coffee done.");
+            ESP_LOGI(TAG, "Custom coffee done.");
             this->finish_operation();
             break;
         case CustomBrewState::Stage::Cancelled:
-            SPDLOG_INFO("Custom coffee cancelled.");
+            ESP_LOGI(TAG, "Custom coffee cancelled.");
             this->finish_operation();
             break;
         case CustomBrewState::Stage::Error:
@@ -552,7 +554,7 @@ void CoffeeMaker::handle_custom_brew() {
     }
 
     if (this->operation_failed_) {
-        SPDLOG_ERROR("Custom coffee failed.");
+        ESP_LOGE(TAG, "Custom coffee failed.");
         this->finish_operation();
     }
 }
