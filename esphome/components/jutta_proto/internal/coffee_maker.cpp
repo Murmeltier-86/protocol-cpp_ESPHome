@@ -1,8 +1,8 @@
-#include "jutta_proto/CoffeeMaker.hpp"
+#include "coffee_maker.hpp"
 
 #include "esphome/core/log.h"
 #include "esphome/core/time.h"
-#include "jutta_proto/JuttaCommands.hpp"
+#include "jutta_commands.hpp"
 #include <cassert>
 #include <cstddef>
 #include <limits>

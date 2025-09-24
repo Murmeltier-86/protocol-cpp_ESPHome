@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "JuttaConnection.hpp"
+#include "jutta_connection.hpp"
 
 //---------------------------------------------------------------------------
 namespace jutta_proto {
