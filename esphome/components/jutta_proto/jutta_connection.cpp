@@ -29,6 +29,11 @@ bool JuttaConnection::read_decoded(uint8_t* byte) {
 }
 
 bool JuttaConnection::read_decoded_unsafe(uint8_t* byte) const {
+    if (!this->decoded_rx_buffer_.empty()) {
+        *byte = this->decoded_rx_buffer_.front();
+        this->decoded_rx_buffer_.pop_front();
+        return true;
+    }
     std::array<uint8_t, 4> buffer{};
     if (!read_encoded_unsafe(buffer)) {
         return false;
@@ -38,19 +43,31 @@ bool JuttaConnection::read_decoded_unsafe(uint8_t* byte) const {
 }
 
 bool JuttaConnection::read_decoded_unsafe(std::vector<uint8_t>& data) const {
+    bool got_any = false;
+    if (!this->decoded_rx_buffer_.empty()) {
+        data.insert(data.end(), this->decoded_rx_buffer_.begin(), this->decoded_rx_buffer_.end());
+        this->decoded_rx_buffer_.clear();
+        got_any = true;
+    }
+
     // Read encoded data:
     std::vector<std::array<uint8_t, 4>> dataBuffer;
     if (read_encoded_unsafe(dataBuffer) <= 0) {
-        return false;
+        if (got_any && !data.empty()) {
+            std::string decoded = vec_to_string(data);
+            ESP_LOGD(TAG, "Read: %s", decoded.c_str());
+        }
+        return got_any;
     }
 
     // Decode all:
     for (const std::array<uint8_t, 4>& buffer : dataBuffer) {
         data.push_back(decode(buffer));
     }
+    got_any = true;
     std::string decoded = vec_to_string(data);
     ESP_LOGD(TAG, "Read: %s", decoded.c_str());
-    return true;
+    return got_any;
 }
 
 bool JuttaConnection::write_decoded_unsafe(const uint8_t& byte) const {
@@ -209,6 +226,7 @@ bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const 
             ESP_LOGV(TAG, "No serial data found.");
             return false;
         }
+
     }
 
     if (this->encoded_rx_buffer_.size() < buffer.size()) {
@@ -293,7 +311,7 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         std::string result = this->wait_string_context_.buffer.substr(0, newline_pos + 2);
         std::string remainder = this->wait_string_context_.buffer.substr(newline_pos + 2);
         if (!remainder.empty()) {
-            this->reinject_decoded_front(remainder);
+            this->decoded_rx_buffer_.insert(this->decoded_rx_buffer_.end(), remainder.begin(), remainder.end());
         }
         this->wait_string_context_.buffer.clear();
         this->wait_string_context_.active = false;
@@ -305,7 +323,9 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         uint32_t elapsed = now - this->wait_string_context_.start_time;
         if (elapsed >= static_cast<uint32_t>(timeout.count())) {
             if (!this->wait_string_context_.buffer.empty()) {
-                this->reinject_decoded_front(this->wait_string_context_.buffer);
+                this->decoded_rx_buffer_.insert(this->decoded_rx_buffer_.end(),
+                                                this->wait_string_context_.buffer.begin(),
+                                                this->wait_string_context_.buffer.end());
                 this->wait_string_context_.buffer.clear();
             }
             this->wait_string_context_.active = false;
