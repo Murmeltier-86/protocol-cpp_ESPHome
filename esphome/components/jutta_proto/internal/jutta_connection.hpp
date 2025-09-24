@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "serial/SerialConnection.hpp"
+#include "serial/serial_connection.hpp"
 
 //---------------------------------------------------------------------------
 namespace jutta_proto {

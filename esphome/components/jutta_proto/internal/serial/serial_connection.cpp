@@ -1,4 +1,4 @@
-#include "serial/SerialConnection.hpp"
+#include "serial_connection.hpp"
 
 #include "esphome/core/log.h"
 #include <array>

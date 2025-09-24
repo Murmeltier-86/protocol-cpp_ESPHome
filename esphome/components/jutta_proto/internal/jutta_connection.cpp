@@ -1,4 +1,4 @@
-#include "jutta_proto/JuttaConnection.hpp"
+#include "jutta_connection.hpp"
 
 #include <algorithm>
 #include <cassert>
