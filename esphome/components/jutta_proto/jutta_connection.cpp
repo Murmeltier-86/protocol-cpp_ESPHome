@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <sstream>
 #include <string>
+#include <utility>
 #include "esphome/core/log.h"
 #include "esphome/core/time.h"
 
@@ -194,15 +195,29 @@ bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData
 }
 
 bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const {
-    size_t size = serial.read_serial(buffer);
-    if (size == 0 || size > buffer.size()) {
-        ESP_LOGV(TAG, "No serial data found.");
+    if (this->encoded_rx_buffer_.size() < buffer.size()) {
+        std::array<uint8_t, 4> chunk{};
+        size_t size = serial.read_serial(chunk);
+        if (size > chunk.size()) {
+            ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - ignoring.", size);
+            size = chunk.size();
+        }
+
+        if (size > 0) {
+            this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + size);
+        } else if (this->encoded_rx_buffer_.empty()) {
+            ESP_LOGV(TAG, "No serial data found.");
+            return false;
+        }
+    }
+
+    if (this->encoded_rx_buffer_.size() < buffer.size()) {
         return false;
     }
-    if (size < buffer.size()) {
-        ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - ignoring.", size);
-        return false;
-    }
+
+    std::copy_n(this->encoded_rx_buffer_.begin(), buffer.size(), buffer.begin());
+    this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin(),
+                                   this->encoded_rx_buffer_.begin() + buffer.size());
     ESP_LOGV(TAG, "Read 4 encoded bytes.");
     return true;
 }
@@ -218,6 +233,22 @@ size_t JuttaConnection::read_encoded_unsafe(std::vector<std::array<uint8_t, 4>>&
         ++count;
     }
     return count;
+}
+
+void JuttaConnection::reinject_decoded_front(const std::string& data) const {
+    if (data.empty()) {
+        return;
+    }
+
+    std::vector<uint8_t> encoded;
+    encoded.reserve(data.size() * 4);
+    for (char c : data) {
+        auto enc = encode(static_cast<uint8_t>(static_cast<unsigned char>(c)));
+        encoded.insert(encoded.end(), enc.begin(), enc.end());
+    }
+
+    this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.begin(), encoded.begin(), encoded.end());
+    ESP_LOGV(TAG, "Re-injected %zu decoded bytes.", data.size());
 }
 
 JuttaConnection::WaitResult JuttaConnection::wait_for_ok(const std::chrono::milliseconds& timeout) {
@@ -249,18 +280,34 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         this->wait_string_context_.active = true;
         this->wait_string_context_.timeout = timeout;
         this->wait_string_context_.start_time = esphome::millis();
+        this->wait_string_context_.buffer.clear();
     }
 
     std::vector<uint8_t> buffer;
     if (read_decoded_unsafe(buffer) && !buffer.empty()) {
+        this->wait_string_context_.buffer.append(buffer.begin(), buffer.end());
+    }
+
+    auto newline_pos = this->wait_string_context_.buffer.find("\r\n");
+    if (newline_pos != std::string::npos) {
+        std::string result = this->wait_string_context_.buffer.substr(0, newline_pos + 2);
+        std::string remainder = this->wait_string_context_.buffer.substr(newline_pos + 2);
+        if (!remainder.empty()) {
+            this->reinject_decoded_front(remainder);
+        }
+        this->wait_string_context_.buffer.clear();
         this->wait_string_context_.active = false;
-        return std::make_shared<std::string>(vec_to_string(buffer));
+        return std::make_shared<std::string>(std::move(result));
     }
 
     if (timeout.count() > 0) {
         uint32_t now = esphome::millis();
         uint32_t elapsed = now - this->wait_string_context_.start_time;
         if (elapsed >= static_cast<uint32_t>(timeout.count())) {
+            if (!this->wait_string_context_.buffer.empty()) {
+                this->reinject_decoded_front(this->wait_string_context_.buffer);
+                this->wait_string_context_.buffer.clear();
+            }
             this->wait_string_context_.active = false;
         }
     }
