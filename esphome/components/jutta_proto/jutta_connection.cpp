@@ -245,16 +245,12 @@ uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
 }
 
 bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData) const {
-    bool result = true;
-    for (uint8_t byte : encData) {
-        if (!serial.write_serial_byte(byte)) {
-            result = false;
-            break;
-        }
-        serial.flush();
-        wait_for_jutta_gap();
+    if (!serial.write_serial(encData)) {
+        return false;
     }
-    return result;
+    serial.flush();
+    wait_for_jutta_gap();
+    return true;
 }
 
 bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const {
