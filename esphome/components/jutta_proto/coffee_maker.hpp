@@ -224,6 +224,17 @@ class CoffeeMaker {
     CommandState command_state_{};
     bool operation_failed_{false};
 };
+
+// Backwards-compatible aliases for generated ESPHome code that still references
+// the original unscoped enumerator names.
+inline constexpr CoffeeMaker::coffee_t ESPRESSO = CoffeeMaker::coffee_t::ESPRESSO;
+inline constexpr CoffeeMaker::coffee_t COFFEE = CoffeeMaker::coffee_t::COFFEE;
+inline constexpr CoffeeMaker::coffee_t CAPPUCCINO = CoffeeMaker::coffee_t::CAPPUCCINO;
+inline constexpr CoffeeMaker::coffee_t MILK_FOAM = CoffeeMaker::coffee_t::MILK_FOAM;
+inline constexpr CoffeeMaker::coffee_t CAFFE_BARISTA = CoffeeMaker::coffee_t::CAFFE_BARISTA;
+inline constexpr CoffeeMaker::coffee_t LUNGO_BARISTA = CoffeeMaker::coffee_t::LUNGO_BARISTA;
+inline constexpr CoffeeMaker::coffee_t ESPRESSO_DOPPIO = CoffeeMaker::coffee_t::ESPRESSO_DOPPIO;
+inline constexpr CoffeeMaker::coffee_t MACCHIATO = CoffeeMaker::coffee_t::MACCHIATO;
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto
 //---------------------------------------------------------------------------
