@@ -19,7 +19,6 @@ namespace {
 constexpr uint32_t JUTTA_SERIAL_GAP_MS = 8;
 constexpr uint8_t JUTTA_BYTE_MASK = 0x7F;
 
-
 inline void wait_for_jutta_gap() {
     const uint32_t start = esphome::millis();
     while (esphome::millis() - start < JUTTA_SERIAL_GAP_MS) {
@@ -245,12 +244,16 @@ uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
 }
 
 bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData) const {
-    if (!serial.write_serial(encData)) {
-        return false;
+    bool result = true;
+    for (uint8_t byte : encData) {
+        if (!serial.write_serial_byte(byte)) {
+            result = false;
+            break;
+        }
+        serial.flush();
+        wait_for_jutta_gap();
     }
-    serial.flush();
-    wait_for_jutta_gap();
-    return true;
+    return result;
 }
 
 bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const {
@@ -295,7 +298,6 @@ bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const 
         }
 
         this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + size);
-
     }
 
     if (this->encoded_rx_buffer_.size() < buffer.size()) {
@@ -321,7 +323,6 @@ size_t JuttaConnection::read_encoded_unsafe(std::vector<std::array<uint8_t, 4>>&
     }
     return count;
 }
-
 
 bool JuttaConnection::align_encoded_rx_buffer() const {
     size_t skipped = 0;
@@ -373,7 +374,6 @@ bool JuttaConnection::align_encoded_rx_buffer() const {
         ++skipped;
     }
 }
-
 
 void JuttaConnection::flush_serial_input() const {
     this->encoded_rx_buffer_.clear();
