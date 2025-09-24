@@ -12,7 +12,7 @@ CONF_GRIND_DURATION = "grind_duration"
 CONF_WATER_DURATION = "water_duration"
 CONF_PAGE = "page"
 
-jutta_component_ns = cg.esphome_ns.namespace("esphome").namespace("jutta_proto")
+jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
 
 JuraComponent = jutta_component_ns.class_(

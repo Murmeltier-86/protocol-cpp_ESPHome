@@ -5,7 +5,7 @@
 #include "esphome/core/time.h"
 
 namespace esphome {
-namespace jutta_proto {
+namespace jutta_component {
 
 static const char *const TAG = "jutta_proto";
 
@@ -280,6 +280,6 @@ bool JuraComponent::is_busy() const {
   return this->coffee_maker_->is_locked();
 }
 
-}  // namespace jutta_proto
+}  // namespace jutta_component
 }  // namespace esphome
 
