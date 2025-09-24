@@ -194,15 +194,27 @@ bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData
 }
 
 bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const {
-    size_t size = serial.read_serial(buffer);
-    if (size == 0 || size > buffer.size()) {
+    std::array<uint8_t, 4> chunk{};
+    size_t size = serial.read_serial(chunk);
+    if (size > chunk.size()) {
+        ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - ignoring.", size);
+        size = chunk.size();
+    }
+
+    if (size > 0) {
+        this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + size);
+    } else if (this->encoded_rx_buffer_.empty()) {
         ESP_LOGV(TAG, "No serial data found.");
         return false;
     }
-    if (size < buffer.size()) {
-        ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - ignoring.", size);
+
+    if (this->encoded_rx_buffer_.size() < buffer.size()) {
         return false;
     }
+
+    std::copy_n(this->encoded_rx_buffer_.begin(), buffer.size(), buffer.begin());
+    this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin(),
+                                   this->encoded_rx_buffer_.begin() + buffer.size());
     ESP_LOGV(TAG, "Read 4 encoded bytes.");
     return true;
 }

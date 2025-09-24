@@ -17,14 +17,16 @@ class CoffeeMaker {
     /**
      * All available coffee types.
      **/
-    enum coffee_t { ESPRESSO = 0,
-                    COFFEE = 1,
-                    CAPPUCCINO = 2,
-                    MILK_FOAM = 3,
-                    CAFFE_BARISTA = 4,
-                    LUNGO_BARISTA = 5,
-                    ESPRESSO_DOPPIO = 6,
-                    MACCHIATO = 7 };
+    enum class coffee_t : uint8_t {
+        ESPRESSO = 0,
+        COFFEE = 1,
+        CAPPUCCINO = 2,
+        MILK_FOAM = 3,
+        CAFFE_BARISTA = 4,
+        LUNGO_BARISTA = 5,
+        ESPRESSO_DOPPIO = 6,
+        MACCHIATO = 7,
+    };
     enum jutta_button_t {
         BUTTON_1 = 1,
         BUTTON_2 = 2,
@@ -119,7 +121,7 @@ class CoffeeMaker {
 
     struct BrewCoffeeState {
         enum class Stage { EnsurePage, PressButton, Done } stage{Stage::EnsurePage};
-        coffee_t coffee{ESPRESSO};
+        coffee_t coffee{coffee_t::ESPRESSO};
         size_t target_page{0};
         jutta_button_t button{jutta_button_t::BUTTON_1};
     };
@@ -222,6 +224,17 @@ class CoffeeMaker {
     CommandState command_state_{};
     bool operation_failed_{false};
 };
+
+// Backwards-compatible aliases for generated ESPHome code that still references
+// the original unscoped enumerator names.
+inline constexpr CoffeeMaker::coffee_t ESPRESSO = CoffeeMaker::coffee_t::ESPRESSO;
+inline constexpr CoffeeMaker::coffee_t COFFEE = CoffeeMaker::coffee_t::COFFEE;
+inline constexpr CoffeeMaker::coffee_t CAPPUCCINO = CoffeeMaker::coffee_t::CAPPUCCINO;
+inline constexpr CoffeeMaker::coffee_t MILK_FOAM = CoffeeMaker::coffee_t::MILK_FOAM;
+inline constexpr CoffeeMaker::coffee_t CAFFE_BARISTA = CoffeeMaker::coffee_t::CAFFE_BARISTA;
+inline constexpr CoffeeMaker::coffee_t LUNGO_BARISTA = CoffeeMaker::coffee_t::LUNGO_BARISTA;
+inline constexpr CoffeeMaker::coffee_t ESPRESSO_DOPPIO = CoffeeMaker::coffee_t::ESPRESSO_DOPPIO;
+inline constexpr CoffeeMaker::coffee_t MACCHIATO = CoffeeMaker::coffee_t::MACCHIATO;
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto
 //---------------------------------------------------------------------------
