@@ -216,7 +216,9 @@ CoffeeMaker::StepResult CoffeeMaker::ensure_page(size_t target_page) {
         return StepResult::InProgress;
     }
 
-    this->handle_command(result, "Switching page");
+    if (this->handle_command(result, "Switching page")) {
+        return StepResult::InProgress;
+    }
     return StepResult::Failed;
 }
 
