@@ -10,9 +10,9 @@
 #include "esphome/core/log.h"
 #include "esphome/components/uart/uart.h"
 
-#include "internal/coffee_maker.hpp"
-#include "internal/jutta_connection.hpp"
-#include "internal/jutta_commands.hpp"
+#include "coffee_maker.hpp"
+#include "jutta_connection.hpp"
+#include "jutta_commands.hpp"
 
 namespace esphome {
 namespace jutta_proto {
