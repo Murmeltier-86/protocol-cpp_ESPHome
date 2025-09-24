@@ -15,7 +15,7 @@
 #include "jutta_commands.hpp"
 
 namespace esphome {
-namespace jutta_proto {
+namespace jutta_component {
 
 class JuraComponent : public esphome::Component, public esphome::uart::UARTDevice {
  public:
@@ -95,6 +95,6 @@ class SwitchPageAction : public esphome::Action<> {
   uint32_t page_{0};
 };
 
-}  // namespace jutta_proto
+}  // namespace jutta_component
 }  // namespace esphome
 
