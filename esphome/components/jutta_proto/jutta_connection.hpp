@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -249,6 +250,7 @@ class JuttaConnection {
         bool active{false};
         std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
         uint32_t start_time{0};
+        std::string buffer{};
     };
 
     StringWaitContext wait_string_context_{};
@@ -256,6 +258,7 @@ class JuttaConnection {
     // Buffer of partially received encoded bytes that haven't formed a full
     // decoded data byte yet.
     mutable std::vector<uint8_t> encoded_rx_buffer_{};
+
 };
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto

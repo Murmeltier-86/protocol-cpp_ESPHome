@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <sstream>
 #include <string>
+#include <utility>
 #include "esphome/core/log.h"
 #include "esphome/core/time.h"
 
@@ -28,6 +29,11 @@ bool JuttaConnection::read_decoded(uint8_t* byte) {
 }
 
 bool JuttaConnection::read_decoded_unsafe(uint8_t* byte) const {
+    if (!this->decoded_rx_buffer_.empty()) {
+        *byte = this->decoded_rx_buffer_.front();
+        this->decoded_rx_buffer_.pop_front();
+        return true;
+    }
     std::array<uint8_t, 4> buffer{};
     if (!read_encoded_unsafe(buffer)) {
         return false;
@@ -37,19 +43,31 @@ bool JuttaConnection::read_decoded_unsafe(uint8_t* byte) const {
 }
 
 bool JuttaConnection::read_decoded_unsafe(std::vector<uint8_t>& data) const {
+    bool got_any = false;
+    if (!this->decoded_rx_buffer_.empty()) {
+        data.insert(data.end(), this->decoded_rx_buffer_.begin(), this->decoded_rx_buffer_.end());
+        this->decoded_rx_buffer_.clear();
+        got_any = true;
+    }
+
     // Read encoded data:
     std::vector<std::array<uint8_t, 4>> dataBuffer;
     if (read_encoded_unsafe(dataBuffer) <= 0) {
-        return false;
+        if (got_any && !data.empty()) {
+            std::string decoded = vec_to_string(data);
+            ESP_LOGD(TAG, "Read: %s", decoded.c_str());
+        }
+        return got_any;
     }
 
     // Decode all:
     for (const std::array<uint8_t, 4>& buffer : dataBuffer) {
         data.push_back(decode(buffer));
     }
+    got_any = true;
     std::string decoded = vec_to_string(data);
     ESP_LOGD(TAG, "Read: %s", decoded.c_str());
-    return true;
+    return got_any;
 }
 
 bool JuttaConnection::write_decoded_unsafe(const uint8_t& byte) const {
@@ -194,18 +212,21 @@ bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData
 }
 
 bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const {
-    std::array<uint8_t, 4> chunk{};
-    size_t size = serial.read_serial(chunk);
-    if (size > chunk.size()) {
-        ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - ignoring.", size);
-        size = chunk.size();
-    }
+    if (this->encoded_rx_buffer_.size() < buffer.size()) {
+        std::array<uint8_t, 4> chunk{};
+        size_t size = serial.read_serial(chunk);
+        if (size > chunk.size()) {
+            ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - ignoring.", size);
+            size = chunk.size();
+        }
 
-    if (size > 0) {
-        this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + size);
-    } else if (this->encoded_rx_buffer_.empty()) {
-        ESP_LOGV(TAG, "No serial data found.");
-        return false;
+        if (size > 0) {
+            this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + size);
+        } else if (this->encoded_rx_buffer_.empty()) {
+            ESP_LOGV(TAG, "No serial data found.");
+            return false;
+        }
+
     }
 
     if (this->encoded_rx_buffer_.size() < buffer.size()) {
@@ -261,18 +282,36 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         this->wait_string_context_.active = true;
         this->wait_string_context_.timeout = timeout;
         this->wait_string_context_.start_time = esphome::millis();
+        this->wait_string_context_.buffer.clear();
     }
 
     std::vector<uint8_t> buffer;
     if (read_decoded_unsafe(buffer) && !buffer.empty()) {
+        this->wait_string_context_.buffer.append(buffer.begin(), buffer.end());
+    }
+
+    auto newline_pos = this->wait_string_context_.buffer.find("\r\n");
+    if (newline_pos != std::string::npos) {
+        std::string result = this->wait_string_context_.buffer.substr(0, newline_pos + 2);
+        std::string remainder = this->wait_string_context_.buffer.substr(newline_pos + 2);
+        if (!remainder.empty()) {
+            this->decoded_rx_buffer_.insert(this->decoded_rx_buffer_.end(), remainder.begin(), remainder.end());
+        }
+        this->wait_string_context_.buffer.clear();
         this->wait_string_context_.active = false;
-        return std::make_shared<std::string>(vec_to_string(buffer));
+        return std::make_shared<std::string>(std::move(result));
     }
 
     if (timeout.count() > 0) {
         uint32_t now = esphome::millis();
         uint32_t elapsed = now - this->wait_string_context_.start_time;
         if (elapsed >= static_cast<uint32_t>(timeout.count())) {
+            if (!this->wait_string_context_.buffer.empty()) {
+                this->decoded_rx_buffer_.insert(this->decoded_rx_buffer_.end(),
+                                                this->wait_string_context_.buffer.begin(),
+                                                this->wait_string_context_.buffer.end());
+                this->wait_string_context_.buffer.clear();
+            }
             this->wait_string_context_.active = false;
         }
     }
