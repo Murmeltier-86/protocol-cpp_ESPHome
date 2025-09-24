@@ -38,6 +38,16 @@ bool SerialConnection::write_serial(const std::array<uint8_t, 4>& data) const {
     return true;
 }
 
+bool SerialConnection::write_serial_byte(uint8_t byte) const {
+    if (this->parent_ == nullptr) {
+        ESP_LOGE(TAG, "UART component not configured for serial connection.");
+        return false;
+    }
+    auto* self = const_cast<SerialConnection*>(this);
+    self->write_byte(byte);
+    return true;
+}
+
 void SerialConnection::flush() const {
     if (this->parent_ != nullptr) {
         this->parent_->flush();
