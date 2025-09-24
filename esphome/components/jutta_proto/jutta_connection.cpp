@@ -245,14 +245,10 @@ uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
 }
 
 bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData) const {
-    for (size_t i = 0; i < encData.size(); ++i) {
-        if (!serial.write_serial_byte(encData[i])) {
-            return false;
-        }
-        serial.flush();
-        wait_for_jutta_gap();
-    }
-    return true;
+    bool result = serial.write_serial(encData);
+    serial.flush();
+    wait_for_jutta_gap();
+    return result;
 }
 
 bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const {
@@ -280,6 +276,11 @@ bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const 
         }
     }
 
+    if (!this->encoded_rx_buffer_.empty() && (this->encoded_rx_buffer_.size() % buffer.size()) != 0) {
+        ESP_LOGW(TAG, "Discarding %zu stray encoded bytes.", this->encoded_rx_buffer_.size());
+        flush_serial_input();
+    }
+
     if (this->encoded_rx_buffer_.size() < buffer.size()) {
         wait_for_jutta_gap();
         std::array<uint8_t, 4> chunk{};
@@ -297,8 +298,9 @@ bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const 
         }
 
         if (size < chunk.size()) {
-            ESP_LOGV(TAG, "Received %zu encoded byte%s - waiting for completion.", size,
-                     size == 1 ? "" : "s");
+            ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - flushing.", size);
+            flush_serial_input();
+            return false;
         }
 
         this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + size);
