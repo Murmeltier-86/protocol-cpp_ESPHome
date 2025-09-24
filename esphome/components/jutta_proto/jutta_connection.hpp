@@ -252,6 +252,10 @@ class JuttaConnection {
     };
 
     StringWaitContext wait_string_context_{};
+
+    // Buffer of partially received encoded bytes that haven't formed a full
+    // decoded data byte yet.
+    mutable std::vector<uint8_t> encoded_rx_buffer_{};
 };
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto
