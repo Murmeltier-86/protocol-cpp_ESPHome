@@ -274,7 +274,8 @@ bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const 
         if (!align_encoded_rx_buffer()) {
             return false;
         }
-      
+    }
+
     if (!this->encoded_rx_buffer_.empty() && (this->encoded_rx_buffer_.size() % buffer.size()) != 0) {
         ESP_LOGW(TAG, "Discarding %zu stray encoded bytes.", this->encoded_rx_buffer_.size());
         flush_serial_input();
