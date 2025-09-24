@@ -253,6 +253,22 @@ size_t JuttaConnection::read_encoded_unsafe(std::vector<std::array<uint8_t, 4>>&
     return count;
 }
 
+void JuttaConnection::reinject_decoded_front(const std::string& data) const {
+    if (data.empty()) {
+        return;
+    }
+
+    std::vector<uint8_t> encoded;
+    encoded.reserve(data.size() * 4);
+    for (char c : data) {
+        auto enc = encode(static_cast<uint8_t>(static_cast<unsigned char>(c)));
+        encoded.insert(encoded.end(), enc.begin(), enc.end());
+    }
+
+    this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.begin(), encoded.begin(), encoded.end());
+    ESP_LOGV(TAG, "Re-injected %zu decoded bytes.", data.size());
+}
+
 JuttaConnection::WaitResult JuttaConnection::wait_for_ok(const std::chrono::milliseconds& timeout) {
     return wait_for_response_unsafe("ok:\r\n", timeout);
 }

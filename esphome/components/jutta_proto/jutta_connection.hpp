@@ -259,6 +259,9 @@ class JuttaConnection {
     // decoded data byte yet.
     mutable std::vector<uint8_t> encoded_rx_buffer_{};
 
+
+    void reinject_decoded_front(const std::string& data) const;
+
 };
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto
