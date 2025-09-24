@@ -305,12 +305,13 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         uint32_t now = esphome::millis();
         uint32_t elapsed = now - this->wait_string_context_.start_time;
         if (elapsed >= static_cast<uint32_t>(timeout.count())) {
-            this->wait_string_context_.active = false;
             if (!this->wait_string_context_.buffer.empty()) {
-                std::string partial = std::move(this->wait_string_context_.buffer);
+                this->decoded_rx_buffer_.insert(this->decoded_rx_buffer_.end(),
+                                                this->wait_string_context_.buffer.begin(),
+                                                this->wait_string_context_.buffer.end());
                 this->wait_string_context_.buffer.clear();
-                return std::make_shared<std::string>(std::move(partial));
             }
+            this->wait_string_context_.active = false;
         }
     }
 
