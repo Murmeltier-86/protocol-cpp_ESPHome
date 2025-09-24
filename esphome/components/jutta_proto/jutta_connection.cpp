@@ -226,6 +226,7 @@ bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const 
             ESP_LOGV(TAG, "No serial data found.");
             return false;
         }
+
     }
 
     if (this->encoded_rx_buffer_.size() < buffer.size()) {

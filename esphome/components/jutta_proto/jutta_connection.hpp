@@ -258,9 +258,7 @@ class JuttaConnection {
     // Buffer of partially received encoded bytes that haven't formed a full
     // decoded data byte yet.
     mutable std::vector<uint8_t> encoded_rx_buffer_{};
-    // Buffer of decoded bytes that were produced while fulfilling one wait
-    // context but belong to the next consumer.
-    mutable std::deque<uint8_t> decoded_rx_buffer_{};
+
 };
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto
