@@ -259,6 +259,8 @@ class JuttaConnection {
     // decoded data byte yet.
     mutable std::vector<uint8_t> encoded_rx_buffer_{};
 
+    // Buffer for decoded bytes that were read ahead of the consumer.
+    mutable std::deque<uint8_t> decoded_rx_buffer_{};
 
     void reinject_decoded_front(const std::string& data) const;
 
