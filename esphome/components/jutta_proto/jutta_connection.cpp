@@ -19,6 +19,7 @@ namespace {
 constexpr uint32_t JUTTA_SERIAL_GAP_MS = 8;
 constexpr uint8_t JUTTA_BYTE_MASK = 0x7F;
 
+
 inline void wait_for_jutta_gap() {
     const uint32_t start = esphome::millis();
     while (esphome::millis() - start < JUTTA_SERIAL_GAP_MS) {
@@ -50,6 +51,7 @@ inline bool frames_equivalent(const std::array<uint8_t, 4>& lhs, const std::arra
     }
     return true;
 }
+
 }  // namespace
 JuttaConnection::JuttaConnection(esphome::uart::UARTComponent* parent) : serial(parent) {}
 
@@ -250,6 +252,7 @@ bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData
 }
 
 bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const {
+
     if (!align_encoded_rx_buffer()) {
         if (this->encoded_rx_buffer_.size() < buffer.size()) {
             wait_for_jutta_gap();
@@ -271,6 +274,36 @@ bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const 
         if (!align_encoded_rx_buffer()) {
             return false;
         }
+      
+    if (!this->encoded_rx_buffer_.empty() && (this->encoded_rx_buffer_.size() % buffer.size()) != 0) {
+        ESP_LOGW(TAG, "Discarding %zu stray encoded bytes.", this->encoded_rx_buffer_.size());
+        flush_serial_input();
+    }
+
+    if (this->encoded_rx_buffer_.size() < buffer.size()) {
+        wait_for_jutta_gap();
+        std::array<uint8_t, 4> chunk{};
+        size_t size = serial.read_serial(chunk);
+        if (size > chunk.size()) {
+            ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - ignoring.", size);
+            size = chunk.size();
+        }
+
+        if (size == 0) {
+            if (this->encoded_rx_buffer_.empty()) {
+                ESP_LOGV(TAG, "No serial data found.");
+            }
+            return false;
+        }
+
+        if (size < chunk.size()) {
+            ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - flushing.", size);
+            flush_serial_input();
+            return false;
+        }
+
+        this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + size);
+
     }
 
     if (this->encoded_rx_buffer_.size() < buffer.size()) {
@@ -296,6 +329,7 @@ size_t JuttaConnection::read_encoded_unsafe(std::vector<std::array<uint8_t, 4>>&
     }
     return count;
 }
+
 
 bool JuttaConnection::align_encoded_rx_buffer() const {
     size_t skipped = 0;
@@ -347,6 +381,7 @@ bool JuttaConnection::align_encoded_rx_buffer() const {
         ++skipped;
     }
 }
+
 
 void JuttaConnection::flush_serial_input() const {
     this->encoded_rx_buffer_.clear();
