@@ -2,7 +2,6 @@
 
 #include <array>
 #include <chrono>
-#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -181,10 +180,6 @@ class JuttaConnection {
      * Not thread safe!
      **/
     [[nodiscard]] size_t read_encoded_unsafe(std::vector<std::array<uint8_t, 4>>& data) const;
-    void flush_serial_input() const;
-
-    [[nodiscard]] bool align_encoded_rx_buffer() const;
-
     /**
      * Tries to read a single decoded byte.
      * This requires reading 4 JUTTA bytes and converting them to a single actual data byte.
@@ -254,20 +249,9 @@ class JuttaConnection {
         bool active{false};
         std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
         uint32_t start_time{0};
-        std::string buffer{};
     };
 
     StringWaitContext wait_string_context_{};
-
-    // Buffer of partially received encoded bytes that haven't formed a full
-    // decoded data byte yet.
-    mutable std::vector<uint8_t> encoded_rx_buffer_{};
-
-    // Buffer for decoded bytes that were read ahead of the consumer.
-    mutable std::deque<uint8_t> decoded_rx_buffer_{};
-
-    void reinject_decoded_front(const std::string& data) const;
-
 };
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto
