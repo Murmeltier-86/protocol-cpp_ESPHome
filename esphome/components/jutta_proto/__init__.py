@@ -111,7 +111,8 @@ async def _get_parent(config):
 
 
 @automation.register_action("jutta_proto.start_brew", StartBrewAction, _normalize_start_brew)
-async def start_brew_action_to_code(config, action_id, template_args):
+async def start_brew_action_to_code(config, action_id, template_args, args):
+    _ = args
     parent = await _get_parent(config)
     var = cg.new_Pvariable(action_id, parent)
     cg.add(var.set_coffee(config[CONF_COFFEE]))
@@ -119,7 +120,8 @@ async def start_brew_action_to_code(config, action_id, template_args):
 
 
 @automation.register_action("jutta_proto.custom_brew", CustomBrewAction, _normalize_custom_brew)
-async def custom_brew_action_to_code(config, action_id, template_args):
+async def custom_brew_action_to_code(config, action_id, template_args, args):
+    _ = args
     parent = await _get_parent(config)
     var = cg.new_Pvariable(action_id, parent)
     grind = config[CONF_GRIND_DURATION]
@@ -130,14 +132,16 @@ async def custom_brew_action_to_code(config, action_id, template_args):
 
 
 @automation.register_action("jutta_proto.cancel_custom_brew", CancelCustomBrewAction, _normalize_cancel)
-async def cancel_brew_action_to_code(config, action_id, template_args):
+async def cancel_brew_action_to_code(config, action_id, template_args, args):
+    _ = args
     parent = await _get_parent(config)
     var = cg.new_Pvariable(action_id, parent)
     return var
 
 
 @automation.register_action("jutta_proto.switch_page", SwitchPageAction, _normalize_switch_page)
-async def switch_page_action_to_code(config, action_id, template_args):
+async def switch_page_action_to_code(config, action_id, template_args, args):
+    _ = args
     parent = await _get_parent(config)
     var = cg.new_Pvariable(action_id, parent)
     cg.add(var.set_page(config[CONF_PAGE]))
