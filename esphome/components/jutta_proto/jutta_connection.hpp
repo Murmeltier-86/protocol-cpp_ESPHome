@@ -182,6 +182,9 @@ class JuttaConnection {
      **/
     [[nodiscard]] size_t read_encoded_unsafe(std::vector<std::array<uint8_t, 4>>& data) const;
     void flush_serial_input() const;
+
+    [[nodiscard]] bool align_encoded_rx_buffer() const;
+
     /**
      * Tries to read a single decoded byte.
      * This requires reading 4 JUTTA bytes and converting them to a single actual data byte.
