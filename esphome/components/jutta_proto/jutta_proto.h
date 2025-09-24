@@ -51,23 +51,23 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool custom_cancel_flag_{false};
 };
 
-template<typename... Ts> class StartBrewAction : public esphome::Action<Ts...> {
+class StartBrewAction : public esphome::Action<> {
  public:
   explicit StartBrewAction(JuraComponent *parent) : parent_(parent) {}
   void set_coffee(::jutta_proto::CoffeeMaker::coffee_t coffee) { coffee_ = coffee; }
-  void play(Ts... x) override { this->parent_->start_brew(coffee_); }
+  void play() override { this->parent_->start_brew(coffee_); }
 
  protected:
   JuraComponent *parent_;
   ::jutta_proto::CoffeeMaker::coffee_t coffee_{::jutta_proto::CoffeeMaker::coffee_t::ESPRESSO};
 };
 
-template<typename... Ts> class CustomBrewAction : public esphome::Action<Ts...> {
+class CustomBrewAction : public esphome::Action<> {
  public:
   explicit CustomBrewAction(JuraComponent *parent) : parent_(parent) {}
   void set_grind_duration(uint32_t grind) { grind_duration_ms_ = grind; }
   void set_water_duration(uint32_t water) { water_duration_ms_ = water; }
-  void play(Ts... x) override { this->parent_->start_custom_brew(grind_duration_ms_, water_duration_ms_); }
+  void play() override { this->parent_->start_custom_brew(grind_duration_ms_, water_duration_ms_); }
 
  protected:
   JuraComponent *parent_;
@@ -75,20 +75,20 @@ template<typename... Ts> class CustomBrewAction : public esphome::Action<Ts...> 
   uint32_t water_duration_ms_{40000};
 };
 
-template<typename... Ts> class CancelCustomBrewAction : public esphome::Action<Ts...> {
+class CancelCustomBrewAction : public esphome::Action<> {
  public:
   explicit CancelCustomBrewAction(JuraComponent *parent) : parent_(parent) {}
-  void play(Ts... x) override { this->parent_->cancel_custom_brew(); }
+  void play() override { this->parent_->cancel_custom_brew(); }
 
  protected:
   JuraComponent *parent_;
 };
 
-template<typename... Ts> class SwitchPageAction : public esphome::Action<Ts...> {
+class SwitchPageAction : public esphome::Action<> {
  public:
   explicit SwitchPageAction(JuraComponent *parent) : parent_(parent) {}
   void set_page(uint32_t page) { page_ = page; }
-  void play(Ts... x) override { this->parent_->switch_page(page_); }
+  void play() override { this->parent_->switch_page(page_); }
 
  protected:
   JuraComponent *parent_;

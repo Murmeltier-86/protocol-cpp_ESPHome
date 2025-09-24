@@ -20,18 +20,12 @@ JuraComponent = jutta_component_ns.class_(
 )
 CoffeeType = jutta_proto_ns.enum("CoffeeMaker::coffee_t")
 
-StartBrewAction = jutta_component_ns.class_(
-    "StartBrewAction", automation.Action, template_args=automation.TEMPLATE_ARGS
-)
-CustomBrewAction = jutta_component_ns.class_(
-    "CustomBrewAction", automation.Action, template_args=automation.TEMPLATE_ARGS
-)
+StartBrewAction = jutta_component_ns.class_("StartBrewAction", automation.Action)
+CustomBrewAction = jutta_component_ns.class_("CustomBrewAction", automation.Action)
 CancelCustomBrewAction = jutta_component_ns.class_(
-    "CancelCustomBrewAction", automation.Action, template_args=automation.TEMPLATE_ARGS
+    "CancelCustomBrewAction", automation.Action
 )
-SwitchPageAction = jutta_component_ns.class_(
-    "SwitchPageAction", automation.Action, template_args=automation.TEMPLATE_ARGS
-)
+SwitchPageAction = jutta_component_ns.class_("SwitchPageAction", automation.Action)
 
 COFFEE_TYPES = {
     "espresso": CoffeeType.ESPRESSO,
@@ -119,7 +113,7 @@ async def _get_parent(config):
 @automation.register_action("jutta_proto.start_brew", StartBrewAction, _normalize_start_brew)
 async def start_brew_action_to_code(config, action_id, template_args):
     parent = await _get_parent(config)
-    var = cg.new_Pvariable(action_id, template_args, parent)
+    var = cg.new_Pvariable(action_id, parent)
     cg.add(var.set_coffee(config[CONF_COFFEE]))
     return var
 
@@ -127,7 +121,7 @@ async def start_brew_action_to_code(config, action_id, template_args):
 @automation.register_action("jutta_proto.custom_brew", CustomBrewAction, _normalize_custom_brew)
 async def custom_brew_action_to_code(config, action_id, template_args):
     parent = await _get_parent(config)
-    var = cg.new_Pvariable(action_id, template_args, parent)
+    var = cg.new_Pvariable(action_id, parent)
     grind = config[CONF_GRIND_DURATION]
     water = config[CONF_WATER_DURATION]
     cg.add(var.set_grind_duration(grind.total_milliseconds))
@@ -138,14 +132,14 @@ async def custom_brew_action_to_code(config, action_id, template_args):
 @automation.register_action("jutta_proto.cancel_custom_brew", CancelCustomBrewAction, _normalize_cancel)
 async def cancel_brew_action_to_code(config, action_id, template_args):
     parent = await _get_parent(config)
-    var = cg.new_Pvariable(action_id, template_args, parent)
+    var = cg.new_Pvariable(action_id, parent)
     return var
 
 
 @automation.register_action("jutta_proto.switch_page", SwitchPageAction, _normalize_switch_page)
 async def switch_page_action_to_code(config, action_id, template_args):
     parent = await _get_parent(config)
-    var = cg.new_Pvariable(action_id, template_args, parent)
+    var = cg.new_Pvariable(action_id, parent)
     cg.add(var.set_page(config[CONF_PAGE]))
     return var
 
