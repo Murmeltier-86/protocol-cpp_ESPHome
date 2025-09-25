@@ -259,6 +259,7 @@ class JuttaConnection {
         bool active{false};
         std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
         uint32_t start_time{0};
+        std::string buffer{};
     };
 
     StringWaitContext wait_string_context_{};
