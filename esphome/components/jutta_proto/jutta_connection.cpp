@@ -18,8 +18,9 @@ static const char* TAG = "jutta_connection";
 
 namespace {
 constexpr uint32_t JUTTA_SERIAL_GAP_MS = 8;
-constexpr uint8_t JUTTA_BYTE_MASK = 0x7F;
-
+constexpr uint8_t JUTTA_ENCODE_BASE = 0xFF;
+constexpr uint8_t JUTTA_BIT0_MASK = static_cast<uint8_t>(1u << 2);
+constexpr uint8_t JUTTA_BIT1_MASK = static_cast<uint8_t>(1u << 5);
 std::string format_hex(const uint8_t* data, size_t length) {
     if (length == 0) {
         return "[]";
@@ -105,31 +106,6 @@ inline void wait_for_jutta_gap() {
     }
 }
 
-inline uint8_t normalize_encoded_byte(uint8_t byte) {
-    return byte & JUTTA_BYTE_MASK;
-}
-
-inline bool is_possible_encoded_byte(uint8_t byte) {
-    switch (normalize_encoded_byte(byte)) {
-        case 0x5B:
-        case 0x5F:
-        case 0x7B:
-        case 0x7F:
-            return true;
-        default:
-            return false;
-    }
-}
-
-inline bool frames_equivalent(const std::array<uint8_t, 4>& lhs, const std::array<uint8_t, 4>& rhs) {
-    for (size_t i = 0; i < lhs.size(); ++i) {
-        if (normalize_encoded_byte(lhs[i]) != normalize_encoded_byte(rhs[i])) {
-            return false;
-        }
-    }
-    return true;
-}
-
 }  // namespace
 
 JuttaConnection::JuttaConnection(esphome::uart::UARTComponent* parent) : serial(parent) {}
@@ -149,6 +125,13 @@ bool JuttaConnection::read_decoded(uint8_t* byte) {
 bool JuttaConnection::read_decoded_unsafe(uint8_t* byte) const {
     ESP_LOGVV(TAG, "Attempting to read single decoded byte (encoded buffer size=%zu, decoded buffer size=%zu).",
               this->encoded_rx_buffer_.size(), this->decoded_rx_buffer_.size());
+    if (!this->decoded_rx_buffer_.empty()) {
+        *byte = this->decoded_rx_buffer_.front();
+        this->decoded_rx_buffer_.pop_front();
+        ESP_LOGD(TAG, "Decoded byte from buffer: '%s' (%s)", format_printable(*byte).c_str(),
+                 format_hex(*byte).c_str());
+        return true;
+    }
     std::array<uint8_t, 4> buffer{};
     if (!read_encoded_unsafe(buffer)) {
         ESP_LOGVV(TAG, "Unable to read encoded frame for single byte - waiting for more data.");
@@ -162,14 +145,28 @@ bool JuttaConnection::read_decoded_unsafe(uint8_t* byte) const {
 bool JuttaConnection::read_decoded_unsafe(std::vector<uint8_t>& data) const {
     ESP_LOGVV(TAG, "Attempting to read decoded bytes (encoded buffer size=%zu, decoded buffer size=%zu).",
               this->encoded_rx_buffer_.size(), this->decoded_rx_buffer_.size());
-    // Read encoded data:
+    bool any_data = false;
+
+    if (!this->decoded_rx_buffer_.empty()) {
+        while (!this->decoded_rx_buffer_.empty()) {
+            uint8_t buffered_byte = this->decoded_rx_buffer_.front();
+            this->decoded_rx_buffer_.pop_front();
+            data.push_back(buffered_byte);
+        }
+        any_data = true;
+    }
+
     std::vector<std::array<uint8_t, 4>> dataBuffer;
-    if (read_encoded_unsafe(dataBuffer) <= 0) {
+    size_t frames_read = read_encoded_unsafe(dataBuffer);
+    if (frames_read == 0) {
+        if (any_data) {
+            ESP_LOGD(TAG, "Read decoded payload from buffer (%zu byte%s).", data.size(), data.size() == 1 ? "" : "s");
+            return true;
+        }
         ESP_LOGVV(TAG, "No complete encoded frames available to decode yet.");
         return false;
     }
 
-    // Decode all:
     size_t index = 0;
     std::vector<uint8_t> newly_decoded;
     newly_decoded.reserve(dataBuffer.size());
@@ -225,14 +222,23 @@ bool JuttaConnection::write_decoded_unsafe(const std::string& data) const {
 }
 
 bool JuttaConnection::write_decoded(const uint8_t& byte) {
+    if (!this->wait_context_.active && !this->wait_string_context_.active) {
+        flush_serial_input();
+    }
     return write_decoded_unsafe(byte);
 }
 
 bool JuttaConnection::write_decoded(const std::vector<uint8_t>& data) {
+    if (!this->wait_context_.active && !this->wait_string_context_.active) {
+        flush_serial_input();
+    }
     return write_decoded_unsafe(data);
 }
 
 bool JuttaConnection::write_decoded(const std::string& data) {
+    if (!this->wait_context_.active && !this->wait_string_context_.active) {
+        flush_serial_input();
+    }
     return write_decoded_unsafe(data);
 }
 
@@ -276,56 +282,31 @@ void JuttaConnection::run_encode_decode_test() {
 }
 
 std::array<uint8_t, 4> JuttaConnection::encode(const uint8_t& decData) {
-    // 1111 0000 -> 0000 1111:
-    uint8_t tmp = ((decData & 0xF0) >> 4) | ((decData & 0x0F) << 4);
-
-    // 1100 1100 -> 0011 0011:
-    tmp = ((tmp & 0xC0) >> 2) | ((tmp & 0x30) << 2) | ((tmp & 0x0C) >> 2) | ((tmp & 0x03) << 2);
-
-    // The base bit layout for all send bytes:
-    constexpr uint8_t BASE = 0b01011011;
-
     std::array<uint8_t, 4> encData{};
-    encData[0] = BASE | ((tmp & 0b10000000) >> 2);
-    encData[0] |= ((tmp & 0b01000000) >> 4);
-
-    encData[1] = BASE | (tmp & 0b00100000);
-    encData[1] |= ((tmp & 0b00010000) >> 2);
-
-    encData[2] = BASE | ((tmp & 0b00001000) << 2);
-    encData[2] |= (tmp & 0b00000100);
-
-    encData[3] = BASE | ((tmp & 0b00000010) << 4);
-    encData[3] |= ((tmp & 0b00000001) << 2);
-
+    for (int group = 0; group < 4; ++group) {
+        uint8_t encoded = JUTTA_ENCODE_BASE;
+        uint8_t bit0 = (decData >> (group * 2)) & 0x1;
+        uint8_t bit1 = (decData >> (group * 2 + 1)) & 0x1;
+        if (bit0 == 0) {
+            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT0_MASK);
+        }
+        if (bit1 == 0) {
+            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT1_MASK);
+        }
+        encData[group] = encoded;
+    }
     return encData;
 }
 
 uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
-    // Bit mask for the 2. bit from the left:
-    constexpr uint8_t B2_MASK = (0b10000000 >> 2);
-    // Bit mask for the 5. bit from the left:
-    constexpr uint8_t B5_MASK = (0b10000000 >> 5);
-
     uint8_t decData = 0;
-    decData |= (encData[0] & B2_MASK) << 2;
-    decData |= (encData[0] & B5_MASK) << 4;
-
-    decData |= (encData[1] & B2_MASK);
-    decData |= (encData[1] & B5_MASK) << 2;
-
-    decData |= (encData[2] & B2_MASK) >> 2;
-    decData |= (encData[2] & B5_MASK);
-
-    decData |= (encData[3] & B2_MASK) >> 4;
-    decData |= (encData[3] & B5_MASK) >> 2;
-
-    // 1111 0000 -> 0000 1111:
-    decData = ((decData & 0xF0) >> 4) | ((decData & 0x0F) << 4);
-
-    // 1100 1100 -> 0011 0011:
-    decData = ((decData & 0xC0) >> 2) | ((decData & 0x30) << 2) | ((decData & 0x0C) >> 2) | ((decData & 0x03) << 2);
-
+    for (int group = 0; group < 4; ++group) {
+        uint8_t encoded = encData[group];
+        uint8_t bit0 = (encoded >> 2) & 0x1;
+        uint8_t bit1 = (encoded >> 5) & 0x1;
+        decData |= static_cast<uint8_t>(bit0 << (group * 2));
+        decData |= static_cast<uint8_t>(bit1 << (group * 2 + 1));
+    }
     return decData;
 }
 
@@ -356,34 +337,6 @@ bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData
 
 bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const {
     ESP_LOGVV(TAG, "Attempting to read encoded frame (buffered bytes=%zu).", this->encoded_rx_buffer_.size());
-    if (!align_encoded_rx_buffer()) {
-        if (this->encoded_rx_buffer_.size() < buffer.size()) {
-            wait_for_jutta_gap();
-            std::array<uint8_t, 4> chunk{};
-            size_t size = serial.read_serial(chunk);
-            if (size > chunk.size()) {
-                ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - ignoring.", size);
-                size = chunk.size();
-            }
-
-            if (size > 0) {
-                this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + size);
-                std::vector<uint8_t> chunk_vec(chunk.begin(), chunk.begin() + size);
-                ESP_LOGVV(TAG, "Read %zu encoded byte%s from UART: %s (buffer now %zu bytes)", size,
-                          size == 1 ? "" : "s", format_hex(chunk_vec).c_str(), this->encoded_rx_buffer_.size());
-            } else if (this->encoded_rx_buffer_.empty()) {
-                ESP_LOGV(TAG, "No serial data found.");
-                return false;
-            }
-        }
-
-        if (!align_encoded_rx_buffer()) {
-            ESP_LOGVV(TAG, "Encoded buffer could not be aligned after UART read (size=%zu).",
-                      this->encoded_rx_buffer_.size());
-            return false;
-        }
-    }
-
     if (this->encoded_rx_buffer_.size() < buffer.size()) {
         wait_for_jutta_gap();
         std::array<uint8_t, 4> chunk{};
@@ -393,17 +346,20 @@ bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const 
             read = chunk.size();
         }
 
-        if (read == 0) {
-            if (this->encoded_rx_buffer_.empty()) {
-                ESP_LOGV(TAG, "No serial data found.");
-            }
+        if (read > 0) {
+            this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + read);
+            std::vector<uint8_t> chunk_vec(chunk.begin(), chunk.begin() + read);
+            ESP_LOGVV(TAG, "Read %zu encoded byte%s from UART: %s (buffer now %zu bytes)", read,
+                      read == 1 ? "" : "s", format_hex(chunk_vec).c_str(), this->encoded_rx_buffer_.size());
+        } else if (this->encoded_rx_buffer_.empty()) {
+            ESP_LOGV(TAG, "No serial data found.");
             return false;
         }
+    }
 
-        this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + read);
-        std::vector<uint8_t> chunk_vec(chunk.begin(), chunk.begin() + read);
-        ESP_LOGVV(TAG, "Buffered additional %zu encoded byte%s: %s (buffer now %zu bytes)", read,
-                  read == 1 ? "" : "s", format_hex(chunk_vec).c_str(), this->encoded_rx_buffer_.size());
+    if (this->encoded_rx_buffer_.size() < buffer.size()) {
+        ESP_LOGVV(TAG, "Not enough encoded bytes buffered yet (size=%zu).", this->encoded_rx_buffer_.size());
+        return false;
     }
 
     if (this->encoded_rx_buffer_.size() < buffer.size()) {
@@ -437,68 +393,15 @@ size_t JuttaConnection::read_encoded_unsafe(std::vector<std::array<uint8_t, 4>>&
     return count;
 }
 
-bool JuttaConnection::align_encoded_rx_buffer() const {
-    ESP_LOGVV(TAG, "Aligning encoded RX buffer (current size=%zu).", this->encoded_rx_buffer_.size());
-    size_t skipped = 0;
-
-    auto log_skipped = [&]() {
-        if (skipped > 0) {
-            ESP_LOGW(TAG, "Discarded %zu stray encoded byte%s while seeking JUTTA frame boundary.", skipped,
-                     skipped == 1 ? "" : "s");
-            skipped = 0;
-        }
-    };
-
-    while (true) {
-        while (!this->encoded_rx_buffer_.empty() && !is_possible_encoded_byte(this->encoded_rx_buffer_.front())) {
-            this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin());
-            ++skipped;
-        }
-
-        if (this->encoded_rx_buffer_.size() < 4) {
-            log_skipped();
-            ESP_LOGVV(TAG, "Insufficient encoded bytes to form a frame during alignment (size=%zu).",
-                      this->encoded_rx_buffer_.size());
-            return false;
-        }
-
-        std::array<uint8_t, 4> candidate{};
-        std::copy_n(this->encoded_rx_buffer_.begin(), candidate.size(), candidate.begin());
-
-        bool candidate_valid = true;
-        for (uint8_t byte : candidate) {
-            if (!is_possible_encoded_byte(byte)) {
-                candidate_valid = false;
-                break;
-            }
-        }
-
-        if (!candidate_valid) {
-            this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin());
-            ++skipped;
-            ESP_LOGVV(TAG, "Discarded byte while scanning for frame boundary - candidate contained invalid values.");
-            continue;
-        }
-
-        uint8_t decoded = decode(candidate);
-        auto reencoded = encode(decoded);
-        if (frames_equivalent(candidate, reencoded)) {
-            log_skipped();
-            ESP_LOGVV(TAG, "Found aligned encoded frame candidate: %s -> '%s' (%s)", format_hex(candidate).c_str(),
-                      format_printable(decoded).c_str(), format_hex(decoded).c_str());
-            return true;
-        }
-
-        this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin());
-        ++skipped;
-        ESP_LOGVV(TAG, "Discarded leading byte after mismatch with re-encoded candidate.");
-    }
-}
-
 void JuttaConnection::flush_serial_input() const {
     ESP_LOGD(TAG, "Flushing serial input (discarding %zu buffered encoded bytes).",
              this->encoded_rx_buffer_.size());
     this->encoded_rx_buffer_.clear();
+    if (!this->decoded_rx_buffer_.empty()) {
+        ESP_LOGD(TAG, "Discarding %zu buffered decoded byte%s.", this->decoded_rx_buffer_.size(),
+                 this->decoded_rx_buffer_.size() == 1 ? "" : "s");
+        this->decoded_rx_buffer_.clear();
+    }
     std::array<uint8_t, 4> discard{};
     while (true) {
         size_t read = serial.read_serial(discard);
@@ -540,6 +443,7 @@ JuttaConnection::WaitResult JuttaConnection::wait_for_ok(const std::chrono::mill
 std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const std::vector<uint8_t>& data,
                                                                          const std::chrono::milliseconds& timeout) {
     if (!this->wait_string_context_.active) {
+        flush_serial_input();
         if (!write_decoded_unsafe(data)) {
             return nullptr;
         }
@@ -552,6 +456,7 @@ std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const 
 std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const std::string& data,
                                                                          const std::chrono::milliseconds& timeout) {
     if (!this->wait_string_context_.active) {
+        flush_serial_input();
         if (!write_decoded_unsafe(data)) {
             return nullptr;
         }
@@ -566,16 +471,49 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         this->wait_string_context_.active = true;
         this->wait_string_context_.timeout = timeout;
         this->wait_string_context_.start_time = esphome::millis();
+        this->wait_string_context_.buffer.clear();
         ESP_LOGD(TAG, "Waiting for any response (timeout=%lld ms).", static_cast<long long>(timeout.count()));
+    }
+
+    auto try_complete = [&]() -> std::shared_ptr<std::string> {
+        auto terminator = this->wait_string_context_.buffer.find("\r\n");
+        if (terminator == std::string::npos) {
+            return nullptr;
+        }
+
+        std::string response = this->wait_string_context_.buffer.substr(0, terminator);
+        std::string remainder = this->wait_string_context_.buffer.substr(terminator + 2);
+        this->wait_string_context_.buffer.clear();
+
+        if (!remainder.empty()) {
+            for (auto it = remainder.rbegin(); it != remainder.rend(); ++it) {
+                this->decoded_rx_buffer_.push_front(static_cast<uint8_t>(static_cast<unsigned char>(*it)));
+            }
+            ESP_LOGV(TAG, "Re-queued %zu byte%s of trailing response data for later processing.", remainder.size(),
+                     remainder.size() == 1 ? "" : "s");
+        }
+
+        this->wait_string_context_.active = false;
+        auto shared_response = std::make_shared<std::string>(response);
+        ESP_LOGD(TAG, "Received response line: '%s'", format_printable(*shared_response).c_str());
+        return shared_response;
+    };
+
+    if (auto ready = try_complete(); ready != nullptr) {
+        return ready;
     }
 
     std::vector<uint8_t> buffer;
     if (read_decoded_unsafe(buffer) && !buffer.empty()) {
-        this->wait_string_context_.active = false;
-        auto response = std::make_shared<std::string>(vec_to_string(buffer));
-        ESP_LOGD(TAG, "Received response: '%s' (hex %s)", format_printable(*response).c_str(),
-                 format_hex(buffer).c_str());
-        return response;
+        std::string incoming = vec_to_string(buffer);
+        this->wait_string_context_.buffer.append(incoming);
+        ESP_LOGD(TAG, "Received chunk while waiting for response: '%s' (hex %s) -> buffer '%s'",
+                 format_printable(incoming).c_str(), format_hex(buffer).c_str(),
+                 format_printable(this->wait_string_context_.buffer).c_str());
+
+        if (auto ready = try_complete(); ready != nullptr) {
+            return ready;
+        }
     }
 
     if (timeout.count() > 0) {
@@ -583,6 +521,16 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         uint32_t elapsed = now - this->wait_string_context_.start_time;
         if (elapsed >= static_cast<uint32_t>(timeout.count())) {
             this->wait_string_context_.active = false;
+            if (!this->wait_string_context_.buffer.empty()) {
+                for (auto it = this->wait_string_context_.buffer.rbegin();
+                     it != this->wait_string_context_.buffer.rend(); ++it) {
+                    this->decoded_rx_buffer_.push_front(static_cast<uint8_t>(static_cast<unsigned char>(*it)));
+                }
+                ESP_LOGV(TAG, "Timeout while waiting for generic response - re-queued %zu buffered byte%s.",
+                         this->wait_string_context_.buffer.size(),
+                         this->wait_string_context_.buffer.size() == 1 ? "" : "s");
+                this->wait_string_context_.buffer.clear();
+            }
             ESP_LOGW(TAG, "Timeout while waiting for generic response after %u ms.", elapsed);
         }
     }
@@ -644,6 +592,7 @@ JuttaConnection::WaitResult JuttaConnection::write_decoded_wait_for(const std::v
                                                                     const std::string& response,
                                                                     const std::chrono::milliseconds& timeout) {
     if (!this->wait_context_.active || this->wait_context_.expected != response) {
+        flush_serial_input();
         if (!write_decoded_unsafe(data)) {
             return WaitResult::Error;
         }
@@ -654,6 +603,7 @@ JuttaConnection::WaitResult JuttaConnection::write_decoded_wait_for(const std::v
 JuttaConnection::WaitResult JuttaConnection::write_decoded_wait_for(const std::string& data, const std::string& response,
                                                                     const std::chrono::milliseconds& timeout) {
     if (!this->wait_context_.active || this->wait_context_.expected != response) {
+        flush_serial_input();
         if (!write_decoded_unsafe(data)) {
             return WaitResult::Error;
         }
