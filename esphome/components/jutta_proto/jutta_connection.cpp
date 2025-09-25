@@ -106,6 +106,29 @@ inline void wait_for_jutta_gap() {
     }
 }
 
+
+inline bool is_possible_encoded_byte(uint8_t byte) {
+    switch (byte) {
+        case JUTTA_ENCODE_BASE:
+        case static_cast<uint8_t>(JUTTA_ENCODE_BASE - JUTTA_BIT0_MASK):
+        case static_cast<uint8_t>(JUTTA_ENCODE_BASE - JUTTA_BIT1_MASK):
+        case static_cast<uint8_t>(JUTTA_ENCODE_BASE - JUTTA_BIT0_MASK - JUTTA_BIT1_MASK):
+            return true;
+        default:
+            return false;
+    }
+}
+
+inline bool frames_equivalent(const std::array<uint8_t, 4>& lhs, const std::array<uint8_t, 4>& rhs) {
+    for (size_t i = 0; i < lhs.size(); ++i) {
+        if (lhs[i] != rhs[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
 }  // namespace
 
 JuttaConnection::JuttaConnection(esphome::uart::UARTComponent* parent) : serial(parent) {}
