@@ -84,7 +84,9 @@ class JuttaConnection {
      * Returns false when a timeout occurred or writing failed.
      * [Thread Safe]
      **/
-    std::shared_ptr<std::string> write_decoded_with_response(const std::vector<uint8_t>& data, const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
+    std::shared_ptr<std::string> write_decoded_with_response(const std::vector<uint8_t>& data,
+                                                             const std::chrono::milliseconds& timeout =
+                                                                 std::chrono::milliseconds{5000});
     /**
      * Writes the given data to the coffee maker and then waits for any response with an optional timeout.
      * The default timeout for this operation is 5 seconds.
@@ -93,7 +95,9 @@ class JuttaConnection {
      * Returns false when a timeout occurred or writing failed.
      * [Thread Safe]
      **/
-    std::shared_ptr<std::string> write_decoded_with_response(const std::string& data, const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
+    std::shared_ptr<std::string> write_decoded_with_response(const std::string& data,
+                                                             const std::chrono::milliseconds& timeout =
+                                                                 std::chrono::milliseconds{5000});
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
@@ -120,18 +124,18 @@ class JuttaConnection {
      * Does not append a new line at the end!
      *
      * Example output:
-     * 0 1 0 1 0 1 0 0 -> 84	54	T
+     * 0 1 0 1 0 1 0 0 -> 84    54      T
      **/
     static void print_byte(const uint8_t& byte);
     /**
      * Prints each byte in the given vector in binary, hex and as a char
      *
      * Example output:
-     * 0 1 0 1 0 1 0 0 -> 84	54	T
-     * 0 1 0 1 1 0 0 1 -> 89	59	Y
-     * 0 0 1 1 1 0 1 0 -> 58	3a	:
-     * 0 0 0 0 1 1 0 1 -> 13	0d
-     * 0 0 0 0 1 0 1 0 -> 10	0a
+     * 0 1 0 1 0 1 0 0 -> 84    54      T
+     * 0 1 0 1 1 0 0 1 -> 89    59      Y
+     * 0 0 1 1 1 0 1 0 -> 58    3a      :
+     * 0 0 0 0 1 1 0 1 -> 13    0d
+     * 0 0 0 0 1 0 1 0 -> 10    0a
      **/
     static void print_bytes(const std::vector<uint8_t>& data);
 
@@ -224,7 +228,8 @@ class JuttaConnection {
      * Not thread safe!
      **/
     [[nodiscard]] WaitResult wait_for_response_unsafe(const std::string& response,
-                                                      const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
+                                                      const std::chrono::milliseconds& timeout =
+                                                          std::chrono::milliseconds{5000});
 
     /**
      * Waits for any response with an optional timeout.
@@ -233,7 +238,8 @@ class JuttaConnection {
      * Returns the string on success.
      * Not thread safe!
      **/
-    [[nodiscard]] std::shared_ptr<std::string> wait_for_str_unsafe(const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
+    [[nodiscard]] std::shared_ptr<std::string> wait_for_str_unsafe(
+        const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
 
     struct WaitContext {
         bool active{false};
@@ -252,6 +258,17 @@ class JuttaConnection {
     };
 
     StringWaitContext wait_string_context_{};
+
+
+    // Buffer of partially received encoded bytes that haven't formed a full
+    // decoded data byte yet.
+    mutable std::vector<uint8_t> encoded_rx_buffer_{};
+
+    // Buffer for decoded bytes that were read ahead of the consumer.
+    mutable std::deque<uint8_t> decoded_rx_buffer_{};
+
+    void reinject_decoded_front(const std::string& data) const;
+
 };
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto
