@@ -146,6 +146,13 @@ bool JuttaConnection::read_decoded(uint8_t* byte) {
 bool JuttaConnection::read_decoded_unsafe(uint8_t* byte) const {
     ESP_LOGVV(TAG, "Attempting to read single decoded byte (encoded buffer size=%zu, decoded buffer size=%zu).",
               this->encoded_rx_buffer_.size(), this->decoded_rx_buffer_.size());
+    if (!this->decoded_rx_buffer_.empty()) {
+        *byte = this->decoded_rx_buffer_.front();
+        this->decoded_rx_buffer_.pop_front();
+        ESP_LOGD(TAG, "Decoded byte from buffer: '%s' (%s)", format_printable(*byte).c_str(),
+                 format_hex(*byte).c_str());
+        return true;
+    }
     std::array<uint8_t, 4> buffer{};
     if (!read_encoded_unsafe(buffer)) {
         ESP_LOGVV(TAG, "Unable to read encoded frame for single byte - waiting for more data.");
@@ -159,14 +166,28 @@ bool JuttaConnection::read_decoded_unsafe(uint8_t* byte) const {
 bool JuttaConnection::read_decoded_unsafe(std::vector<uint8_t>& data) const {
     ESP_LOGVV(TAG, "Attempting to read decoded bytes (encoded buffer size=%zu, decoded buffer size=%zu).",
               this->encoded_rx_buffer_.size(), this->decoded_rx_buffer_.size());
-    // Read encoded data:
+    bool any_data = false;
+
+    if (!this->decoded_rx_buffer_.empty()) {
+        while (!this->decoded_rx_buffer_.empty()) {
+            uint8_t buffered_byte = this->decoded_rx_buffer_.front();
+            this->decoded_rx_buffer_.pop_front();
+            data.push_back(buffered_byte);
+        }
+        any_data = true;
+    }
+
     std::vector<std::array<uint8_t, 4>> dataBuffer;
-    if (read_encoded_unsafe(dataBuffer) <= 0) {
+    size_t frames_read = read_encoded_unsafe(dataBuffer);
+    if (frames_read == 0) {
+        if (any_data) {
+            ESP_LOGD(TAG, "Read decoded payload from buffer (%zu byte%s).", data.size(), data.size() == 1 ? "" : "s");
+            return true;
+        }
         ESP_LOGVV(TAG, "No complete encoded frames available to decode yet.");
         return false;
     }
 
-    // Decode all:
     size_t index = 0;
     std::vector<uint8_t> newly_decoded;
     newly_decoded.reserve(dataBuffer.size());
@@ -538,16 +559,49 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         this->wait_string_context_.active = true;
         this->wait_string_context_.timeout = timeout;
         this->wait_string_context_.start_time = esphome::millis();
+        this->wait_string_context_.buffer.clear();
         ESP_LOGD(TAG, "Waiting for any response (timeout=%lld ms).", static_cast<long long>(timeout.count()));
+    }
+
+    auto try_complete = [&]() -> std::shared_ptr<std::string> {
+        auto terminator = this->wait_string_context_.buffer.find("\r\n");
+        if (terminator == std::string::npos) {
+            return nullptr;
+        }
+
+        std::string response = this->wait_string_context_.buffer.substr(0, terminator);
+        std::string remainder = this->wait_string_context_.buffer.substr(terminator + 2);
+        this->wait_string_context_.buffer.clear();
+
+        if (!remainder.empty()) {
+            for (auto it = remainder.rbegin(); it != remainder.rend(); ++it) {
+                this->decoded_rx_buffer_.push_front(static_cast<uint8_t>(static_cast<unsigned char>(*it)));
+            }
+            ESP_LOGV(TAG, "Re-queued %zu byte%s of trailing response data for later processing.", remainder.size(),
+                     remainder.size() == 1 ? "" : "s");
+        }
+
+        this->wait_string_context_.active = false;
+        auto shared_response = std::make_shared<std::string>(response);
+        ESP_LOGD(TAG, "Received response line: '%s'", format_printable(*shared_response).c_str());
+        return shared_response;
+    };
+
+    if (auto ready = try_complete(); ready != nullptr) {
+        return ready;
     }
 
     std::vector<uint8_t> buffer;
     if (read_decoded_unsafe(buffer) && !buffer.empty()) {
-        this->wait_string_context_.active = false;
-        auto response = std::make_shared<std::string>(vec_to_string(buffer));
-        ESP_LOGD(TAG, "Received response: '%s' (hex %s)", format_printable(*response).c_str(),
-                 format_hex(buffer).c_str());
-        return response;
+        std::string incoming = vec_to_string(buffer);
+        this->wait_string_context_.buffer.append(incoming);
+        ESP_LOGD(TAG, "Received chunk while waiting for response: '%s' (hex %s) -> buffer '%s'",
+                 format_printable(incoming).c_str(), format_hex(buffer).c_str(),
+                 format_printable(this->wait_string_context_.buffer).c_str());
+
+        if (auto ready = try_complete(); ready != nullptr) {
+            return ready;
+        }
     }
 
     if (timeout.count() > 0) {
@@ -555,6 +609,16 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         uint32_t elapsed = now - this->wait_string_context_.start_time;
         if (elapsed >= static_cast<uint32_t>(timeout.count())) {
             this->wait_string_context_.active = false;
+            if (!this->wait_string_context_.buffer.empty()) {
+                for (auto it = this->wait_string_context_.buffer.rbegin();
+                     it != this->wait_string_context_.buffer.rend(); ++it) {
+                    this->decoded_rx_buffer_.push_front(static_cast<uint8_t>(static_cast<unsigned char>(*it)));
+                }
+                ESP_LOGV(TAG, "Timeout while waiting for generic response - re-queued %zu buffered byte%s.",
+                         this->wait_string_context_.buffer.size(),
+                         this->wait_string_context_.buffer.size() == 1 ? "" : "s");
+                this->wait_string_context_.buffer.clear();
+            }
             ESP_LOGW(TAG, "Timeout while waiting for generic response after %u ms.", elapsed);
         }
     }
