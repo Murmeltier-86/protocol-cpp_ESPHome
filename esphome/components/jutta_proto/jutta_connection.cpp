@@ -18,8 +18,9 @@ static const char* TAG = "jutta_connection";
 
 namespace {
 constexpr uint32_t JUTTA_SERIAL_GAP_MS = 8;
-constexpr uint8_t JUTTA_BYTE_MASK = 0x7F;
-
+constexpr uint8_t JUTTA_ENCODE_BASE = 0xFF;
+constexpr uint8_t JUTTA_BIT0_MASK = static_cast<uint8_t>(1u << 2);
+constexpr uint8_t JUTTA_BIT1_MASK = static_cast<uint8_t>(1u << 5);
 std::string format_hex(const uint8_t* data, size_t length) {
     if (length == 0) {
         return "[]";
@@ -105,16 +106,12 @@ inline void wait_for_jutta_gap() {
     }
 }
 
-inline uint8_t normalize_encoded_byte(uint8_t byte) {
-    return byte & JUTTA_BYTE_MASK;
-}
-
 inline bool is_possible_encoded_byte(uint8_t byte) {
-    switch (normalize_encoded_byte(byte)) {
-        case 0x5B:
-        case 0x5F:
-        case 0x7B:
-        case 0x7F:
+    switch (byte) {
+        case JUTTA_ENCODE_BASE:
+        case static_cast<uint8_t>(JUTTA_ENCODE_BASE - JUTTA_BIT0_MASK):
+        case static_cast<uint8_t>(JUTTA_ENCODE_BASE - JUTTA_BIT1_MASK):
+        case static_cast<uint8_t>(JUTTA_ENCODE_BASE - JUTTA_BIT0_MASK - JUTTA_BIT1_MASK):
             return true;
         default:
             return false;
@@ -123,7 +120,7 @@ inline bool is_possible_encoded_byte(uint8_t byte) {
 
 inline bool frames_equivalent(const std::array<uint8_t, 4>& lhs, const std::array<uint8_t, 4>& rhs) {
     for (size_t i = 0; i < lhs.size(); ++i) {
-        if (normalize_encoded_byte(lhs[i]) != normalize_encoded_byte(rhs[i])) {
+        if (lhs[i] != rhs[i]) {
             return false;
         }
     }
@@ -276,56 +273,31 @@ void JuttaConnection::run_encode_decode_test() {
 }
 
 std::array<uint8_t, 4> JuttaConnection::encode(const uint8_t& decData) {
-    // 1111 0000 -> 0000 1111:
-    uint8_t tmp = ((decData & 0xF0) >> 4) | ((decData & 0x0F) << 4);
-
-    // 1100 1100 -> 0011 0011:
-    tmp = ((tmp & 0xC0) >> 2) | ((tmp & 0x30) << 2) | ((tmp & 0x0C) >> 2) | ((tmp & 0x03) << 2);
-
-    // The base bit layout for all send bytes:
-    constexpr uint8_t BASE = 0b01011011;
-
     std::array<uint8_t, 4> encData{};
-    encData[0] = BASE | ((tmp & 0b10000000) >> 2);
-    encData[0] |= ((tmp & 0b01000000) >> 4);
-
-    encData[1] = BASE | (tmp & 0b00100000);
-    encData[1] |= ((tmp & 0b00010000) >> 2);
-
-    encData[2] = BASE | ((tmp & 0b00001000) << 2);
-    encData[2] |= (tmp & 0b00000100);
-
-    encData[3] = BASE | ((tmp & 0b00000010) << 4);
-    encData[3] |= ((tmp & 0b00000001) << 2);
-
+    for (int group = 0; group < 4; ++group) {
+        uint8_t encoded = JUTTA_ENCODE_BASE;
+        uint8_t bit0 = (decData >> (group * 2)) & 0x1;
+        uint8_t bit1 = (decData >> (group * 2 + 1)) & 0x1;
+        if (bit0 == 0) {
+            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT0_MASK);
+        }
+        if (bit1 == 0) {
+            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT1_MASK);
+        }
+        encData[group] = encoded;
+    }
     return encData;
 }
 
 uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
-    // Bit mask for the 2. bit from the left:
-    constexpr uint8_t B2_MASK = (0b10000000 >> 2);
-    // Bit mask for the 5. bit from the left:
-    constexpr uint8_t B5_MASK = (0b10000000 >> 5);
-
     uint8_t decData = 0;
-    decData |= (encData[0] & B2_MASK) << 2;
-    decData |= (encData[0] & B5_MASK) << 4;
-
-    decData |= (encData[1] & B2_MASK);
-    decData |= (encData[1] & B5_MASK) << 2;
-
-    decData |= (encData[2] & B2_MASK) >> 2;
-    decData |= (encData[2] & B5_MASK);
-
-    decData |= (encData[3] & B2_MASK) >> 4;
-    decData |= (encData[3] & B5_MASK) >> 2;
-
-    // 1111 0000 -> 0000 1111:
-    decData = ((decData & 0xF0) >> 4) | ((decData & 0x0F) << 4);
-
-    // 1100 1100 -> 0011 0011:
-    decData = ((decData & 0xC0) >> 2) | ((decData & 0x30) << 2) | ((decData & 0x0C) >> 2) | ((decData & 0x03) << 2);
-
+    for (int group = 0; group < 4; ++group) {
+        uint8_t encoded = encData[group];
+        uint8_t bit0 = (encoded >> 2) & 0x1;
+        uint8_t bit1 = (encoded >> 5) & 0x1;
+        decData |= static_cast<uint8_t>(bit0 << (group * 2));
+        decData |= static_cast<uint8_t>(bit1 << (group * 2 + 1));
+    }
     return decData;
 }
 
