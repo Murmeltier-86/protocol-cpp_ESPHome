@@ -1,5 +1,8 @@
 #include "esphome/components/jutta_proto/jutta_proto.h"
 
+#include <cctype>
+#include <iomanip>
+#include <sstream>
 #include <utility>
 
 #include "esphome/core/time.h"
@@ -7,7 +10,102 @@
 namespace esphome {
 namespace jutta_component {
 
+namespace {
+
 static const char *const TAG = "jutta_proto";
+
+constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
+
+const char *handshake_stage_name(JuraComponent::HandshakeStage stage) {
+  switch (stage) {
+    case JuraComponent::HandshakeStage::IDLE:
+      return "idle";
+    case JuraComponent::HandshakeStage::HELLO:
+      return "hello";
+    case JuraComponent::HandshakeStage::SEND_T1:
+      return "send_t1";
+    case JuraComponent::HandshakeStage::WAIT_T2:
+      return "wait_t2";
+    case JuraComponent::HandshakeStage::SEND_T2:
+      return "send_t2";
+    case JuraComponent::HandshakeStage::WAIT_T3:
+      return "wait_t3";
+    case JuraComponent::HandshakeStage::SEND_T3:
+      return "send_t3";
+    case JuraComponent::HandshakeStage::DONE:
+      return "done";
+    case JuraComponent::HandshakeStage::FAILED:
+      return "failed";
+  }
+  return "unknown";
+}
+
+std::string format_printable_char(uint8_t byte) {
+  switch (byte) {
+    case '\\r':
+      return "\\r";
+    case '\\n':
+      return "\\n";
+    case '\\t':
+      return "\\t";
+    default:
+      break;
+  }
+  if (std::isprint(static_cast<int>(byte)) != 0) {
+    return std::string(1, static_cast<char>(byte));
+  }
+  std::ostringstream stream;
+  stream << "\\x" << std::uppercase << std::setfill('0') << std::setw(2) << std::hex
+         << static_cast<int>(byte);
+  return stream.str();
+}
+
+std::string format_printable_string(const std::string &value) {
+  std::ostringstream stream;
+  for (unsigned char c : value) {
+    stream << format_printable_char(c);
+  }
+  return stream.str();
+}
+
+std::string format_hex_string(const std::string &value) {
+  if (value.empty()) {
+    return "[]";
+  }
+  std::ostringstream stream;
+  stream << "[";
+  for (size_t i = 0; i < value.size(); ++i) {
+    if (i > 0) {
+      stream << ' ';
+    }
+    stream << "0x" << std::uppercase << std::setfill('0') << std::setw(2) << std::hex
+           << static_cast<int>(static_cast<unsigned char>(value[i]));
+  }
+  stream << "]";
+  return stream.str();
+}
+
+std::string format_buffer_preview(const std::string &value) {
+  if (value.size() <= HANDSHAKE_LOG_PREVIEW_LIMIT) {
+    return format_printable_string(value);
+  }
+  std::string suffix = value.substr(value.size() - HANDSHAKE_LOG_PREVIEW_LIMIT);
+  return std::string("...") + format_printable_string(suffix);
+}
+
+std::string format_buffer_hex_preview(const std::string &value) {
+  if (value.size() <= HANDSHAKE_LOG_PREVIEW_LIMIT) {
+    return format_hex_string(value);
+  }
+  std::string suffix = value.substr(value.size() - HANDSHAKE_LOG_PREVIEW_LIMIT);
+  std::string formatted_suffix = format_hex_string(suffix);
+  if (formatted_suffix.size() > 1) {
+    return std::string("...") + formatted_suffix;
+  }
+  return formatted_suffix;
+}
+
+}  // namespace
 
 void JuraComponent::setup() {
   if (this->parent_ == nullptr) {
@@ -24,6 +122,15 @@ void JuraComponent::setup() {
 }
 
 void JuraComponent::loop() {
+  if (this->handshake_stage_ != this->last_logged_stage_) {
+    ESP_LOGI(TAG, "Handshake stage changed: %s -> %s (buffer size=%zu, preview='%s', hex %s)",
+             handshake_stage_name(this->last_logged_stage_),
+             handshake_stage_name(this->handshake_stage_), this->handshake_buffer_.size(),
+             format_buffer_preview(this->handshake_buffer_).c_str(),
+             format_buffer_hex_preview(this->handshake_buffer_).c_str());
+    this->last_logged_stage_ = this->handshake_stage_;
+  }
+
   if (this->connection_ != nullptr && this->handshake_stage_ != HandshakeStage::DONE &&
       this->handshake_stage_ != HandshakeStage::FAILED) {
     this->process_handshake();
@@ -99,6 +206,9 @@ void JuraComponent::process_handshake() {
     case HandshakeStage::IDLE:
       break;
     case HandshakeStage::HELLO: {
+      ESP_LOGD(TAG, "HELLO: requesting device type with payload '%s' (hex %s).",
+               format_printable_string(JUTTA_GET_TYPE).c_str(),
+               format_hex_string(JUTTA_GET_TYPE).c_str());
       auto response = this->connection_->write_decoded_with_response(JUTTA_GET_TYPE, std::chrono::milliseconds{1000});
       if (response != nullptr) {
         this->device_type_ = *response;
@@ -109,6 +219,7 @@ void JuraComponent::process_handshake() {
       break;
     }
     case HandshakeStage::SEND_T1: {
+      ESP_LOGD(TAG, "SEND_T1: writing '@T1\\r\\n' and waiting for '@t1\\r\\n' (timeout=1000 ms).");
       auto wait_result = this->connection_->write_decoded_wait_for("@T1\r\n", "@t1\r\n", std::chrono::milliseconds{1000});
       if (wait_result == JuttaConnection::WaitResult::Success) {
         ESP_LOGD(TAG, "Received @t1 acknowledgment.");
@@ -125,6 +236,7 @@ void JuraComponent::process_handshake() {
     case HandshakeStage::WAIT_T2: {
       if (this->handshake_deadline_ == 0) {
         this->handshake_deadline_ = esphome::millis() + 5000;
+        ESP_LOGD(TAG, "WAIT_T2: started response timer (deadline in 5000 ms).");
       }
       bool any = this->read_handshake_bytes();
       if (any) {
@@ -148,6 +260,7 @@ void JuraComponent::process_handshake() {
       break;
     }
     case HandshakeStage::SEND_T2: {
+      ESP_LOGD(TAG, "SEND_T2: sending '@t2:8120000000\\r\\n'.");
       if (this->connection_->write_decoded("@t2:8120000000\r\n")) {
         ESP_LOGD(TAG, "Sent @t2 response.");
         this->handshake_stage_ = HandshakeStage::WAIT_T3;
@@ -161,6 +274,7 @@ void JuraComponent::process_handshake() {
     case HandshakeStage::WAIT_T3: {
       if (this->handshake_deadline_ == 0) {
         this->handshake_deadline_ = esphome::millis() + 5000;
+        ESP_LOGD(TAG, "WAIT_T3: started response timer (deadline in 5000 ms).");
       }
       bool any = this->read_handshake_bytes();
       if (any) {
@@ -184,6 +298,7 @@ void JuraComponent::process_handshake() {
       break;
     }
     case HandshakeStage::SEND_T3: {
+      ESP_LOGD(TAG, "SEND_T3: sending '@t3\\r\\n' to finish handshake.");
       if (this->connection_->write_decoded("@t3\r\n")) {
         ESP_LOGI(TAG, "Handshake finished successfully.");
         this->handshake_stage_ = HandshakeStage::DONE;
@@ -214,6 +329,7 @@ void JuraComponent::restart_handshake(const char *reason) {
   this->handshake_buffer_.clear();
   this->handshake_deadline_ = 0;
   this->handshake_stage_ = HandshakeStage::HELLO;
+  this->last_logged_stage_ = HandshakeStage::FAILED;
 }
 
 bool JuraComponent::read_handshake_bytes() {
@@ -228,6 +344,12 @@ bool JuraComponent::read_handshake_bytes() {
     if (this->handshake_buffer_.size() > 128) {
       this->handshake_buffer_.erase(0, this->handshake_buffer_.size() - 128);
     }
+    ESP_LOGV(TAG,
+             "Handshake buffered byte: '%s' (0x%02X); buffer size=%zu; buffer now '%s' (hex %s)",
+             format_printable_char(byte).c_str(), static_cast<unsigned int>(byte),
+             this->handshake_buffer_.size(),
+             format_buffer_preview(this->handshake_buffer_).c_str(),
+             format_buffer_hex_preview(this->handshake_buffer_).c_str());
   }
   return read_any;
 }

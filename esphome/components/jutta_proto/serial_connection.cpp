@@ -50,6 +50,7 @@ bool SerialConnection::write_serial_byte(uint8_t byte) const {
 
 void SerialConnection::flush() const {
     if (this->parent_ != nullptr) {
+        ESP_LOGVV(TAG, "Flushing underlying UART component TX buffer.");
         this->parent_->flush();
     }
 }

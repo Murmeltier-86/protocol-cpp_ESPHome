@@ -43,6 +43,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
   std::unique_ptr<::jutta_proto::CoffeeMaker> coffee_maker_;
   HandshakeStage handshake_stage_{HandshakeStage::IDLE};
+  HandshakeStage last_logged_stage_{HandshakeStage::FAILED};
   std::string handshake_buffer_;
   std::string device_type_;
   std::string handshake_t2_response_;
