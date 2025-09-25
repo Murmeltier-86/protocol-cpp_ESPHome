@@ -37,8 +37,8 @@ button:
           coffee: espresso
 ```
 
-Available options for `coffee` are `espresso`, `coffee`, `cappuccino`, `milk_foam`, `caffe_barista`, `lungo_barista`,
-`espresso_doppio`, and `macchiato`.
+Available options for `coffee` are `espresso`, `coffee`, `cappuccino`, `milk_foam`, `hot_water`, `caffe_barista`, `lungo_barista`,
+`espresso_doppio`, `macchiato`, `two_espresso` (alias `two_espressi`), and `two_coffee` (alias `two_coffees`).
 
 ### Brew with custom timing
 

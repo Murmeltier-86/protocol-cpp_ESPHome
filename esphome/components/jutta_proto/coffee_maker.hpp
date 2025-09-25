@@ -26,6 +26,9 @@ class CoffeeMaker {
         LUNGO_BARISTA = 5,
         ESPRESSO_DOPPIO = 6,
         MACCHIATO = 7,
+        HOT_WATER = 8,
+        TWO_ESPRESSO = 9,
+        TWO_COFFEE = 10,
     };
     enum jutta_button_t {
         BUTTON_1 = 1,
@@ -43,11 +46,26 @@ class CoffeeMaker {
     /**
      * Mapping of all coffee types to page.
      **/
-    std::map<coffee_t, size_t> coffee_page_map{{coffee_t::ESPRESSO, 0}, {coffee_t::COFFEE, 0}, {coffee_t::CAPPUCCINO, 0}, {coffee_t::MILK_FOAM, 0}, {coffee_t::CAFFE_BARISTA, 1}, {coffee_t::LUNGO_BARISTA, 1}, {coffee_t::ESPRESSO_DOPPIO, 1}, {coffee_t::MACCHIATO, 1}};
+    std::map<coffee_t, size_t> coffee_page_map{{coffee_t::ESPRESSO, 0},      {coffee_t::COFFEE, 0},
+                                               {coffee_t::CAPPUCCINO, 0},    {coffee_t::MILK_FOAM, 0},
+                                               {coffee_t::HOT_WATER, 0},     {coffee_t::CAFFE_BARISTA, 1},
+                                               {coffee_t::LUNGO_BARISTA, 1}, {coffee_t::ESPRESSO_DOPPIO, 1},
+                                               {coffee_t::MACCHIATO, 1}};
     /**
      * Mapping of all coffee types to their button.
      **/
-    std::map<coffee_t, jutta_button_t> coffee_button_map{{coffee_t::ESPRESSO, jutta_button_t::BUTTON_1}, {coffee_t::COFFEE, jutta_button_t::BUTTON_2}, {coffee_t::CAPPUCCINO, jutta_button_t::BUTTON_4}, {coffee_t::MILK_FOAM, jutta_button_t::BUTTON_5}, {coffee_t::CAFFE_BARISTA, jutta_button_t::BUTTON_1}, {coffee_t::LUNGO_BARISTA, jutta_button_t::BUTTON_2}, {coffee_t::ESPRESSO_DOPPIO, jutta_button_t::BUTTON_4}, {coffee_t::MACCHIATO, jutta_button_t::BUTTON_5}};
+    std::map<coffee_t, jutta_button_t> coffee_button_map{{coffee_t::ESPRESSO, jutta_button_t::BUTTON_1},
+                                                         {coffee_t::COFFEE, jutta_button_t::BUTTON_2},
+                                                         {coffee_t::HOT_WATER, jutta_button_t::BUTTON_3},
+                                                         {coffee_t::CAPPUCCINO, jutta_button_t::BUTTON_4},
+                                                         {coffee_t::MILK_FOAM, jutta_button_t::BUTTON_5},
+                                                         {coffee_t::CAFFE_BARISTA, jutta_button_t::BUTTON_1},
+                                                         {coffee_t::LUNGO_BARISTA, jutta_button_t::BUTTON_2},
+                                                         {coffee_t::ESPRESSO_DOPPIO, jutta_button_t::BUTTON_4},
+                                                         {coffee_t::MACCHIATO, jutta_button_t::BUTTON_5}};
+
+    std::map<coffee_t, std::string> coffee_product_map{{coffee_t::TWO_ESPRESSO, "PR:12\r\n"},
+                                                       {coffee_t::TWO_COFFEE, "PR:13\r\n"}};
 
     /**
      * The current page we are on.
@@ -120,10 +138,11 @@ class CoffeeMaker {
     };
 
     struct BrewCoffeeState {
-        enum class Stage { EnsurePage, PressButton, Done } stage{Stage::EnsurePage};
+        enum class Stage { EnsurePage, PressButton, SendProduct, Done } stage{Stage::EnsurePage};
         coffee_t coffee{coffee_t::ESPRESSO};
         size_t target_page{0};
         jutta_button_t button{jutta_button_t::BUTTON_1};
+        std::string product_command{};
     };
 
     struct CustomBrewState {
@@ -235,6 +254,9 @@ inline constexpr CoffeeMaker::coffee_t CAFFE_BARISTA = CoffeeMaker::coffee_t::CA
 inline constexpr CoffeeMaker::coffee_t LUNGO_BARISTA = CoffeeMaker::coffee_t::LUNGO_BARISTA;
 inline constexpr CoffeeMaker::coffee_t ESPRESSO_DOPPIO = CoffeeMaker::coffee_t::ESPRESSO_DOPPIO;
 inline constexpr CoffeeMaker::coffee_t MACCHIATO = CoffeeMaker::coffee_t::MACCHIATO;
+inline constexpr CoffeeMaker::coffee_t HOT_WATER = CoffeeMaker::coffee_t::HOT_WATER;
+inline constexpr CoffeeMaker::coffee_t TWO_ESPRESSO = CoffeeMaker::coffee_t::TWO_ESPRESSO;
+inline constexpr CoffeeMaker::coffee_t TWO_COFFEE = CoffeeMaker::coffee_t::TWO_COFFEE;
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto
 //---------------------------------------------------------------------------
