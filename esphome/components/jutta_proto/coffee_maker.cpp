@@ -52,9 +52,23 @@ void CoffeeMaker::brew_coffee(coffee_t coffee) {
     }
 
     this->brew_state_.coffee = coffee;
-    this->brew_state_.target_page = this->get_page_num(coffee);
-    this->brew_state_.button = this->get_button_num(coffee);
-    this->brew_state_.stage = BrewCoffeeState::Stage::EnsurePage;
+    this->brew_state_.product_command.clear();
+
+    auto button_it = this->coffee_button_map.find(coffee);
+    if (button_it != this->coffee_button_map.end()) {
+        this->brew_state_.target_page = this->get_page_num(coffee);
+        this->brew_state_.button = button_it->second;
+        this->brew_state_.stage = BrewCoffeeState::Stage::EnsurePage;
+    } else {
+        auto command_it = this->coffee_product_map.find(coffee);
+        if (command_it != this->coffee_product_map.end()) {
+            this->brew_state_.product_command = command_it->second;
+            this->brew_state_.stage = BrewCoffeeState::Stage::SendProduct;
+        } else {
+            ESP_LOGE(TAG, "Unsupported coffee type requested: %u", static_cast<unsigned>(coffee));
+            return;
+        }
+    }
     this->start_operation(OperationType::BrewCoffee);
 }
 
@@ -94,22 +108,20 @@ void CoffeeMaker::loop() {
 }
 
 size_t CoffeeMaker::get_page_num(coffee_t coffee) const {
-    for (const std::pair<const coffee_t, size_t>& c : this->coffee_page_map) {
-        if (c.first == coffee) {
-            return c.second;
-        }
+    auto it = this->coffee_page_map.find(coffee);
+    if (it != this->coffee_page_map.end()) {
+        return it->second;
     }
-    assert(false);  // Should not happen
-    return std::numeric_limits<size_t>::max();
+    ESP_LOGW(TAG, "No page mapping for coffee type %u", static_cast<unsigned>(coffee));
+    return this->pageNum;
 }
 
 CoffeeMaker::jutta_button_t CoffeeMaker::get_button_num(coffee_t coffee) const {
-    for (const std::pair<const coffee_t, jutta_button_t>& c : this->coffee_button_map) {
-        if (c.first == coffee) {
-            return c.second;
-        }
+    auto it = this->coffee_button_map.find(coffee);
+    if (it != this->coffee_button_map.end()) {
+        return it->second;
     }
-    assert(false);  // Should not happen
+    ESP_LOGW(TAG, "No button mapping for coffee type %u", static_cast<unsigned>(coffee));
     return jutta_button_t::BUTTON_6;
 }
 
@@ -255,6 +267,18 @@ void CoffeeMaker::handle_brew_coffee() {
         case BrewCoffeeState::Stage::PressButton: {
             CommandResult command_result = this->run_press_button(this->brew_state_.button);
             if (this->handle_command(command_result, "Pressing brew button")) {
+                this->brew_state_.stage = BrewCoffeeState::Stage::Done;
+            }
+            break;
+        }
+        case BrewCoffeeState::Stage::SendProduct: {
+            if (this->brew_state_.product_command.empty()) {
+                ESP_LOGE(TAG, "Missing command for coffee type %u", static_cast<unsigned>(this->brew_state_.coffee));
+                this->operation_failed_ = true;
+                break;
+            }
+            CommandResult command_result = this->run_command(this->brew_state_.product_command);
+            if (this->handle_command(command_result, "Sending product command")) {
                 this->brew_state_.stage = BrewCoffeeState::Stage::Done;
             }
             break;

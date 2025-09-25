@@ -32,10 +32,16 @@ COFFEE_TYPES = {
     "coffee": CoffeeType.COFFEE,
     "cappuccino": CoffeeType.CAPPUCCINO,
     "milk_foam": CoffeeType.MILK_FOAM,
+    "hot_water": CoffeeType.HOT_WATER,
+    "hotwater": CoffeeType.HOT_WATER,
     "caffe_barista": CoffeeType.CAFFE_BARISTA,
     "lungo_barista": CoffeeType.LUNGO_BARISTA,
     "espresso_doppio": CoffeeType.ESPRESSO_DOPPIO,
     "macchiato": CoffeeType.MACCHIATO,
+    "two_espresso": CoffeeType.TWO_ESPRESSO,
+    "two_espressi": CoffeeType.TWO_ESPRESSO,
+    "two_coffee": CoffeeType.TWO_COFFEE,
+    "two_coffees": CoffeeType.TWO_COFFEE,
 }
 
 DEFAULT_GRIND_DURATION = cv.TimePeriod(milliseconds=3600)
