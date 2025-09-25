@@ -240,13 +240,14 @@ void JuraComponent::process_handshake() {
 
           if (lowercase_line.rfind("ty:", 0) == 0) {
             if (line.size() <= 3) {
-              ESP_LOGW(TAG, "HELLO: ignoring empty device type response line: '%s'",
+              ESP_LOGW(TAG,
+                       "HELLO: device type response line '%s' has no payload, proceeding with unknown type.",
                        format_printable_string(line).c_str());
-              continue;
+              this->device_type_ = "TY:unknown";
+            } else {
+              this->device_type_ = line;
+              ESP_LOGI(TAG, "Detected coffee maker response: %s", this->device_type_.c_str());
             }
-
-            this->device_type_ = line;
-            ESP_LOGI(TAG, "Detected coffee maker response: %s", this->device_type_.c_str());
             this->handshake_buffer_.clear();
             this->handshake_deadline_ = 0;
             this->handshake_stage_ = HandshakeStage::SEND_T1;
