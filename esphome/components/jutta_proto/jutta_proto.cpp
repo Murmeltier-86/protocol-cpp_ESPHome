@@ -239,19 +239,31 @@ void JuraComponent::process_handshake() {
                          [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
           if (lowercase_line.rfind("ty:", 0) == 0) {
+            auto advance_handshake = [&](const std::string &recorded_type, bool is_placeholder) {
+              this->device_type_ = recorded_type;
+              if (is_placeholder) {
+                ESP_LOGW(TAG,
+                         "HELLO: device type response line '%s' has no payload, proceeding with placeholder '%s'.",
+                         format_printable_string(line).c_str(), this->device_type_.c_str());
+              } else {
+                ESP_LOGI(TAG, "Detected coffee maker response: %s", this->device_type_.c_str());
+              }
+              this->handshake_buffer_.clear();
+              this->handshake_deadline_ = 0;
+              this->handshake_stage_ = HandshakeStage::SEND_T1;
+              this->handshake_hello_request_sent_ = false;
+              handled = true;
+            };
+
             if (line.size() <= 3) {
-              ESP_LOGW(TAG, "HELLO: ignoring empty device type response line: '%s'",
-                       format_printable_string(line).c_str());
-              continue;
+              advance_handshake("TY:unknown", true);
+            } else {
+              advance_handshake(line, false);
             }
 
-            this->device_type_ = line;
-            ESP_LOGI(TAG, "Detected coffee maker response: %s", this->device_type_.c_str());
-            this->handshake_buffer_.clear();
-            this->handshake_deadline_ = 0;
-            this->handshake_stage_ = HandshakeStage::SEND_T1;
-            this->handshake_hello_request_sent_ = false;
-            handled = true;
+            if (handled) {
+              break;
+            }
           } else {
             ESP_LOGD(TAG, "HELLO: ignoring unexpected response line: '%s'",
                      format_printable_string(line).c_str());
