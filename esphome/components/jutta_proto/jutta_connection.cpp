@@ -105,7 +105,10 @@ bool try_extract_line(std::string& buffer, std::string& line) {
         return false;
     }
 
-
+    line = buffer.substr(0, terminator);
+    buffer.erase(0, terminator + 2);
+    return true;
+}
 
 inline bool is_possible_encoded_byte(uint8_t byte) {
     switch (byte) {
@@ -124,10 +127,15 @@ inline bool frames_equivalent(const std::array<uint8_t, 4>& lhs, const std::arra
         if (lhs[i] != rhs[i]) {
             return false;
         }
-
     }
+    return true;
 }
 
+inline void wait_for_jutta_gap() {
+    if (JUTTA_SERIAL_GAP_MS > 0) {
+        esphome::delay(JUTTA_SERIAL_GAP_MS);
+    }
+}
 
 }  // namespace
 
