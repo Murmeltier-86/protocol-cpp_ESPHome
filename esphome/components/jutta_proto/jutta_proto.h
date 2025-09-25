@@ -35,6 +35,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
  protected:
   enum class HandshakeStage { IDLE, HELLO, SEND_T1, WAIT_T2, SEND_T2, WAIT_T3, SEND_T3, DONE, FAILED };
 
+  static const char *handshake_stage_name(HandshakeStage stage);
+
   void process_handshake();
   void restart_handshake(const char *reason);
   bool read_handshake_bytes();

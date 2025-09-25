@@ -16,37 +16,13 @@ static const char *const TAG = "jutta_proto";
 
 constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 
-const char *handshake_stage_name(JuraComponent::HandshakeStage stage) {
-  switch (stage) {
-    case JuraComponent::HandshakeStage::IDLE:
-      return "idle";
-    case JuraComponent::HandshakeStage::HELLO:
-      return "hello";
-    case JuraComponent::HandshakeStage::SEND_T1:
-      return "send_t1";
-    case JuraComponent::HandshakeStage::WAIT_T2:
-      return "wait_t2";
-    case JuraComponent::HandshakeStage::SEND_T2:
-      return "send_t2";
-    case JuraComponent::HandshakeStage::WAIT_T3:
-      return "wait_t3";
-    case JuraComponent::HandshakeStage::SEND_T3:
-      return "send_t3";
-    case JuraComponent::HandshakeStage::DONE:
-      return "done";
-    case JuraComponent::HandshakeStage::FAILED:
-      return "failed";
-  }
-  return "unknown";
-}
-
 std::string format_printable_char(uint8_t byte) {
   switch (byte) {
-    case '\\r':
+    case '\r':
       return "\\r";
-    case '\\n':
+    case '\n':
       return "\\n";
-    case '\\t':
+    case '\t':
       return "\\t";
     default:
       break;
@@ -107,6 +83,30 @@ std::string format_buffer_hex_preview(const std::string &value) {
 
 }  // namespace
 
+const char *JuraComponent::handshake_stage_name(JuraComponent::HandshakeStage stage) {
+  switch (stage) {
+    case JuraComponent::HandshakeStage::IDLE:
+      return "idle";
+    case JuraComponent::HandshakeStage::HELLO:
+      return "hello";
+    case JuraComponent::HandshakeStage::SEND_T1:
+      return "send_t1";
+    case JuraComponent::HandshakeStage::WAIT_T2:
+      return "wait_t2";
+    case JuraComponent::HandshakeStage::SEND_T2:
+      return "send_t2";
+    case JuraComponent::HandshakeStage::WAIT_T3:
+      return "wait_t3";
+    case JuraComponent::HandshakeStage::SEND_T3:
+      return "send_t3";
+    case JuraComponent::HandshakeStage::DONE:
+      return "done";
+    case JuraComponent::HandshakeStage::FAILED:
+      return "failed";
+  }
+  return "unknown";
+}
+
 void JuraComponent::setup() {
   if (this->parent_ == nullptr) {
     ESP_LOGE(TAG, "UART parent not configured for JUTTA Proto component.");
@@ -124,8 +124,8 @@ void JuraComponent::setup() {
 void JuraComponent::loop() {
   if (this->handshake_stage_ != this->last_logged_stage_) {
     ESP_LOGI(TAG, "Handshake stage changed: %s -> %s (buffer size=%zu, preview='%s', hex %s)",
-             handshake_stage_name(this->last_logged_stage_),
-             handshake_stage_name(this->handshake_stage_), this->handshake_buffer_.size(),
+             JuraComponent::handshake_stage_name(this->last_logged_stage_),
+             JuraComponent::handshake_stage_name(this->handshake_stage_), this->handshake_buffer_.size(),
              format_buffer_preview(this->handshake_buffer_).c_str(),
              format_buffer_hex_preview(this->handshake_buffer_).c_str());
     this->last_logged_stage_ = this->handshake_stage_;
