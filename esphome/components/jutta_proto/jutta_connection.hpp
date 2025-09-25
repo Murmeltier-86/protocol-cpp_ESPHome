@@ -200,7 +200,6 @@ class JuttaConnection {
      **/
     [[nodiscard]] bool read_decoded_unsafe(std::vector<uint8_t>& data) const;
 
-    [[nodiscard]] bool align_encoded_rx_buffer() const;
     void flush_serial_input() const;
 
     /**
@@ -259,6 +258,7 @@ class JuttaConnection {
         bool active{false};
         std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
         uint32_t start_time{0};
+        std::string buffer{};
     };
 
     StringWaitContext wait_string_context_{};
