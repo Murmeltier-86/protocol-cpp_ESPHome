@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <deque>
 
 #include "serial_connection.hpp"
 
@@ -198,6 +199,9 @@ class JuttaConnection {
      * Not thread safe!
      **/
     [[nodiscard]] bool read_decoded_unsafe(std::vector<uint8_t>& data) const;
+
+    [[nodiscard]] bool align_encoded_rx_buffer() const;
+    void flush_serial_input() const;
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.

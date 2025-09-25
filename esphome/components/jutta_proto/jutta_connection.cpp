@@ -269,26 +269,32 @@ bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const 
     if (this->encoded_rx_buffer_.size() < buffer.size()) {
         wait_for_jutta_gap();
         std::array<uint8_t, 4> chunk{};
-        size_t size = serial.read_serial(chunk);
-        if (size > chunk.size()) {
-            ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - ignoring.", size);
-            size = chunk.size();
+        size_t read = serial.read_serial(chunk);
+        if (read > chunk.size()) {
+            ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - ignoring.", read);
+            read = chunk.size();
         }
 
-        if (size == 0) {
+        if (read == 0) {
             if (this->encoded_rx_buffer_.empty()) {
                 ESP_LOGV(TAG, "No serial data found.");
             }
             return false;
         }
 
-        this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + size);
-
+        this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + read);
     }
-    if (size < buffer.size()) {
-        ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - ignoring.", size);
+
+    if (this->encoded_rx_buffer_.size() < buffer.size()) {
+        ESP_LOGW(TAG, "Invalid amount of UART data found while forming encoded frame (%zu byte).",
+                 this->encoded_rx_buffer_.size());
         return false;
     }
+
+    std::copy_n(this->encoded_rx_buffer_.begin(), buffer.size(), buffer.begin());
+    this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin(),
+                                   this->encoded_rx_buffer_.begin() + buffer.size());
+
     ESP_LOGV(TAG, "Read 4 encoded bytes.");
     return true;
 }
