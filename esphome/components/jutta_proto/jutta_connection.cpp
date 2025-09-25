@@ -344,26 +344,17 @@ uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
 bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData) const {
     ESP_LOGVV(TAG, "Writing encoded frame: %s", format_hex(encData).c_str());
 
-    bool result = true;
-    size_t index = 0;
-    for (uint8_t byte : encData) {
-        ESP_LOGVV(TAG, " -> Writing encoded byte %zu/%zu: 0x%02X", index + 1, encData.size(), byte);
-        if (!serial.write_serial_byte(byte)) {
-            ESP_LOGE(TAG, "Failed to write encoded byte %zu (0x%02X) to UART.", index, byte);
-            result = false;
-            break;
-        }
-        ESP_LOGVV(TAG, " -> Flushing UART TX buffer after encoded byte %zu", index + 1);
-        serial.flush();
-        ESP_LOGVV(TAG, " -> Waiting %u ms for inter-byte gap", JUTTA_SERIAL_GAP_MS);
-        wait_for_jutta_gap();
-        ++index;
+    if (!serial.write_serial(encData)) {
+        ESP_LOGE(TAG, "Failed to write encoded frame to UART.");
+        return false;
     }
 
-    if (result) {
-        ESP_LOGVV(TAG, "Encoded frame transmitted successfully.");
-    }
-    return result;
+    ESP_LOGVV(TAG, " -> Flushing UART TX buffer after encoded frame");
+    serial.flush();
+    ESP_LOGVV(TAG, " -> Waiting %u ms for inter-frame gap", JUTTA_SERIAL_GAP_MS);
+    wait_for_jutta_gap();
+    ESP_LOGVV(TAG, "Encoded frame transmitted successfully.");
+    return true;
 }
 
 bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const {
