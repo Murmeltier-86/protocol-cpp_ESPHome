@@ -101,6 +101,18 @@ class JuttaConnection {
                                                                  std::chrono::milliseconds{5000});
 
     /**
+     * Polls for the next CRLF-terminated response line.
+     * Returns true if a complete line became available and stores it in "line" without the trailing CRLF.
+     * Returns false when no complete line has been received yet.
+     */
+    bool poll_response_line(std::string& line);
+
+    /**
+     * Clears buffered fragments collected while polling for response lines.
+     */
+    void reset_response_line_buffer();
+
+    /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
      * [Thread Safe]
      **/
@@ -270,6 +282,9 @@ class JuttaConnection {
 
     // Buffer for decoded bytes that were read ahead of the consumer.
     mutable std::deque<uint8_t> decoded_rx_buffer_{};
+
+    // Buffer for decoded bytes collected while looking for complete CRLF-terminated lines.
+    mutable std::string response_line_buffer_{};
 
     void reinject_decoded_front(const std::string& data) const;
 

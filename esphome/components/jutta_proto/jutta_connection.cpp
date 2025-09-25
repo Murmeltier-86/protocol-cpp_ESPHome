@@ -60,13 +60,13 @@ std::string format_printable(const uint8_t* data, size_t length) {
     for (size_t i = 0; i < length; ++i) {
         const unsigned char c = data[i];
         switch (c) {
-            case '\\r':
+            case '\r':
                 stream << "\\r";
                 break;
-            case '\\n':
+            case '\n':
                 stream << "\\n";
                 break;
-            case '\\t':
+            case '\t':
                 stream << "\\t";
                 break;
             default:
@@ -99,12 +99,12 @@ std::string format_printable(uint8_t byte) {
     return format_printable(&byte, 1);
 }
 
-inline void wait_for_jutta_gap() {
-    const uint32_t start = esphome::millis();
-    while (esphome::millis() - start < JUTTA_SERIAL_GAP_MS) {
-        // Busy-wait to preserve the required 8 ms spacing between JUTTA bytes.
+bool try_extract_line(std::string& buffer, std::string& line) {
+    auto terminator = buffer.find("\r\n");
+    if (terminator == std::string::npos) {
+        return false;
     }
-}
+
 
 
 inline bool is_possible_encoded_byte(uint8_t byte) {
@@ -124,8 +124,8 @@ inline bool frames_equivalent(const std::array<uint8_t, 4>& lhs, const std::arra
         if (lhs[i] != rhs[i]) {
             return false;
         }
+
     }
-    return true;
 }
 
 
@@ -425,6 +425,7 @@ void JuttaConnection::flush_serial_input() const {
                  this->decoded_rx_buffer_.size() == 1 ? "" : "s");
         this->decoded_rx_buffer_.clear();
     }
+
     std::array<uint8_t, 4> discard{};
     while (true) {
         size_t read = serial.read_serial(discard);
@@ -456,6 +457,40 @@ void JuttaConnection::reinject_decoded_front(const std::string& data) const {
     this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.begin(), encoded.begin(), encoded.end());
     ESP_LOGV(TAG, "Re-injected %zu decoded byte%s (encoded %zu bytes) to front of buffer: '%s' (hex %s)", data.size(),
              data.size() == 1 ? "" : "s", encoded.size(), format_printable(data).c_str(), format_hex(encoded).c_str());
+}
+
+bool JuttaConnection::poll_response_line(std::string& line) {
+    if (try_extract_line(this->response_line_buffer_, line)) {
+        ESP_LOGD(TAG, "Polled buffered response line: '%s'", format_printable(line).c_str());
+        return true;
+    }
+
+    std::vector<uint8_t> buffer;
+    if (!read_decoded_unsafe(buffer) || buffer.empty()) {
+        return false;
+    }
+
+    std::string incoming = vec_to_string(buffer);
+    this->response_line_buffer_.append(incoming);
+    ESP_LOGD(TAG, "Received chunk while polling for response line: '%s' (hex %s) -> buffer '%s'",
+             format_printable(incoming).c_str(), format_hex(buffer).c_str(),
+             format_printable(this->response_line_buffer_).c_str());
+
+    if (try_extract_line(this->response_line_buffer_, line)) {
+        ESP_LOGD(TAG, "Polled response line: '%s'", format_printable(line).c_str());
+        return true;
+    }
+
+    return false;
+}
+
+void JuttaConnection::reset_response_line_buffer() {
+    if (!this->response_line_buffer_.empty()) {
+        ESP_LOGD(TAG, "Clearing %zu byte%s of buffered response line fragments.",
+                 this->response_line_buffer_.size(),
+                 this->response_line_buffer_.size() == 1 ? "" : "s");
+        this->response_line_buffer_.clear();
+    }
 }
 
 

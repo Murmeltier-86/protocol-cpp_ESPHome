@@ -330,6 +330,9 @@ void JuraComponent::restart_handshake(const char *reason) {
   this->handshake_deadline_ = 0;
   this->handshake_stage_ = HandshakeStage::HELLO;
   this->last_logged_stage_ = HandshakeStage::FAILED;
+  if (this->connection_ != nullptr) {
+    this->connection_->reset_response_line_buffer();
+  }
 }
 
 bool JuraComponent::read_handshake_bytes() {
@@ -337,17 +340,17 @@ bool JuraComponent::read_handshake_bytes() {
     return false;
   }
   bool read_any = false;
-  uint8_t byte = 0;
-  while (this->connection_->read_decoded(&byte)) {
+  std::string line;
+  while (this->connection_->poll_response_line(line)) {
     read_any = true;
-    this->handshake_buffer_.push_back(static_cast<char>(byte));
+    this->handshake_buffer_.append(line);
+    this->handshake_buffer_.append("\r\n");
     if (this->handshake_buffer_.size() > 128) {
       this->handshake_buffer_.erase(0, this->handshake_buffer_.size() - 128);
     }
     ESP_LOGV(TAG,
-             "Handshake buffered byte: '%s' (0x%02X); buffer size=%zu; buffer now '%s' (hex %s)",
-             format_printable_char(byte).c_str(), static_cast<unsigned int>(byte),
-             this->handshake_buffer_.size(),
+             "Handshake buffered line: '%s'; buffer size=%zu; buffer now '%s' (hex %s)",
+             format_printable_string(line).c_str(), this->handshake_buffer_.size(),
              format_buffer_preview(this->handshake_buffer_).c_str(),
              format_buffer_hex_preview(this->handshake_buffer_).c_str());
   }
