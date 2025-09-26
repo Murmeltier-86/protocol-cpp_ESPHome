@@ -88,6 +88,17 @@ class CoffeeMaker {
      * In case it changes from true to false, the coffee maker will cancel brewing and will reset the coffee maker to it's default state before returning.
      **/
     void brew_custom_coffee(const bool* cancel, const std::chrono::milliseconds& grindTime = std::chrono::milliseconds{3600}, const std::chrono::milliseconds& waterTime = std::chrono::milliseconds{40000});
+    struct SequenceStep {
+        enum class Type { Command, Delay } type{Type::Command};
+        std::string command{};
+        uint32_t delay_ms{0};
+        std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
+        std::string description{};
+    };
+    /**
+     * Runs a manually defined sequence of commands and delays.
+     **/
+    void run_sequence(const std::vector<SequenceStep>& steps);
     /**
      * Progresses the internal state machine.
      * Has to be called regularly from the ESPHome loop.
@@ -102,7 +113,13 @@ class CoffeeMaker {
  private:
     enum class CommandResult { InProgress, Success, Timeout, Error };
     enum class StepResult { InProgress, Done, Failed };
-    enum class OperationType { Idle, SwitchPage, BrewCoffee, BrewCustomCoffee };
+    enum class OperationType { Idle, SwitchPage, BrewCoffee, BrewCustomCoffee, RunSequence };
+
+    struct SequenceState {
+        std::vector<SequenceStep> steps{};
+        size_t current_index{0};
+        uint32_t wait_target{0};
+    };
 
     struct CommandState {
         bool active{false};
@@ -211,6 +228,7 @@ class CoffeeMaker {
     void handle_switch_page();
     void handle_brew_coffee();
     void handle_custom_brew();
+    void handle_sequence();
     [[nodiscard]] bool cancel_requested() const;
     void start_hot_water();
     HotWaterResult run_hot_water();
@@ -222,6 +240,7 @@ class CoffeeMaker {
     CustomBrewState custom_state_{};
     HotWaterState hot_water_state_{};
     CommandState command_state_{};
+    SequenceState sequence_state_{};
     bool operation_failed_{false};
 };
 

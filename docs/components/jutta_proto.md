@@ -74,6 +74,44 @@ script:
           page: 1
 ```
 
+### Run a manual command sequence
+
+```yaml
+script:
+  - id: brew_manual_recipe
+    mode: restart
+    then:
+      - jutta_proto.run_sequence:
+          id: jura
+          sequence:
+            - command: grinder_on
+              description: "Grind on"
+            - delay: 3s
+              description: "Let the grinder run"
+            - command: grinder_off
+            - command: brew_group_to_brewing_position
+            - command: coffee_press_on
+            - delay: 500ms
+              description: "Compress the coffee"
+            - command: coffee_press_off
+            - command: water_heater_on
+            - command: water_pump_on
+            - delay: 2s
+              description: "Pre-brew"
+            - command: water_pump_off
+            - command: water_heater_off
+            - delay: 2s
+            - command: water_heater_on
+            - command: water_pump_on
+            - delay: 40s
+              description: "Dispense water"
+            - command: water_pump_off
+            - command: water_heater_off
+            - command: brew_group_reset
+```
+
+Use `raw` instead of `command` when you need to send a custom UART command string. Raw commands automatically append `\r\n` if it is missing.
+
 ## Diagnostics
 
 The component logs handshake progress during startup. The `dump_config()` output lists the detected machine type as well as the
