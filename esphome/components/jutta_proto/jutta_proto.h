@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -27,6 +28,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void start_custom_brew(uint32_t grind_duration_ms, uint32_t water_duration_ms);
   void cancel_custom_brew();
   void switch_page(uint32_t page);
+  void run_sequence(const std::vector<::jutta_proto::CoffeeMaker::SequenceStep> &steps);
 
   bool is_ready() const { return this->handshake_stage_ == HandshakeStage::DONE && this->coffee_maker_ != nullptr; }
   bool is_busy() const;
@@ -97,6 +99,33 @@ class SwitchPageAction : public esphome::Action<> {
  protected:
   JuraComponent *parent_;
   uint32_t page_{0};
+};
+
+class RunSequenceAction : public esphome::Action<> {
+ public:
+  explicit RunSequenceAction(JuraComponent *parent) : parent_(parent) {}
+  void add_command_step(const std::string &command, uint32_t delay_ms, uint32_t timeout_ms,
+                        const std::string &description) {
+    ::jutta_proto::CoffeeMaker::SequenceStep step;
+    step.type = ::jutta_proto::CoffeeMaker::SequenceStep::Type::Command;
+    step.command = command;
+    step.delay_ms = delay_ms;
+    step.timeout = std::chrono::milliseconds{timeout_ms};
+    step.description = description;
+    steps_.push_back(step);
+  }
+  void add_delay_step(uint32_t delay_ms, const std::string &description) {
+    ::jutta_proto::CoffeeMaker::SequenceStep step;
+    step.type = ::jutta_proto::CoffeeMaker::SequenceStep::Type::Delay;
+    step.delay_ms = delay_ms;
+    step.description = description;
+    steps_.push_back(step);
+  }
+  void play() override { this->parent_->run_sequence(steps_); }
+
+ protected:
+  JuraComponent *parent_;
+  std::vector<::jutta_proto::CoffeeMaker::SequenceStep> steps_{};
 };
 
 }  // namespace jutta_component

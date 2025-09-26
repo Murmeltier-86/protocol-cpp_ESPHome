@@ -447,6 +447,18 @@ void JuraComponent::switch_page(uint32_t page) {
   this->coffee_maker_->switch_page(page);
 }
 
+void JuraComponent::run_sequence(const std::vector<::jutta_proto::CoffeeMaker::SequenceStep> &steps) {
+  if (!this->is_ready()) {
+    ESP_LOGW(TAG, "Cannot run sequence - component not ready.");
+    return;
+  }
+  if (this->coffee_maker_->is_locked()) {
+    ESP_LOGW(TAG, "Cannot run sequence - coffee maker busy.");
+    return;
+  }
+  this->coffee_maker_->run_sequence(steps);
+}
+
 bool JuraComponent::is_busy() const {
   if (this->coffee_maker_ == nullptr) {
     return false;
