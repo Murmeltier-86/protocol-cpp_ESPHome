@@ -5,7 +5,7 @@
 //---------------------------------------------------------------------------
 namespace jutta_proto {
 //---------------------------------------------------------------------------
-const std::string JUTTA_POWER_OFF = "AN:01\r\n";
+const std::string JUTTA_POWER_OFF = "AN:02\r\n";
 const std::string JUTTA_TEST_MODE_ON = "AN:20\r\n";
 const std::string JUTTA_TEST_MODE_OFF = "AN:21\r\n";
 
