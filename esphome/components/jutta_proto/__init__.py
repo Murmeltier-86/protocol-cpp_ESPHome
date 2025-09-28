@@ -118,6 +118,38 @@ SEQUENCE_COMMAND_EXPRESSIONS = {
 JURA_COMPONENT_IDS = []
 
 
+def _unregister_action(name):
+    """Remove an existing automation action registration if possible."""
+
+    registry = getattr(automation, "ACTION_REGISTRY", None)
+    if registry is None:
+        return False
+
+    for method_name in ("unregister", "deregister", "pop", "remove"):
+        method = getattr(registry, method_name, None)
+        if method is None:
+            continue
+        try:
+            if method_name == "pop":
+                method(name, None)
+            else:
+                method(name)
+        except (KeyError, TypeError, AttributeError):
+            continue
+        else:
+            return True
+
+    if hasattr(registry, "__delitem__"):
+        try:
+            del registry[name]
+        except (KeyError, TypeError, AttributeError):
+            pass
+        else:
+            return True
+
+    return False
+
+
 def _register_action_once(name, action_cls, schema):
     """Register an automation action only once.
 
@@ -129,37 +161,21 @@ def _register_action_once(name, action_cls, schema):
     registration and keep the reload workflow working.
     """
 
-    registry = getattr(automation, "ACTION_REGISTRY", None)
-    already_registered = False
-
-    if registry is not None:
-        if hasattr(registry, "get"):
-            try:
-                existing = registry.get(name)
-            except (KeyError, TypeError, ValueError, AttributeError):
-                pass
-            else:
-                already_registered = existing is not None
-        elif hasattr(registry, "__contains__"):
-            try:
-                already_registered = name in registry
-            except TypeError:
-                already_registered = False
-
-    if already_registered:
-        _LOGGER.debug("Action '%s' already registered, skipping duplicate", name)
-
-        def decorator(func):
-            return func
-
-        return decorator
+    def _register():
+        return automation.register_action(name, action_cls, schema)
 
     try:
-        return automation.register_action(name, action_cls, schema)
+        return _register()
     except Exception as err:  # pylint: disable=broad-except
         message = str(err)
         if "already registered" not in message.lower():
             raise
+
+        if _unregister_action(name):
+            _LOGGER.debug(
+                "Action '%s' already registered, replacing existing registration", name
+            )
+            return _register()
 
         _LOGGER.debug(
             "Action '%s' registration raised duplicate error, skipping second registration",
