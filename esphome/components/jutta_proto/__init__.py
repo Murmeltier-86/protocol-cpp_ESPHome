@@ -439,6 +439,24 @@ def _parse_machine_data_tree_with_sanitization(path):
             break
 
     raw = raw.lstrip()
+
+    if raw.startswith(b"<?xml"):
+        decl_end = raw.find(b"?>")
+        if decl_end != -1:
+            prefix = raw[: decl_end + 2]
+            suffix = raw[decl_end + 2 :]
+
+            while True:
+                next_decl = suffix.find(b"<?xml")
+                if next_decl == -1:
+                    break
+                next_end = suffix.find(b"?>", next_decl)
+                if next_end == -1:
+                    break
+                suffix = suffix[:next_decl] + suffix[next_end + 2 :]
+
+            raw = prefix + suffix
+
     return ET.ElementTree(ET.fromstring(raw))
 
 
