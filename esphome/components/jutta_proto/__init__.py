@@ -1,7 +1,9 @@
 import codecs
-import esphome.codegen as cg
+import logging
 import os
 import xml.etree.ElementTree as ET
+
+import esphome.codegen as cg
 
 import esphome.config_validation as cv
 from esphome import automation
@@ -47,6 +49,8 @@ CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
 CONF_MACHINE_DATA_XML = "machine_data_xml"
 
+
+_LOGGER = logging.getLogger(__name__)
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -143,12 +147,29 @@ def _register_action_once(name, action_cls, schema):
                 already_registered = False
 
     if already_registered:
+        _LOGGER.debug("Action '%s' already registered, skipping duplicate", name)
+
         def decorator(func):
             return func
 
         return decorator
 
-    return automation.register_action(name, action_cls, schema)
+    try:
+        return automation.register_action(name, action_cls, schema)
+    except Exception as err:  # pylint: disable=broad-except
+        message = str(err)
+        if "already registered" not in message.lower():
+            raise
+
+        _LOGGER.debug(
+            "Action '%s' registration raised duplicate error, skipping second registration",
+            name,
+        )
+
+        def decorator(func):
+            return func
+
+        return decorator
 
 
 def _validate_config(config):
