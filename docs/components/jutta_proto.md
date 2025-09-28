@@ -112,6 +112,49 @@ script:
 
 Use `raw` instead of `command` when you need to send a custom UART command string. Raw commands automatically append `\r\n` if it is missing.
 
+## Machine Data Sensors
+
+The Jura firmware exposes several machine data blocks (statistics, errors, status, and running processes). The component can
+publish them as individual `text_sensor` entities so the values can easily be displayed in Home Assistant dashboards or used in
+automations.
+
+Add a `machine_data` section to the component configuration and register one or multiple text sensors. When a single
+`text_sensor` entry is provided the raw XML payload is published. Alternatively, the individual sections can be configured to
+receive pre-formatted text output parsed from the XML response. All sensors are optional and can be combined as needed.
+
+```yaml
+text_sensor:
+  - platform: template
+    name: "JURA Machine Statistics"
+    id: jura_stats
+  - platform: template
+    name: "JURA Machine Errors"
+    id: jura_errors
+  - platform: template
+    name: "JURA Machine Status"
+    id: jura_status
+  - platform: template
+    name: "JURA Machine Processes"
+    id: jura_processes
+  - platform: template
+    name: "JURA Machine Data Raw"
+    id: jura_machine_raw
+
+jutta_proto:
+  id: jura
+  uart_id: jura_uart
+  machine_data:
+    statistics: jura_stats
+    errors: jura_errors
+    status: jura_status
+    processes: jura_processes
+    raw: jura_machine_raw
+```
+
+Each formatted sensor contains a human-readable rendering of its XML section. The parser supports the different response
+variants that have been observed in the official firmware so mixed content and nested tags are handled automatically. If only
+the `raw` sensor is configured the untouched XML payload is published instead.
+
 ## Diagnostics
 
 The component logs handshake progress during startup. The `dump_config()` output lists the detected machine type as well as the
