@@ -118,10 +118,38 @@ SEQUENCE_COMMAND_EXPRESSIONS = {
 JURA_COMPONENT_IDS = []
 
 
+def _get_action_registry():
+    return getattr(automation, "ACTION_REGISTRY", None)
+
+
+def _registry_contains(registry, name):
+    checks = [
+        lambda reg: reg.get(name) if hasattr(reg, "get") else None,
+        lambda reg: reg[name] if hasattr(reg, "__getitem__") else None,
+    ]
+
+    if hasattr(registry, "__contains__"):
+        try:
+            if name in registry:
+                return True
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+    for check in checks:
+        try:
+            value = check(registry)
+        except Exception:  # pylint: disable=broad-except
+            continue
+        if value is not None:
+            return True
+
+    return False
+
+
 def _unregister_action(name):
     """Remove an existing automation action registration if possible."""
 
-    registry = getattr(automation, "ACTION_REGISTRY", None)
+    registry = _get_action_registry()
     if registry is None:
         return False
 
@@ -161,31 +189,23 @@ def _register_action_once(name, action_cls, schema):
     registration and keep the reload workflow working.
     """
 
-    def _register():
-        return automation.register_action(name, action_cls, schema)
-
-    try:
-        return _register()
-    except Exception as err:  # pylint: disable=broad-except
-        message = str(err)
-        if "already registered" not in message.lower():
-            raise
-
+    registry = _get_action_registry()
+    if registry is not None and _registry_contains(registry, name):
         if _unregister_action(name):
             _LOGGER.debug(
                 "Action '%s' already registered, replacing existing registration", name
             )
-            return _register()
+        else:
+            _LOGGER.debug(
+                "Action '%s' already registered, keeping previous registration", name
+            )
 
-        _LOGGER.debug(
-            "Action '%s' registration raised duplicate error, skipping second registration",
-            name,
-        )
+            def decorator(func):
+                return func
 
-        def decorator(func):
-            return func
+            return decorator
 
-        return decorator
+    return automation.register_action(name, action_cls, schema)
 
 
 def _validate_config(config):
