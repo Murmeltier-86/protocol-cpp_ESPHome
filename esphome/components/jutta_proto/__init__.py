@@ -14,6 +14,17 @@ from esphome.const import (
     ICON_INFORMATION,
 )
 
+
+try:
+    from esphome.const import ENTITY_CATEGORY_DIAGNOSTIC
+except ImportError:
+    if hasattr(cv, "EntityCategory"):
+        ENTITY_CATEGORY_DIAGNOSTIC = cv.EntityCategory.DIAGNOSTIC
+    else:
+        from esphome.const import EntityCategory
+
+        ENTITY_CATEGORY_DIAGNOSTIC = EntityCategory.DIAGNOSTIC
+
 DEPENDENCIES = ["uart"]
 AUTO_LOAD = ["uart", "text_sensor"]
 
@@ -30,6 +41,7 @@ CONF_TIMEOUT = "timeout"
 CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
 CONF_MACHINE_DATA_XML = "machine_data_xml"
+
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -111,6 +123,7 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(): cv.declare_id(JuraComponent),
             cv.Optional(CONF_MACHINE_DATA): cv.file_,
             cv.Optional(CONF_MACHINE_DATA_XML): cv.file_,
+
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
@@ -314,6 +327,7 @@ async def to_code(config):
                     cg.std_string(entry["command"]), sensor, cg.std_string(entry["label"])
                 )
             )
+
 
 
 async def _get_parent(config):
