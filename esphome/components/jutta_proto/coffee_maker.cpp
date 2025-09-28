@@ -52,9 +52,23 @@ void CoffeeMaker::brew_coffee(coffee_t coffee) {
     }
 
     this->brew_state_.coffee = coffee;
-    this->brew_state_.target_page = this->get_page_num(coffee);
-    this->brew_state_.button = this->get_button_num(coffee);
-    this->brew_state_.stage = BrewCoffeeState::Stage::EnsurePage;
+    this->brew_state_.product_command.clear();
+
+    auto button_it = this->coffee_button_map.find(coffee);
+    if (button_it != this->coffee_button_map.end()) {
+        this->brew_state_.target_page = this->get_page_num(coffee);
+        this->brew_state_.button = button_it->second;
+        this->brew_state_.stage = BrewCoffeeState::Stage::EnsurePage;
+    } else {
+        auto command_it = this->coffee_product_map.find(coffee);
+        if (command_it != this->coffee_product_map.end()) {
+            this->brew_state_.product_command = command_it->second;
+            this->brew_state_.stage = BrewCoffeeState::Stage::SendProduct;
+        } else {
+            ESP_LOGE(TAG, "Unsupported coffee type requested: %u", static_cast<unsigned>(coffee));
+            return;
+        }
+    }
     this->start_operation(OperationType::BrewCoffee);
 }
 
@@ -77,6 +91,26 @@ void CoffeeMaker::brew_custom_coffee(const bool* cancel, const std::chrono::mill
     this->start_operation(OperationType::BrewCustomCoffee);
 }
 
+void CoffeeMaker::run_sequence(const std::vector<SequenceStep>& steps) {
+    if (this->locked) {
+        ESP_LOGW(TAG, "Coffee maker busy - cannot run sequence right now.");
+        return;
+    }
+
+    this->sequence_state_ = {};
+    this->sequence_state_.steps = steps;
+
+    if (this->sequence_state_.steps.empty()) {
+        ESP_LOGW(TAG, "Sequence is empty - nothing to execute.");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Starting manual sequence with %u steps.",
+             static_cast<unsigned>(this->sequence_state_.steps.size()));
+
+    this->start_operation(OperationType::RunSequence);
+}
+
 void CoffeeMaker::loop() {
     switch (this->current_operation_) {
         case OperationType::Idle:
@@ -90,26 +124,27 @@ void CoffeeMaker::loop() {
         case OperationType::BrewCustomCoffee:
             this->handle_custom_brew();
             break;
+        case OperationType::RunSequence:
+            this->handle_sequence();
+            break;
     }
 }
 
 size_t CoffeeMaker::get_page_num(coffee_t coffee) const {
-    for (const std::pair<const coffee_t, size_t>& c : this->coffee_page_map) {
-        if (c.first == coffee) {
-            return c.second;
-        }
+    auto it = this->coffee_page_map.find(coffee);
+    if (it != this->coffee_page_map.end()) {
+        return it->second;
     }
-    assert(false);  // Should not happen
-    return std::numeric_limits<size_t>::max();
+    ESP_LOGW(TAG, "No page mapping for coffee type %u", static_cast<unsigned>(coffee));
+    return this->pageNum;
 }
 
 CoffeeMaker::jutta_button_t CoffeeMaker::get_button_num(coffee_t coffee) const {
-    for (const std::pair<const coffee_t, jutta_button_t>& c : this->coffee_button_map) {
-        if (c.first == coffee) {
-            return c.second;
-        }
+    auto it = this->coffee_button_map.find(coffee);
+    if (it != this->coffee_button_map.end()) {
+        return it->second;
     }
-    assert(false);  // Should not happen
+    ESP_LOGW(TAG, "No button mapping for coffee type %u", static_cast<unsigned>(coffee));
     return jutta_button_t::BUTTON_6;
 }
 
@@ -255,6 +290,18 @@ void CoffeeMaker::handle_brew_coffee() {
         case BrewCoffeeState::Stage::PressButton: {
             CommandResult command_result = this->run_press_button(this->brew_state_.button);
             if (this->handle_command(command_result, "Pressing brew button")) {
+                this->brew_state_.stage = BrewCoffeeState::Stage::Done;
+            }
+            break;
+        }
+        case BrewCoffeeState::Stage::SendProduct: {
+            if (this->brew_state_.product_command.empty()) {
+                ESP_LOGE(TAG, "Missing command for coffee type %u", static_cast<unsigned>(this->brew_state_.coffee));
+                this->operation_failed_ = true;
+                break;
+            }
+            CommandResult command_result = this->run_command(this->brew_state_.product_command);
+            if (this->handle_command(command_result, "Sending product command")) {
                 this->brew_state_.stage = BrewCoffeeState::Stage::Done;
             }
             break;
@@ -561,6 +608,54 @@ void CoffeeMaker::handle_custom_brew() {
     }
 }
 
+void CoffeeMaker::handle_sequence() {
+    if (this->operation_failed_) {
+        this->finish_operation();
+        return;
+    }
+
+    if (this->sequence_state_.current_index >= this->sequence_state_.steps.size()) {
+        this->finish_operation();
+        return;
+    }
+
+    SequenceStep& step = this->sequence_state_.steps[this->sequence_state_.current_index];
+
+    if (step.type == SequenceStep::Type::Delay) {
+        if (step.delay_ms == 0) {
+            this->sequence_state_.current_index++;
+            if (this->sequence_state_.current_index >= this->sequence_state_.steps.size()) {
+                this->finish_operation();
+            }
+            return;
+        }
+
+        uint32_t now = esphome::millis();
+        if (this->sequence_state_.wait_target == 0) {
+            this->sequence_state_.wait_target = now + step.delay_ms;
+        }
+
+        if (time_reached(now, this->sequence_state_.wait_target)) {
+            this->sequence_state_.wait_target = 0;
+            this->sequence_state_.current_index++;
+            if (this->sequence_state_.current_index >= this->sequence_state_.steps.size()) {
+                this->finish_operation();
+            }
+        }
+        return;
+    }
+
+    const char* description = step.description.empty() ? step.command.c_str() : step.description.c_str();
+    CommandResult result = this->run_command(step.command, step.delay_ms, step.timeout);
+    if (this->handle_command(result, description)) {
+        this->sequence_state_.current_index++;
+        this->sequence_state_.wait_target = 0;
+        if (this->sequence_state_.current_index >= this->sequence_state_.steps.size()) {
+            this->finish_operation();
+        }
+    }
+}
+
 bool CoffeeMaker::is_locked() const { return this->locked; }
 
 void CoffeeMaker::start_operation(OperationType operation) {
@@ -578,6 +673,7 @@ void CoffeeMaker::finish_operation() {
     this->custom_state_.cancel_flag = nullptr;
     this->brew_state_ = {};
     this->switch_state_ = {};
+    this->sequence_state_ = {};
     this->current_operation_ = OperationType::Idle;
     this->operation_failed_ = false;
     this->locked = false;
@@ -589,6 +685,7 @@ void CoffeeMaker::reset_states() {
     this->custom_state_ = {};
     this->brew_state_ = {};
     this->switch_state_ = {};
+    this->sequence_state_ = {};
     this->current_operation_ = OperationType::Idle;
     this->operation_failed_ = false;
     this->locked = false;

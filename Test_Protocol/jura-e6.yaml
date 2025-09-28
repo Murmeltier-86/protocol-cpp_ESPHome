@@ -1,0 +1,128 @@
+esphome:
+  name: "jura-e6"
+  friendly_name: "Jura E6"
+  build_path: "../config/esphome/Jura"
+# On boot: attach sensors to C++ object
+  on_boot:
+    then:
+      - lambda: |-
+          id(jura_device)->set_text_sensor(id(jura_last_message));
+          id(jura_device)->set_total_counter_sensor(id(jura_total_counter));
+#          id(jura_device)->set_checksum_mode("repeat_key");
+#          id(jura_device)->set_heartbeat_interval_ms(40000);
+#          id(jura_device)->set_jutta_gap_ms(20);   
+
+
+
+esp8266:
+  board: d1_mini
+
+# Enable logging
+logger:
+  level: DEBUG
+
+external_components:
+  - source:
+      type: local
+      path: external_components
+    components: [ jura ]
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "key"
+
+ota:
+  - platform: esphome
+    password: "password"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  domain: .domain.local
+  reboot_timeout: 0s
+  fast_connect: true
+  passive_scan: true
+  enable_on_boot: true
+  id: my_wifi
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Jura E6 Fallback Hotspot"
+    password: "password"
+
+captive_portal:
+
+uart:
+  id: uart_bus
+  rx_pin: GPIO16
+  tx_pin: GPIO17
+  baud_rate: 9600
+  stop_bits: 1
+  parity: NONE
+  rx_buffer_size: 4096
+
+
+jura:
+  id: jura_device
+  uart_id: uart_bus
+  jutta_gap_ms: 8
+
+# Text sensor: last decoded message
+text_sensor:
+  - platform: template
+    name: "Jura Last Message"
+    id: jura_last_message
+
+# Total counter sensor (heuristic)
+sensor:
+  - platform: template
+    name: "Jura Total Counter"
+    id: jura_total_counter
+
+# On boot: attach sensors to C++ object
+
+# Switches for power and buttons for common drinks
+switch:
+  - platform: template
+    name: "Jura Power Off"
+    turn_on_action:
+      - lambda: |-
+          id(jura_device)->power_off();
+
+  - platform: template
+    name: "Jura Power On"
+    turn_on_action:
+      - lambda: |-
+          id(jura_device)->power_on();
+
+# Buttons for a few quick drinks (use brew_by_name to use full xml mapping)
+button:
+  - platform: template
+    name: "Brew Espresso"
+    on_press:
+      - lambda: |-
+          id(jura_device)->brew_by_name("Espresso");
+
+  - platform: template
+    name: "Brew Coffee"
+    on_press:
+      - lambda: |-
+          id(jura_device)->brew_by_name("Coffee");
+
+# Select with full list (uses mapping inside component)
+select:
+  - platform: template
+    name: "Jura Product Select"
+    id: jura_select
+    options:
+      - "Espresso"
+      - "Coffee"
+      - "Cappuccino"
+      - "Milk Foam"
+      - "Hotwater"
+      - "2 Espressi"
+      - "2 Coffee"
+    set_action:
+      - lambda: |-
+          id(jura_device)->brew_by_name(x);
