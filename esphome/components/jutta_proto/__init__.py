@@ -439,6 +439,24 @@ def _parse_machine_data_tree_with_sanitization(path):
             break
 
     raw = raw.lstrip()
+
+    # Some XML exports include the declaration twice which causes the parser
+    # to abort with ``XML or text declaration not at start of entity``. Strip
+    # any additional declaration blocks while keeping the first.
+    if raw.startswith(b"<?xml"):
+        first_end = raw.find(b"?>")
+        if first_end != -1:
+            prefix = raw[: first_end + 2]
+            suffix = raw[first_end + 2 :]
+            suffix = suffix.lstrip()
+            while suffix.startswith(b"<?xml"):
+                second_end = suffix.find(b"?>")
+                if second_end == -1:
+                    break
+                suffix = suffix[second_end + 2 :]
+                suffix = suffix.lstrip()
+            raw = prefix + b"\n" + suffix
+
     return ET.ElementTree(ET.fromstring(raw))
 
 
