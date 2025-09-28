@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 
+namespace esphome {
 namespace jutta_component {
 namespace {
 
@@ -342,4 +343,5 @@ std::string format_machine_data_section(const MachineDataNode *node) {
 }
 
 }  // namespace jutta_component
+}  // namespace esphome
 
