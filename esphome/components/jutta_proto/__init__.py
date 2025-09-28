@@ -18,7 +18,7 @@ CONF_SLEEP = "sleep"
 CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_DESCRIPTION = "description"
-
+CONF_MACHINE_DATA = "machine_data"
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -90,6 +90,7 @@ CONFIG_SCHEMA = (
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(JuraComponent),
+            cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(),
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
@@ -231,6 +232,10 @@ async def to_code(config):
     JURA_COMPONENT_IDS.append(config[CONF_ID])
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
+
+    if CONF_MACHINE_DATA in config:
+        sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
+        cg.add(var.set_machine_data_sensor(sensor))
 
 
 async def _get_parent(config):
