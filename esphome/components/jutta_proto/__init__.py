@@ -1,3 +1,4 @@
+import codecs
 import esphome.codegen as cg
 import os
 import xml.etree.ElementTree as ET
@@ -151,7 +152,16 @@ def _parse_machine_data_banks(path):
     except OSError as err:
         raise cv.Invalid(f"Failed to open machine data XML '{path}': {err}") from err
     except ET.ParseError as err:
-        raise cv.Invalid(f"Invalid machine data XML '{path}': {err}") from err
+        try:
+            tree = _parse_machine_data_tree_with_sanitization(path)
+        except OSError as file_err:
+            raise cv.Invalid(
+                f"Failed to open machine data XML '{path}': {file_err}"
+            ) from file_err
+        except ET.ParseError as sanitized_err:
+            raise cv.Invalid(
+                f"Invalid machine data XML '{path}': {sanitized_err}"
+            ) from err
 
     root = tree.getroot()
     namespace = ""
@@ -174,6 +184,28 @@ def _parse_machine_data_banks(path):
         entries.append({"command": command, "label": label})
 
     return entries
+
+
+_KNOWN_BOMS = (
+    codecs.BOM_UTF8,
+    codecs.BOM_UTF16_LE,
+    codecs.BOM_UTF16_BE,
+    codecs.BOM_UTF32_LE,
+    codecs.BOM_UTF32_BE,
+)
+
+
+def _parse_machine_data_tree_with_sanitization(path):
+    with open(path, "rb") as file:
+        raw = file.read()
+
+    for bom in _KNOWN_BOMS:
+        if raw.startswith(bom):
+            raw = raw[len(bom) :]
+            break
+
+    raw = raw.lstrip()
+    return ET.ElementTree(ET.fromstring(raw))
 
 
 def _normalize_start_brew(value):
