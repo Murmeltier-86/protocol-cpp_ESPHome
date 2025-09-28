@@ -18,7 +18,6 @@ CONF_SLEEP = "sleep"
 CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_DESCRIPTION = "description"
-
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
 
@@ -86,7 +85,11 @@ JURA_COMPONENT_IDS = []
 
 
 CONFIG_SCHEMA = (
-    cv.Schema({cv.GenerateID(): cv.declare_id(JuraComponent)})
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(JuraComponent),
+        }
+    )
     .extend(uart.UART_DEVICE_SCHEMA)
     .extend(cv.COMPONENT_SCHEMA)
 )
@@ -226,7 +229,6 @@ async def to_code(config):
     JURA_COMPONENT_IDS.append(config[CONF_ID])
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
-
 
 async def _get_parent(config):
     if CONF_ID in config:
