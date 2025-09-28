@@ -4,6 +4,13 @@ from esphome import automation
 from esphome.components import text_sensor, uart
 from esphome.const import CONF_ID
 
+if hasattr(cv, "EntityCategory"):
+    ENTITY_CATEGORY_DIAGNOSTIC = cv.EntityCategory.DIAGNOSTIC
+else:
+    from esphome.const import EntityCategory
+
+    ENTITY_CATEGORY_DIAGNOSTIC = EntityCategory.DIAGNOSTIC
+
 DEPENDENCIES = ["uart"]
 AUTO_LOAD = ["uart"]
 
@@ -92,7 +99,7 @@ CONFIG_SCHEMA = (
             cv.GenerateID(): cv.declare_id(JuraComponent),
             cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(
                 icon="mdi:clipboard-text",
-                entity_category=cv.EntityCategory.DIAGNOSTIC,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
         }
     )
