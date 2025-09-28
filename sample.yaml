@@ -22,8 +22,6 @@ uart:
 jutta_proto:
   id: jura
   uart_id: jura_uart
-  machine_data:
-    name: "JURA Machine Data"
 
 # Convenience switches to remotely power the machine on/off
 switch:
