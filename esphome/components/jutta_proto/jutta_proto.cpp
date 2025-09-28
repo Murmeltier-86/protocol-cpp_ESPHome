@@ -1,6 +1,7 @@
 #include "esphome/components/jutta_proto/jutta_proto.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <iomanip>
 #include <sstream>
@@ -16,6 +17,9 @@ namespace {
 static const char *const TAG = "jutta_proto";
 
 constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
+constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 60000;
+constexpr uint32_t MACHINE_DATA_RETRY_DELAY_MS = 10000;
+constexpr uint32_t MACHINE_DATA_COMMAND_TIMEOUT_MS = 4000;
 
 std::string format_printable_char(uint8_t byte) {
   switch (byte) {
@@ -143,6 +147,10 @@ void JuraComponent::loop() {
       this->custom_cancel_flag_ = false;
     }
   }
+
+  if (this->handshake_stage_ == HandshakeStage::DONE) {
+    this->process_machine_data_query();
+  }
 }
 
 void JuraComponent::dump_config() {
@@ -196,6 +204,11 @@ void JuraComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  Coffee maker ready: %s", YESNO(true));
   } else {
     ESP_LOGCONFIG(TAG, "  Coffee maker ready: %s", YESNO(false));
+  }
+
+  if (this->machine_data_sensor_ != nullptr) {
+    ESP_LOGCONFIG(TAG, "  Machine data sensor configured: %s",
+                  this->machine_data_sensor_->get_name().c_str());
   }
 }
 
@@ -457,6 +470,47 @@ void JuraComponent::run_sequence(const std::vector<::jutta_proto::CoffeeMaker::S
     return;
   }
   this->coffee_maker_->run_sequence(steps);
+}
+
+void JuraComponent::process_machine_data_query() {
+  if (this->machine_data_sensor_ == nullptr || this->connection_ == nullptr) {
+    return;
+  }
+
+  uint32_t now = esphome::millis();
+
+  if (!this->machine_data_query_active_) {
+    if (this->machine_data_next_query_ != 0 &&
+        !JuraComponent::time_reached(now, this->machine_data_next_query_)) {
+      return;
+    }
+
+    this->machine_data_query_active_ = true;
+    this->machine_data_request_deadline_ = now + MACHINE_DATA_COMMAND_TIMEOUT_MS;
+    ESP_LOGI(TAG, "Requesting machine data using command '%s'", this->machine_data_command_.c_str());
+  }
+
+  auto response = this->connection_->write_decoded_with_response(
+      this->machine_data_command_, std::chrono::milliseconds{MACHINE_DATA_COMMAND_TIMEOUT_MS});
+  if (response != nullptr) {
+    std::string payload = *response;
+    ESP_LOGI(TAG, "Received machine data response: '%s'", payload.c_str());
+    this->machine_data_sensor_->publish_state(payload);
+
+    this->machine_data_query_active_ = false;
+    this->machine_data_request_deadline_ = 0;
+    this->machine_data_next_query_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
+    return;
+  }
+
+  if (this->machine_data_request_deadline_ != 0 &&
+      JuraComponent::time_reached(now, this->machine_data_request_deadline_)) {
+    ESP_LOGW(TAG, "Machine data query timed out, will retry after %u ms.",
+             MACHINE_DATA_RETRY_DELAY_MS);
+    this->machine_data_query_active_ = false;
+    this->machine_data_request_deadline_ = 0;
+    this->machine_data_next_query_ = now + MACHINE_DATA_RETRY_DELAY_MS;
+  }
 }
 
 bool JuraComponent::is_busy() const {
