@@ -240,8 +240,25 @@ def _register_action_once(name, action_cls, schema):
 
             return decorator
 
+    def _wrap_duplicate_safe_decorator(decorator):
+        def _decorator(func):
+            try:
+                return decorator(func)
+            except Exception as err:  # pylint: disable=broad-except
+                message = str(err)
+                if "already registered" not in message.lower():
+                    raise
+
+                _LOGGER.debug(
+                    "Action '%s' decorator raised duplicate error, keeping existing registration",
+                    name,
+                )
+                return func
+
+        return _decorator
+
     try:
-        return _register()
+        return _wrap_duplicate_safe_decorator(_register())
     except Exception as err:  # pylint: disable=broad-except
         message = str(err)
         if "already registered" not in message.lower():
