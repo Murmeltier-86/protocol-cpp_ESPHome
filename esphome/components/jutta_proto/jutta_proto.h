@@ -36,6 +36,18 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const std::string &device_type() const { return this->device_type_; }
 
   void set_machine_data_sensor(text_sensor::TextSensor *sensor) { this->machine_data_sensor_ = sensor; }
+  void set_machine_data_statistic_sensor(text_sensor::TextSensor *sensor) {
+    this->machine_data_statistic_sensor_ = sensor;
+  }
+  void set_machine_data_errors_sensor(text_sensor::TextSensor *sensor) {
+    this->machine_data_errors_sensor_ = sensor;
+  }
+  void set_machine_data_status_sensor(text_sensor::TextSensor *sensor) {
+    this->machine_data_status_sensor_ = sensor;
+  }
+  void set_machine_data_processes_sensor(text_sensor::TextSensor *sensor) {
+    this->machine_data_processes_sensor_ = sensor;
+  }
 
  protected:
   enum class HandshakeStage { IDLE, HELLO, SEND_T1, WAIT_T2, SEND_T2, WAIT_T3, SEND_T3, DONE, FAILED };
@@ -61,6 +73,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool handshake_hello_request_sent_{false};
   bool custom_cancel_flag_{false};
   text_sensor::TextSensor *machine_data_sensor_{nullptr};
+  text_sensor::TextSensor *machine_data_statistic_sensor_{nullptr};
+  text_sensor::TextSensor *machine_data_errors_sensor_{nullptr};
+  text_sensor::TextSensor *machine_data_status_sensor_{nullptr};
+  text_sensor::TextSensor *machine_data_processes_sensor_{nullptr};
   uint32_t machine_data_query_next_{0};
   bool machine_data_request_pending_{false};
   uint32_t machine_data_request_start_{0};

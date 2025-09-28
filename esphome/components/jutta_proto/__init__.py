@@ -19,6 +19,19 @@ CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
+CONF_MACHINE_DATA_STATISTICS = "statistics"
+CONF_MACHINE_DATA_ERRORS = "errors"
+CONF_MACHINE_DATA_STATUS = "status"
+CONF_MACHINE_DATA_PROCESSES = "processes"
+CONF_MACHINE_DATA_RAW = "raw"
+
+MACHINE_DATA_SECTION_KEYS = [
+    CONF_MACHINE_DATA_STATISTICS,
+    CONF_MACHINE_DATA_ERRORS,
+    CONF_MACHINE_DATA_STATUS,
+    CONF_MACHINE_DATA_PROCESSES,
+    CONF_MACHINE_DATA_RAW,
+]
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -86,11 +99,25 @@ SEQUENCE_COMMAND_EXPRESSIONS = {
 JURA_COMPONENT_IDS = []
 
 
+MACHINE_DATA_CONFIG_SCHEMA = cv.Any(
+    text_sensor.text_sensor_schema(),
+    cv.Schema(
+        {
+            cv.Optional(CONF_MACHINE_DATA_STATISTICS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_DATA_ERRORS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_DATA_STATUS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_DATA_PROCESSES): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_DATA_RAW): text_sensor.text_sensor_schema(),
+        }
+    ),
+)
+
+
 CONFIG_SCHEMA = (
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(JuraComponent),
-            cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_DATA): MACHINE_DATA_CONFIG_SCHEMA,
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
@@ -234,8 +261,28 @@ async def to_code(config):
     await uart.register_uart_device(var, config)
 
     if CONF_MACHINE_DATA in config:
-        sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
-        cg.add(var.set_machine_data_sensor(sensor))
+        machine_data_cfg = config[CONF_MACHINE_DATA]
+        if isinstance(machine_data_cfg, dict) and any(
+            key in machine_data_cfg for key in MACHINE_DATA_SECTION_KEYS
+        ):
+            if CONF_MACHINE_DATA_STATISTICS in machine_data_cfg:
+                sensor = await text_sensor.new_text_sensor(machine_data_cfg[CONF_MACHINE_DATA_STATISTICS])
+                cg.add(var.set_machine_data_statistic_sensor(sensor))
+            if CONF_MACHINE_DATA_ERRORS in machine_data_cfg:
+                sensor = await text_sensor.new_text_sensor(machine_data_cfg[CONF_MACHINE_DATA_ERRORS])
+                cg.add(var.set_machine_data_errors_sensor(sensor))
+            if CONF_MACHINE_DATA_STATUS in machine_data_cfg:
+                sensor = await text_sensor.new_text_sensor(machine_data_cfg[CONF_MACHINE_DATA_STATUS])
+                cg.add(var.set_machine_data_status_sensor(sensor))
+            if CONF_MACHINE_DATA_PROCESSES in machine_data_cfg:
+                sensor = await text_sensor.new_text_sensor(machine_data_cfg[CONF_MACHINE_DATA_PROCESSES])
+                cg.add(var.set_machine_data_processes_sensor(sensor))
+            if CONF_MACHINE_DATA_RAW in machine_data_cfg:
+                sensor = await text_sensor.new_text_sensor(machine_data_cfg[CONF_MACHINE_DATA_RAW])
+                cg.add(var.set_machine_data_sensor(sensor))
+        else:
+            sensor = await text_sensor.new_text_sensor(machine_data_cfg)
+            cg.add(var.set_machine_data_sensor(sensor))
 
 
 async def _get_parent(config):
