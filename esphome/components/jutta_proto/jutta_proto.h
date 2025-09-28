@@ -11,6 +11,7 @@
 #include "esphome/core/log.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/uart/uart.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 
 #include "coffee_maker.hpp"
 #include "jutta_connection.hpp"
@@ -30,6 +31,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void cancel_custom_brew();
   void switch_page(uint32_t page);
   void run_sequence(const std::vector<::jutta_proto::CoffeeMaker::SequenceStep> &steps);
+  void add_machine_data_sensor(const std::string &command, text_sensor::TextSensor *sensor,
+                               const std::string &label);
 
   bool is_ready() const { return this->handshake_stage_ == HandshakeStage::DONE && this->coffee_maker_ != nullptr; }
   bool is_busy() const;
@@ -46,6 +49,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void restart_handshake(const char *reason);
   bool read_handshake_bytes();
   static bool time_reached(uint32_t now, uint32_t target);
+  void process_machine_data_queries();
+  void handle_machine_data_response(size_t index, const std::string &response);
 
   void process_machine_data_query();
 
@@ -61,11 +66,22 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool handshake_hello_request_sent_{false};
   bool custom_cancel_flag_{false};
 
-  text_sensor::TextSensor *machine_data_sensor_{nullptr};
-  bool machine_data_query_active_{false};
-  uint32_t machine_data_request_deadline_{0};
-  uint32_t machine_data_next_query_{0};
-  std::string machine_data_command_{"@TM:00,FC\r\n"};
+
+  struct MachineDataSensorEntry {
+    std::string command;
+    std::string label;
+    text_sensor::TextSensor *sensor{nullptr};
+    bool completed{false};
+  };
+
+  std::vector<MachineDataSensorEntry> machine_data_sensors_{};
+  size_t machine_data_next_index_{0};
+  size_t machine_data_active_index_{0};
+  bool machine_data_request_active_{false};
+  uint32_t machine_data_query_deadline_{0};
+  std::string machine_data_active_command_{};
+  uint32_t machine_data_query_timeout_ms_{1500};
+
 };
 
 class StartBrewAction : public esphome::Action<> {
