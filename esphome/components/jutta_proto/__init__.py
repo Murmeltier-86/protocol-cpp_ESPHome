@@ -118,32 +118,71 @@ SEQUENCE_COMMAND_EXPRESSIONS = {
 JURA_COMPONENT_IDS = []
 
 
-def _unregister_action(name):
-    """Remove an existing automation action registration if possible."""
+def _iter_action_containers():
+    """Yield potential containers holding registered actions."""
 
     registry = getattr(automation, "ACTION_REGISTRY", None)
     if registry is None:
-        return False
+        return []
 
-    # Newer ESPHome versions wrap the registry in helper classes. The actual
-    # mapping of registered actions might be stored in attributes such as
-    # ``registry`` or ``_registry``. To keep compatibility with older versions
-    # we walk these attributes breadth-first and try to operate on every
-    # candidate container we discover.
     containers = []
     queue = [registry]
     seen = set()
     while queue:
         candidate = queue.pop(0)
-        if id(candidate) in seen:
+        ident = id(candidate)
+        if ident in seen:
             continue
-        seen.add(id(candidate))
+        seen.add(ident)
         containers.append(candidate)
 
         for attr in ("registry", "_registry", "registrations"):
             nested = getattr(candidate, attr, None)
             if nested is not None:
                 queue.append(nested)
+
+    return containers
+
+
+def _is_action_registered(name):
+    """Best-effort detection if an action registration already exists."""
+
+    for container in _iter_action_containers():
+        for method_name in ("is_registered", "has", "contains"):
+            method = getattr(container, method_name, None)
+            if method is None:
+                continue
+            try:
+                if method(name):
+                    return True
+            except TypeError:
+                continue
+
+        if hasattr(container, "__contains__"):
+            try:
+                if name in container:
+                    return True
+            except TypeError:
+                pass
+
+        getter = getattr(container, "get", None)
+        if getter is not None:
+            try:
+                getter(name)
+            except (KeyError, TypeError):
+                pass
+            else:
+                return True
+
+    return False
+
+
+def _unregister_action(name):
+    """Remove an existing automation action registration if possible."""
+
+    containers = _iter_action_containers()
+    if not containers:
+        return False
 
     for container in containers:
         for method_name in ("unregister", "deregister", "pop", "remove"):
@@ -185,18 +224,28 @@ def _register_action_once(name, action_cls, schema):
     def _register():
         return automation.register_action(name, action_cls, schema)
 
+    if _is_action_registered(name):
+        if _unregister_action(name):
+            _LOGGER.debug(
+                "Action '%s' already registered, replacing existing registration", name
+            )
+        else:
+            _LOGGER.debug(
+                "Action '%s' already registered and cannot be replaced, skipping second registration",
+                name,
+            )
+
+            def decorator(func):
+                return func
+
+            return decorator
+
     try:
         return _register()
     except Exception as err:  # pylint: disable=broad-except
         message = str(err)
         if "already registered" not in message.lower():
             raise
-
-        if _unregister_action(name):
-            _LOGGER.debug(
-                "Action '%s' already registered, replacing existing registration", name
-            )
-            return _register()
 
         _LOGGER.debug(
             "Action '%s' registration raised duplicate error, skipping second registration",
