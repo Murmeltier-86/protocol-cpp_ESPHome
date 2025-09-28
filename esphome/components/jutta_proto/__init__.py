@@ -125,27 +125,48 @@ def _unregister_action(name):
     if registry is None:
         return False
 
-    for method_name in ("unregister", "deregister", "pop", "remove"):
-        method = getattr(registry, method_name, None)
-        if method is None:
+    # Newer ESPHome versions wrap the registry in helper classes. The actual
+    # mapping of registered actions might be stored in attributes such as
+    # ``registry`` or ``_registry``. To keep compatibility with older versions
+    # we walk these attributes breadth-first and try to operate on every
+    # candidate container we discover.
+    containers = []
+    queue = [registry]
+    seen = set()
+    while queue:
+        candidate = queue.pop(0)
+        if id(candidate) in seen:
             continue
-        try:
-            if method_name == "pop":
-                method(name, None)
-            else:
-                method(name)
-        except (KeyError, TypeError, AttributeError):
-            continue
-        else:
-            return True
+        seen.add(id(candidate))
+        containers.append(candidate)
 
-    if hasattr(registry, "__delitem__"):
-        try:
-            del registry[name]
-        except (KeyError, TypeError, AttributeError):
-            pass
-        else:
-            return True
+        for attr in ("registry", "_registry", "registrations"):
+            nested = getattr(candidate, attr, None)
+            if nested is not None:
+                queue.append(nested)
+
+    for container in containers:
+        for method_name in ("unregister", "deregister", "pop", "remove"):
+            method = getattr(container, method_name, None)
+            if method is None:
+                continue
+            try:
+                if method_name == "pop":
+                    method(name, None)
+                else:
+                    method(name)
+            except (KeyError, TypeError, AttributeError):
+                continue
+            else:
+                return True
+
+        if hasattr(container, "__delitem__"):
+            try:
+                del container[name]
+            except (KeyError, TypeError, AttributeError):
+                pass
+            else:
+                return True
 
     return False
 
