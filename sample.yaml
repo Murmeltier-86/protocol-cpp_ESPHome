@@ -25,6 +25,11 @@ jutta_proto:
   machine_data:
     name: "JURA Machine Data"
 
+text_sensor:
+  - platform: jutta_proto
+    jutta_proto_id: jura
+    name: "JURA Machine Data"
+
 # Convenience switches to remotely power the machine on/off
 switch:
   - platform: template
