@@ -86,6 +86,69 @@ std::string format_buffer_hex_preview(const std::string &value) {
   return formatted_suffix;
 }
 
+bool is_valid_utf8(const std::string &value) {
+  size_t i = 0;
+  while (i < value.size()) {
+    unsigned char c = static_cast<unsigned char>(value[i]);
+    if ((c & 0x80) == 0) {
+      ++i;
+      continue;
+    }
+
+    size_t sequence_length = 0;
+    if ((c & 0xE0) == 0xC0) {
+      sequence_length = 2;
+      if ((c & 0xFE) == 0xC0) {
+        return false;  // Overlong encoding of ASCII character.
+      }
+    } else if ((c & 0xF0) == 0xE0) {
+      sequence_length = 3;
+    } else if ((c & 0xF8) == 0xF0) {
+      sequence_length = 4;
+      if (c > 0xF4) {
+        return false;  // Outside valid Unicode range.
+      }
+    } else {
+      return false;  // Invalid first byte.
+    }
+
+    if (i + sequence_length > value.size()) {
+      return false;  // Truncated sequence.
+    }
+
+    for (size_t j = 1; j < sequence_length; ++j) {
+      unsigned char continuation = static_cast<unsigned char>(value[i + j]);
+      if ((continuation & 0xC0) != 0x80) {
+        return false;  // Invalid continuation byte.
+      }
+    }
+    i += sequence_length;
+  }
+  return true;
+}
+
+std::string sanitize_text_sensor_value(const std::string &value) {
+  std::string sanitized;
+  sanitized.reserve(value.size());
+  bool has_control_characters = false;
+
+  for (unsigned char c : value) {
+    if (c == '\r' || c == '\n' || c == '\0') {
+      continue;
+    }
+    if (c < 0x20 || c == 0x7F) {
+      has_control_characters = true;
+    }
+    sanitized.push_back(static_cast<char>(c));
+  }
+
+  if (!is_valid_utf8(sanitized) || has_control_characters) {
+    return format_printable_string(sanitized);
+  }
+
+  return sanitized;
+}
+
 }  // namespace
 
 const char *JuraComponent::handshake_stage_name(JuraComponent::HandshakeStage stage) {
@@ -482,22 +545,22 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
     if (this->machine_data_statistic_sensor_ != nullptr) {
       auto formatted =
           format_machine_data_section(root.find_child_case_insensitive("STATISTIC"));
-      this->machine_data_statistic_sensor_->publish_state(formatted);
+      this->machine_data_statistic_sensor_->publish_state(sanitize_text_sensor_value(formatted));
     }
     if (this->machine_data_errors_sensor_ != nullptr) {
       auto formatted =
           format_machine_data_section(root.find_child_case_insensitive("ALERTS"));
-      this->machine_data_errors_sensor_->publish_state(formatted);
+      this->machine_data_errors_sensor_->publish_state(sanitize_text_sensor_value(formatted));
     }
     if (this->machine_data_status_sensor_ != nullptr) {
       auto formatted = format_machine_data_section(
           root.find_child_case_insensitive("PROGRESS_STATE_INTAKE"));
-      this->machine_data_status_sensor_->publish_state(formatted);
+      this->machine_data_status_sensor_->publish_state(sanitize_text_sensor_value(formatted));
     }
     if (this->machine_data_processes_sensor_ != nullptr) {
       auto formatted =
           format_machine_data_section(root.find_child_case_insensitive("PROCESSES"));
-      this->machine_data_processes_sensor_->publish_state(formatted);
+      this->machine_data_processes_sensor_->publish_state(sanitize_text_sensor_value(formatted));
     }
   } else {
     if (this->machine_data_statistic_sensor_ != nullptr) {
@@ -514,10 +577,7 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
     }
   }
 
-  std::string sanitized = response;
-  sanitized.erase(std::remove_if(sanitized.begin(), sanitized.end(),
-                                 [](unsigned char c) { return c == '\r' || c == '\n'; }),
-                  sanitized.end());
+  std::string sanitized = sanitize_text_sensor_value(response);
   ESP_LOGD(TAG, "Machine data response: %s", sanitized.c_str());
   if (this->machine_data_sensor_ != nullptr) {
     this->machine_data_sensor_->publish_state(sanitized);
