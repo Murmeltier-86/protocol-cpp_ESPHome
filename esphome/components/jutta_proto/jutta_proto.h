@@ -9,6 +9,7 @@
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/uart/uart.h"
 
 #include "coffee_maker.hpp"
@@ -34,6 +35,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool is_busy() const;
   const std::string &device_type() const { return this->device_type_; }
 
+  void set_machine_data_sensor(text_sensor::TextSensor *sensor) { this->machine_data_sensor_ = sensor; }
+
  protected:
   enum class HandshakeStage { IDLE, HELLO, SEND_T1, WAIT_T2, SEND_T2, WAIT_T3, SEND_T3, DONE, FAILED };
 
@@ -43,6 +46,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void restart_handshake(const char *reason);
   bool read_handshake_bytes();
   static bool time_reached(uint32_t now, uint32_t target);
+  void process_machine_data_query();
+  void publish_machine_data_(const std::string &response);
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
   std::unique_ptr<::jutta_proto::CoffeeMaker> coffee_maker_;
@@ -55,6 +60,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t handshake_deadline_{0};
   bool handshake_hello_request_sent_{false};
   bool custom_cancel_flag_{false};
+  text_sensor::TextSensor *machine_data_sensor_{nullptr};
+  uint32_t machine_data_query_next_{0};
+  bool machine_data_request_pending_{false};
+  uint32_t machine_data_request_start_{0};
 };
 
 class StartBrewAction : public esphome::Action<> {
