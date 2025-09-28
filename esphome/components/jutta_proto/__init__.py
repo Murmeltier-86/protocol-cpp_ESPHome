@@ -234,21 +234,12 @@ def _register_action_once(name, action_cls, schema):
     def _register():
         return automation.register_action(name, action_cls, schema)
 
-    if _is_action_registered(name):
-        if _unregister_action(name):
-            _LOGGER.debug(
-                "Action '%s' already registered, replacing existing registration", name
-            )
-        else:
-            _LOGGER.debug(
-                "Action '%s' already registered and cannot be replaced, skipping second registration",
-                name,
-            )
-
-            def decorator(func):
-                return func
-
-            return decorator
+    duplicate_detected = _is_action_registered(name)
+    if duplicate_detected and _unregister_action(name):
+        _LOGGER.debug(
+            "Action '%s' already registered, replacing existing registration", name
+        )
+        duplicate_detected = False
 
     def _wrap_duplicate_safe_decorator(decorator):
         def _decorator(func):
@@ -273,6 +264,13 @@ def _register_action_once(name, action_cls, schema):
         message = str(err)
         if "already registered" not in message.lower():
             raise
+
+        if not duplicate_detected and _unregister_action(name):
+            _LOGGER.debug(
+                "Action '%s' duplicate detected during registration, retrying after unregister",
+                name,
+            )
+            return _wrap_duplicate_safe_decorator(_register())
 
         _LOGGER.debug(
             "Action '%s' registration raised duplicate error, skipping second registration",
