@@ -131,11 +131,11 @@ def _register_action_once(name, action_cls, schema):
     if registry is not None:
         if hasattr(registry, "get"):
             try:
-                registry.get(name)
+                existing = registry.get(name)
             except (KeyError, TypeError, ValueError, AttributeError):
                 pass
             else:
-                already_registered = True
+                already_registered = existing is not None
         elif hasattr(registry, "__contains__"):
             try:
                 already_registered = name in registry
