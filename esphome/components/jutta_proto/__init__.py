@@ -1,11 +1,21 @@
 import esphome.codegen as cg
+import os
+import xml.etree.ElementTree as ET
+
 import esphome.config_validation as cv
 from esphome import automation
-from esphome.components import uart
-from esphome.const import CONF_ID
+from esphome.components import text_sensor, uart
+from esphome.const import (
+    CONF_ENTITY_CATEGORY,
+    CONF_ICON,
+    CONF_ID,
+    CONF_NAME,
+    ENTITY_CATEGORY_DIAGNOSTIC,
+    ICON_INFORMATION,
+)
 
 DEPENDENCIES = ["uart"]
-AUTO_LOAD = ["uart"]
+AUTO_LOAD = ["uart", "text_sensor"]
 
 CONF_COFFEE = "coffee"
 CONF_GRIND_DURATION = "grind_duration"
@@ -18,6 +28,8 @@ CONF_SLEEP = "sleep"
 CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_DESCRIPTION = "description"
+CONF_MACHINE_DATA = "machine_data"
+CONF_MACHINE_DATA_XML = "machine_data_xml"
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -85,11 +97,66 @@ SEQUENCE_COMMAND_EXPRESSIONS = {
 JURA_COMPONENT_IDS = []
 
 
-CONFIG_SCHEMA = (
-    cv.Schema({cv.GenerateID(): cv.declare_id(JuraComponent)})
+def _validate_config(config):
+    if CONF_MACHINE_DATA in config and CONF_MACHINE_DATA_XML in config:
+        raise cv.Invalid(
+            "Please configure only one of 'machine_data' or 'machine_data_xml'."
+        )
+    return config
+
+
+CONFIG_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(JuraComponent),
+            cv.Optional(CONF_MACHINE_DATA): cv.file_,
+            cv.Optional(CONF_MACHINE_DATA_XML): cv.file_,
+        }
+    )
     .extend(uart.UART_DEVICE_SCHEMA)
-    .extend(cv.COMPONENT_SCHEMA)
+    .extend(cv.COMPONENT_SCHEMA),
+    _validate_config,
 )
+
+
+def _qualify(tag, namespace):
+    if not namespace:
+        return tag
+    return f"{{{namespace}}}{tag}"
+
+
+def _parse_machine_data_banks(path):
+    if not os.path.exists(path):
+        raise cv.Invalid(f"Machine data XML not found: {path}")
+
+    try:
+        tree = ET.parse(path)
+    except OSError as err:
+        raise cv.Invalid(f"Failed to open machine data XML '{path}': {err}") from err
+    except ET.ParseError as err:
+        raise cv.Invalid(f"Invalid machine data XML '{path}': {err}") from err
+
+    root = tree.getroot()
+    namespace = ""
+    if root.tag.startswith("{") and "}" in root.tag:
+        namespace = root.tag[1 : root.tag.index("}")]
+
+    statistic = root.find(_qualify("STATISTIC", namespace))
+    if statistic is None:
+        return []
+
+    seen_commands = set()
+    entries = []
+    bank_path = ".//" + _qualify("BANK", namespace)
+    for bank in statistic.findall(bank_path):
+        command = bank.attrib.get("Command", "").strip()
+        if not command or command in seen_commands:
+            continue
+        seen_commands.add(command)
+        label = bank.attrib.get("Name", command).strip()
+        entries.append({"command": command, "label": label})
+
+    return entries
 
 
 def _normalize_start_brew(value):
@@ -226,6 +293,27 @@ async def to_code(config):
     JURA_COMPONENT_IDS.append(config[CONF_ID])
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
+
+    xml_path = None
+    if CONF_MACHINE_DATA in config:
+        xml_path = config[CONF_MACHINE_DATA]
+    elif CONF_MACHINE_DATA_XML in config:
+        xml_path = config[CONF_MACHINE_DATA_XML]
+
+    if xml_path:
+        entries = _parse_machine_data_banks(xml_path)
+        for entry in entries:
+            friendly_name = f"JURA {entry['label']}"
+            sensor_conf = text_sensor.text_sensor_schema(
+                icon=ICON_INFORMATION,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            )({CONF_NAME: friendly_name})
+            sensor = await text_sensor.new_text_sensor(sensor_conf)
+            cg.add(
+                var.add_machine_data_sensor(
+                    cg.std_string(entry["command"]), sensor, cg.std_string(entry["label"])
+                )
+            )
 
 
 async def _get_parent(config):

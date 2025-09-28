@@ -82,6 +82,18 @@ std::string format_buffer_hex_preview(const std::string &value) {
   return formatted_suffix;
 }
 
+std::string trim_ascii(const std::string &value) {
+  size_t start = 0;
+  while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start])) != 0) {
+    ++start;
+  }
+  size_t end = value.size();
+  while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+    --end;
+  }
+  return value.substr(start, end - start);
+}
+
 }  // namespace
 
 const char *JuraComponent::handshake_stage_name(JuraComponent::HandshakeStage stage) {
@@ -143,6 +155,8 @@ void JuraComponent::loop() {
       this->custom_cancel_flag_ = false;
     }
   }
+
+  this->process_machine_data_queries();
 }
 
 void JuraComponent::dump_config() {
@@ -196,6 +210,14 @@ void JuraComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  Coffee maker ready: %s", YESNO(true));
   } else {
     ESP_LOGCONFIG(TAG, "  Coffee maker ready: %s", YESNO(false));
+  }
+
+  if (!this->machine_data_sensors_.empty()) {
+    ESP_LOGCONFIG(TAG, "  Machine data sensors:");
+    for (const auto &entry : this->machine_data_sensors_) {
+      std::string normalized_command = trim_ascii(entry.command);
+      ESP_LOGCONFIG(TAG, "    %s (%s)", entry.label.c_str(), normalized_command.c_str());
+    }
   }
 }
 
@@ -382,6 +404,14 @@ void JuraComponent::restart_handshake(const char *reason) {
   if (this->connection_ != nullptr) {
     this->connection_->reset_response_line_buffer();
   }
+  this->machine_data_request_active_ = false;
+  this->machine_data_active_command_.clear();
+  this->machine_data_query_deadline_ = 0;
+  this->machine_data_next_index_ = 0;
+  this->machine_data_active_index_ = 0;
+  for (auto &entry : this->machine_data_sensors_) {
+    entry.completed = false;
+  }
 }
 
 bool JuraComponent::read_handshake_bytes() {
@@ -408,6 +438,119 @@ bool JuraComponent::read_handshake_bytes() {
 
 bool JuraComponent::time_reached(uint32_t now, uint32_t target) {
   return static_cast<int32_t>(now - target) >= 0;
+}
+
+void JuraComponent::add_machine_data_sensor(const std::string &command, text_sensor::TextSensor *sensor,
+                                            const std::string &label) {
+  MachineDataSensorEntry entry;
+  entry.command = trim_ascii(command);
+  if (entry.command.size() < 2 || entry.command.substr(entry.command.size() - 2) != "\r\n") {
+    entry.command.append("\r\n");
+  }
+  entry.label = label;
+  entry.sensor = sensor;
+  entry.completed = false;
+  this->machine_data_sensors_.push_back(entry);
+}
+
+void JuraComponent::process_machine_data_queries() {
+  if (this->machine_data_sensors_.empty()) {
+    return;
+  }
+  if (!this->is_ready()) {
+    return;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return;
+  }
+  if (this->coffee_maker_->is_locked()) {
+    return;
+  }
+
+  if (!this->machine_data_request_active_ && this->machine_data_next_index_ >= this->machine_data_sensors_.size()) {
+    return;
+  }
+
+  uint32_t now = esphome::millis();
+  auto &connection = *this->coffee_maker_->connection;
+
+  auto handle_timeout = [&](size_t index) {
+    if (index >= this->machine_data_sensors_.size()) {
+      return;
+    }
+    auto &entry = this->machine_data_sensors_[index];
+    ESP_LOGW(TAG, "Machine data query for '%s' (%s) timed out.", entry.label.c_str(),
+             format_printable_string(entry.command).c_str());
+    if (entry.sensor != nullptr) {
+      entry.sensor->publish_state("");
+    }
+    entry.completed = true;
+  };
+
+  if (this->machine_data_request_active_) {
+    auto response = connection.write_decoded_with_response(
+        this->machine_data_active_command_, std::chrono::milliseconds{this->machine_data_query_timeout_ms_});
+    if (response == nullptr) {
+      if (this->machine_data_query_deadline_ != 0 && time_reached(now, this->machine_data_query_deadline_)) {
+        handle_timeout(this->machine_data_active_index_);
+        this->machine_data_request_active_ = false;
+        this->machine_data_active_command_.clear();
+        this->machine_data_query_deadline_ = 0;
+        this->machine_data_next_index_ = this->machine_data_active_index_ + 1;
+      }
+      return;
+    }
+
+    this->handle_machine_data_response(this->machine_data_active_index_, *response);
+    this->machine_data_request_active_ = false;
+    this->machine_data_active_command_.clear();
+    this->machine_data_query_deadline_ = 0;
+    this->machine_data_next_index_ = this->machine_data_active_index_ + 1;
+    return;
+  }
+
+  if (this->machine_data_next_index_ >= this->machine_data_sensors_.size()) {
+    return;
+  }
+
+  auto &entry = this->machine_data_sensors_[this->machine_data_next_index_];
+  if (entry.completed) {
+    ++this->machine_data_next_index_;
+    return;
+  }
+  if (entry.sensor == nullptr) {
+    entry.completed = true;
+    ++this->machine_data_next_index_;
+    return;
+  }
+
+  this->machine_data_active_index_ = this->machine_data_next_index_;
+  this->machine_data_active_command_ = entry.command;
+  auto response = connection.write_decoded_with_response(
+      this->machine_data_active_command_, std::chrono::milliseconds{this->machine_data_query_timeout_ms_});
+  if (response == nullptr) {
+    this->machine_data_request_active_ = true;
+    this->machine_data_query_deadline_ = now + this->machine_data_query_timeout_ms_;
+    return;
+  }
+
+  this->handle_machine_data_response(this->machine_data_active_index_, *response);
+  ++this->machine_data_next_index_;
+}
+
+void JuraComponent::handle_machine_data_response(size_t index, const std::string &response) {
+  if (index >= this->machine_data_sensors_.size()) {
+    return;
+  }
+  auto &entry = this->machine_data_sensors_[index];
+  std::string trimmed_response = trim_ascii(response);
+  entry.completed = true;
+  if (entry.sensor != nullptr) {
+    entry.sensor->publish_state(trimmed_response);
+  }
+  std::string normalized_command = trim_ascii(entry.command);
+  ESP_LOGI(TAG, "Machine data '%s' (%s) -> '%s'", entry.label.c_str(), normalized_command.c_str(),
+           format_printable_string(trimmed_response).c_str());
 }
 
 void JuraComponent::start_brew(::jutta_proto::CoffeeMaker::coffee_t coffee) {
