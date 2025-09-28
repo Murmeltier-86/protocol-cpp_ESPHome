@@ -5,6 +5,7 @@
 #include <utility>
 #include <vector>
 
+namespace esphome {
 namespace jutta_component {
 
 struct MachineDataNode {
@@ -25,4 +26,5 @@ std::string format_machine_data_tree(const MachineDataNode &node);
 std::string format_machine_data_section(const MachineDataNode *node);
 
 }  // namespace jutta_component
+}  // namespace esphome
 
