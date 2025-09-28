@@ -445,7 +445,9 @@ void JuraComponent::process_machine_data_query() {
       this->publish_machine_data_(*response);
       this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
       this->machine_data_request_pending_ = false;
+
       this->machine_data_request_start_ = 0;
+
       return true;
     }
     return false;
@@ -461,7 +463,9 @@ void JuraComponent::process_machine_data_query() {
       ESP_LOGW(TAG, "Timeout while waiting for machine data response.");
       this->machine_data_request_pending_ = false;
       this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
+
       this->machine_data_request_start_ = 0;
+
     }
     return;
   }
@@ -486,6 +490,7 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
   sanitized.erase(std::remove_if(sanitized.begin(), sanitized.end(),
                                  [](unsigned char c) { return c == '\r' || c == '\n'; }),
                   sanitized.end());
+
   auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
   auto begin_it = std::find_if_not(sanitized.begin(), sanitized.end(), is_space);
   auto end_it = std::find_if_not(sanitized.rbegin(), sanitized.rend(), is_space).base();
@@ -494,6 +499,7 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
   } else {
     sanitized.assign(begin_it, end_it);
   }
+
   ESP_LOGD(TAG, "Machine data response: %s", sanitized.c_str());
   if (this->machine_data_sensor_ != nullptr) {
     this->machine_data_sensor_->publish_state(sanitized);
