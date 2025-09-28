@@ -1,6 +1,7 @@
 import codecs
 import logging
 import os
+from typing import Any, Dict, Hashable
 import xml.etree.ElementTree as ET
 
 import esphome.codegen as cg
@@ -115,7 +116,16 @@ SEQUENCE_COMMAND_EXPRESSIONS = {
     "water_pump_off": cg.RawExpression("::jutta_proto::JUTTA_COFFEE_WATER_PUMP_OFF"),
 }
 
-JURA_COMPONENT_IDS = []
+def _id_key(value):
+    """Create a stable dictionary key for ESPHome ID objects."""
+
+    if hasattr(value, "id"):
+        return value.id
+
+    return value
+
+
+JURA_COMPONENT_IDS: Dict[Hashable, Any] = {}
 
 
 def _iter_action_containers():
@@ -224,21 +234,12 @@ def _register_action_once(name, action_cls, schema):
     def _register():
         return automation.register_action(name, action_cls, schema)
 
-    if _is_action_registered(name):
-        if _unregister_action(name):
-            _LOGGER.debug(
-                "Action '%s' already registered, replacing existing registration", name
-            )
-        else:
-            _LOGGER.debug(
-                "Action '%s' already registered and cannot be replaced, skipping second registration",
-                name,
-            )
-
-            def decorator(func):
-                return func
-
-            return decorator
+    duplicate_detected = _is_action_registered(name)
+    if duplicate_detected and _unregister_action(name):
+        _LOGGER.debug(
+            "Action '%s' already registered, replacing existing registration", name
+        )
+        duplicate_detected = False
 
     def _wrap_duplicate_safe_decorator(decorator):
         def _decorator(func):
@@ -263,6 +264,13 @@ def _register_action_once(name, action_cls, schema):
         message = str(err)
         if "already registered" not in message.lower():
             raise
+
+        if not duplicate_detected and _unregister_action(name):
+            _LOGGER.debug(
+                "Action '%s' duplicate detected during registration, retrying after unregister",
+                name,
+            )
+            return _wrap_duplicate_safe_decorator(_register())
 
         _LOGGER.debug(
             "Action '%s' registration raised duplicate error, skipping second registration",
@@ -500,7 +508,7 @@ def _normalize_sequence(value):
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
-    JURA_COMPONENT_IDS.append(config[CONF_ID])
+    JURA_COMPONENT_IDS[_id_key(config[CONF_ID])] = config[CONF_ID]
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
 
@@ -534,7 +542,7 @@ async def _get_parent(config):
         raise cv.Invalid("No jutta_proto component configured")
     if len(JURA_COMPONENT_IDS) > 1:
         raise cv.Invalid("Multiple jutta_proto components configured, please set 'id'")
-    return await cg.get_variable(JURA_COMPONENT_IDS[0])
+    return await cg.get_variable(next(iter(JURA_COMPONENT_IDS.values())))
 
 
 @_register_action_once("jutta_proto.start_brew", StartBrewAction, _normalize_start_brew)
