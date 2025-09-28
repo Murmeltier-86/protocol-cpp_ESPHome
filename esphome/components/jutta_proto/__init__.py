@@ -132,12 +132,15 @@ def _register_action_once(name, action_cls, schema):
         if hasattr(registry, "get"):
             try:
                 registry.get(name)
-            except KeyError:
+            except (KeyError, TypeError, ValueError, AttributeError):
                 pass
             else:
                 already_registered = True
         elif hasattr(registry, "__contains__"):
-            already_registered = name in registry
+            try:
+                already_registered = name in registry
+            except TypeError:
+                already_registered = False
 
     if already_registered:
         def decorator(func):
