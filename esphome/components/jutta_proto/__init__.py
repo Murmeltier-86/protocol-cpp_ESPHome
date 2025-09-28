@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
-from esphome.components import uart
+from esphome.components import text_sensor, uart
 from esphome.const import CONF_ID
 
 DEPENDENCIES = ["uart"]
@@ -18,6 +18,8 @@ CONF_SLEEP = "sleep"
 CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_DESCRIPTION = "description"
+
+
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
 
@@ -229,6 +231,7 @@ async def to_code(config):
     JURA_COMPONENT_IDS.append(config[CONF_ID])
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
+
 
 async def _get_parent(config):
     if CONF_ID in config:
