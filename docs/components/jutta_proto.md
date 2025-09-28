@@ -120,7 +120,8 @@ automations.
 
 Add a `machine_data` section to the component configuration and register one or multiple text sensors. When a single
 `text_sensor` entry is provided the raw XML payload is published. Alternatively, the individual sections can be configured to
-receive pre-formatted text output parsed from the XML response. All sensors are optional and can be combined as needed.
+receive pre-formatted text output parsed from the XML response. All sensors are optional and can be combined as needed. Each
+entry can either declare a new sensor inline or reference an existing `text_sensor` via its `id`.
 
 ```yaml
 text_sensor:
@@ -150,6 +151,11 @@ jutta_proto:
     processes: jura_processes
     raw: jura_machine_raw
 ```
+
+!!! note
+    The repository includes a `joe_codes_example.xml` file under `jura_joe_xml_bundle_final/`. Copy it to your ESPHome config
+    folder and import it with `!include` if you want quick access to the original J.O.E. machine data layout while testing the
+    parsed sensor output.
 
 Each formatted sensor contains a human-readable rendering of its XML section. The parser supports the different response
 variants that have been observed in the official firmware so mixed content and nested tags are handled automatically. If only
