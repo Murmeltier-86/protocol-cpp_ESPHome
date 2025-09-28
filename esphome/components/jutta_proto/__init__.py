@@ -1,6 +1,8 @@
 import codecs
 import logging
 import os
+
+from collections.abc import MutableMapping
 from typing import Any, Dict, Hashable
 import xml.etree.ElementTree as ET
 
@@ -146,10 +148,46 @@ def _iter_action_containers():
         seen.add(ident)
         containers.append(candidate)
 
-        for attr in ("registry", "_registry", "registrations"):
+        if isinstance(candidate, MutableMapping):
+            queue.extend(candidate.values())
+        elif isinstance(candidate, (list, tuple, set)):
+            queue.extend(candidate)
+
+        for attr in (
+            "registry",
+            "_registry",
+            "registrations",
+            "_registrations",
+            "entries",
+            "_entries",
+            "items",
+            "_items",
+            "data",
+            "_data",
+            "values",
+            "_values",
+        ):
             nested = getattr(candidate, attr, None)
-            if nested is not None:
+            if nested is None:
+                continue
+            if callable(nested):
+                continue
+            if isinstance(nested, MutableMapping):
+                queue.extend(nested.values())
                 queue.append(nested)
+            elif isinstance(nested, (list, tuple, set)):
+                queue.extend(nested)
+            else:
+                queue.append(nested)
+
+        if hasattr(candidate, "__dict__"):
+            for nested in candidate.__dict__.values():
+                if callable(nested):
+                    continue
+                if isinstance(nested, (MutableMapping, list, tuple, set)):
+                    queue.append(nested)
+                elif nested is not None:
+                    queue.append(nested)
 
     return containers
 
@@ -158,6 +196,22 @@ def _is_action_registered(name):
     """Best-effort detection if an action registration already exists."""
 
     for container in _iter_action_containers():
+        if container is None or callable(container):
+            continue
+
+        if isinstance(container, MutableMapping):
+            try:
+                if name in container:
+                    return True
+            except TypeError:
+                pass
+            try:
+                container[name]
+            except (KeyError, TypeError):
+                pass
+            else:
+                return True
+
         for method_name in ("is_registered", "has", "contains"):
             method = getattr(container, method_name, None)
             if method is None:
@@ -195,6 +249,17 @@ def _unregister_action(name):
         return False
 
     for container in containers:
+        if container is None or callable(container):
+            continue
+
+        if isinstance(container, MutableMapping):
+            try:
+                if name in container:
+                    del container[name]
+                    return True
+            except (KeyError, TypeError):
+                pass
+
         for method_name in ("unregister", "deregister", "pop", "remove"):
             method = getattr(container, method_name, None)
             if method is None:
