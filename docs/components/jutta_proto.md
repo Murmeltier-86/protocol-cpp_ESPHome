@@ -17,31 +17,24 @@ uart:
 jutta_proto:
   id: jura
   uart_id: jura_uart
-
-
-text_sensor:
-  - platform: jutta_proto
-    jutta_proto_id: jura
-
+  machine_data:
+    name: "JURA Machine Data"
 ```
 
 The component takes care of the handshake during startup. Once the handshake finishes, all brewing actions become available.
 
 ### Machine data text sensor
 
-
-Add a `text_sensor` entry using the `jutta_proto` platform to expose the raw status response published by the coffee maker. The
+Provide the optional `machine_data` block to expose the raw status response published by the coffee maker via a text sensor. The
 component automatically polls the `&STAT?` command in the background and publishes the trimmed response whenever it changes.
 
 ```yaml
-text_sensor:
-  - platform: jutta_proto
+jutta_proto:
+  id: jura
+  uart_id: jura_uart
+  machine_data:
     name: "Machine state"
 ```
-
-When multiple `jutta_proto` components are present, set `jutta_proto_id` to specify which controller should publish data through
-the text sensor.
-
 
 ## Automation Actions
 
