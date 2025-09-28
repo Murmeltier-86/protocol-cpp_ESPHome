@@ -11,8 +11,12 @@ from esphome.const import (
     CONF_ID,
     CONF_NAME,
     ENTITY_CATEGORY_DIAGNOSTIC,
-    ICON_INFORMATION,
 )
+
+try:
+    from esphome.const import ICON_INFORMATION
+except ImportError:
+    ICON_INFORMATION = "mdi:information"
 
 
 try:
