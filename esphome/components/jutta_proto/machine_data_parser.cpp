@@ -2,10 +2,121 @@
 
 #include <algorithm>
 #include <cctype>
+#include <unordered_map>
 
 namespace esphome {
 namespace jutta_component {
 namespace {
+
+std::string encode_utf8(uint32_t codepoint) {
+  std::string result;
+  if (codepoint <= 0x7F) {
+    result.push_back(static_cast<char>(codepoint));
+  } else if (codepoint <= 0x7FF) {
+    result.push_back(static_cast<char>(0xC0 | ((codepoint >> 6) & 0x1F)));
+    result.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+  } else if (codepoint <= 0xFFFF) {
+    result.push_back(static_cast<char>(0xE0 | ((codepoint >> 12) & 0x0F)));
+    result.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+    result.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+  } else if (codepoint <= 0x10FFFF) {
+    result.push_back(static_cast<char>(0xF0 | ((codepoint >> 18) & 0x07)));
+    result.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+    result.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+    result.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+  }
+  return result;
+}
+
+std::optional<uint32_t> parse_numeric_entity(const std::string &entity) {
+  if (entity.size() < 2 || entity[0] != '#') {
+    return std::nullopt;
+  }
+
+  int base = 10;
+  size_t index = 1;
+  if (entity.size() >= 3 && (entity[1] == 'x' || entity[1] == 'X')) {
+    base = 16;
+    index = 2;
+  }
+
+  if (index >= entity.size()) {
+    return std::nullopt;
+  }
+
+  uint32_t value = 0;
+  for (; index < entity.size(); ++index) {
+    unsigned char c = static_cast<unsigned char>(entity[index]);
+    int digit = -1;
+    if (std::isdigit(c)) {
+      digit = c - '0';
+    } else if (base == 16 && c >= 'a' && c <= 'f') {
+      digit = 10 + (c - 'a');
+    } else if (base == 16 && c >= 'A' && c <= 'F') {
+      digit = 10 + (c - 'A');
+    } else {
+      return std::nullopt;
+    }
+
+    value = value * base + static_cast<uint32_t>(digit);
+    if (value > 0x10FFFF) {
+      return std::nullopt;
+    }
+  }
+
+  return value;
+}
+
+std::string decode_xml_entities(const std::string &value) {
+  static const std::unordered_map<std::string, std::string> named_entities = {
+      {"amp", "&"}, {"lt", "<"}, {"gt", ">"}, {"apos", "'"}, {"quot", "\""}};
+
+  std::string result;
+  result.reserve(value.size());
+
+  for (size_t i = 0; i < value.size(); ++i) {
+    char c = value[i];
+    if (c != '&') {
+      result.push_back(c);
+      continue;
+    }
+
+    size_t end = value.find(';', i + 1);
+    if (end == std::string::npos) {
+      result.push_back('&');
+      continue;
+    }
+
+    std::string entity = value.substr(i + 1, end - i - 1);
+    if (entity.empty()) {
+      result.push_back('&');
+      i = end;
+      continue;
+    }
+
+    if (entity[0] == '#') {
+      auto numeric = parse_numeric_entity(entity);
+      if (numeric.has_value()) {
+        result.append(encode_utf8(numeric.value()));
+        i = end;
+        continue;
+      }
+    } else {
+      auto it = named_entities.find(entity);
+      if (it != named_entities.end()) {
+        result.append(it->second);
+        i = end;
+        continue;
+      }
+    }
+
+    // Unknown entity - keep original text.
+    result.append(value.substr(i, end - i + 1));
+    i = end;
+  }
+
+  return result;
+}
 
 class SimpleXmlParser {
  public:
@@ -218,7 +329,7 @@ class SimpleXmlParser {
       }
       std::string value = input_.substr(start, position_ - start);
       match("\"");
-      return value;
+      return decode_xml_entities(value);
     }
     if (match("'")) {
       size_t start = position_;
@@ -227,14 +338,14 @@ class SimpleXmlParser {
       }
       std::string value = input_.substr(start, position_ - start);
       match("'");
-      return value;
+      return decode_xml_entities(value);
     }
     // Unquoted value
     size_t start = position_;
     while (!at_end() && !std::isspace(static_cast<unsigned char>(input_[position_])) && input_[position_] != '>') {
       ++position_;
     }
-    return input_.substr(start, position_ - start);
+    return decode_xml_entities(input_.substr(start, position_ - start));
   }
 
   std::string parse_text() {
@@ -242,7 +353,7 @@ class SimpleXmlParser {
     while (!at_end() && input_[position_] != '<') {
       ++position_;
     }
-    return trim(input_.substr(start, position_ - start));
+    return decode_xml_entities(trim(input_.substr(start, position_ - start)));
   }
 
   static std::string trim(const std::string &value) {
