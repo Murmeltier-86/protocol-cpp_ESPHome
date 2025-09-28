@@ -292,27 +292,53 @@ def _register_action_once(name, action_cls, schema):
     this happens the module level decorators are re-evaluated which attempts to
     register the same action again. The automation registry refuses duplicate
     registrations which results in the user facing ``ID ... is already
-    registered`` error. By removing a potential stale registration before
-    calling into ESPHome we guarantee that the fresh definition can always be
-    installed without triggering the error.
+    registered`` error. By checking the registry first we can skip the second
+    registration and keep the reload workflow working.
     """
-
-    # Remove any stale registration from a previous import.
-    if _unregister_action(name):
-        _LOGGER.debug("Removed stale automation action registration for '%s'", name)
 
     def _register():
         return automation.register_action(name, action_cls, schema)
 
+    duplicate_detected = _is_action_registered(name)
+    if duplicate_detected and _unregister_action(name):
+        _LOGGER.debug(
+            "Action '%s' already registered, replacing existing registration", name
+        )
+        duplicate_detected = False
+
+    def _wrap_duplicate_safe_decorator(decorator):
+        def _decorator(func):
+            try:
+                return decorator(func)
+            except Exception as err:  # pylint: disable=broad-except
+                message = str(err)
+                if "already registered" not in message.lower():
+                    raise
+
+                _LOGGER.debug(
+                    "Action '%s' decorator raised duplicate error, keeping existing registration",
+                    name,
+                )
+                return func
+
+        return _decorator
+
     try:
-        return _register()
+        return _wrap_duplicate_safe_decorator(_register())
     except Exception as err:  # pylint: disable=broad-except
         message = str(err)
         if "already registered" not in message.lower():
             raise
 
+        if not duplicate_detected and _unregister_action(name):
+            _LOGGER.debug(
+                "Action '%s' duplicate detected during registration, retrying after unregister",
+                name,
+            )
+            return _wrap_duplicate_safe_decorator(_register())
+
         _LOGGER.debug(
-            "Action '%s' reported a duplicate registration, keeping existing definition",
+            "Action '%s' registration raised duplicate error, skipping second registration",
             name,
         )
 
@@ -413,26 +439,6 @@ def _parse_machine_data_tree_with_sanitization(path):
             break
 
     raw = raw.lstrip()
-
-    if raw.startswith(b"<?xml"):
-        # Some vendor tools generate files that contain multiple XML declarations.
-        # ElementTree rejects those, so keep only the first declaration and drop
-        # every following one, including any whitespace preceding it.
-        first_decl_end = raw.find(b"?>")
-        if first_decl_end != -1:
-            prefix = raw[: first_decl_end + 2]
-            suffix = raw[first_decl_end + 2 :]
-            while True:
-                stripped = suffix.lstrip()
-                if not stripped.startswith(b"<?xml"):
-                    break
-                next_decl_end = stripped.find(b"?>")
-                if next_decl_end == -1:
-                    # Invalid declaration, break out and let ElementTree raise.
-                    break
-                suffix = stripped[next_decl_end + 2 :]
-            raw = prefix + suffix
-
     return ET.ElementTree(ET.fromstring(raw))
 
 
