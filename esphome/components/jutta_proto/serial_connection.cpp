@@ -24,8 +24,22 @@ size_t SerialConnection::read_serial(std::array<uint8_t, 4>& buffer) const {
         ESP_LOGE(TAG, "UART component not configured for serial connection.");
         return 0;
     }
+
     auto* self = const_cast<SerialConnection*>(this);
-    return self->read_array(buffer.data(), buffer.size());
+    size_t read = 0;
+    while (read < buffer.size()) {
+        if (self->available() == 0) {
+            break;
+        }
+
+        if (!self->read_byte(&buffer[read])) {
+            ESP_LOGW(TAG, "Failed to read UART byte while filling buffer (index=%zu).", read);
+            break;
+        }
+        ++read;
+    }
+
+    return read;
 }
 
 bool SerialConnection::write_serial(const std::array<uint8_t, 4>& data) const {

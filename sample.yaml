@@ -1,0 +1,152 @@
+esphome:
+  name: jura-coffee-maker
+  friendly_name: "JURA Coffee Controller"
+
+esp32:
+  board: esp32dev
+
+# Configure logging for verbose handshake diagnostics
+logger:
+  level: DEBUG
+
+# Hardware UART used to communicate with the coffee maker
+uart:
+  id: jura_uart
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 9600
+  parity: NONE
+  stop_bits: 1
+
+# Core component handling the JURA handshake and brewing logic
+jutta_proto:
+  id: jura
+  uart_id: jura_uart
+
+# Convenience switches to remotely power the machine on/off
+switch:
+  - platform: template
+    id: jura_power_on
+    name: "JURA Power On"
+    turn_on_action:
+      # Command AN:01 turns the machine on
+      - uart.write:
+          id: jura_uart
+          data: "AN:01\r\n"
+      - delay: 250ms
+      - switch.turn_off: jura_power_on
+
+  - platform: template
+    id: jura_power_off
+    name: "JURA Power Off"
+    turn_on_action:
+      # Command AN:02 turns the machine off
+      - uart.write:
+          id: jura_uart
+          data: "AN:02\r\n"
+      - delay: 250ms
+      - switch.turn_off: jura_power_off
+
+  - platform: template
+    id: cancel_custom_brew
+    name: "Cancel Custom Brew"
+    turn_on_action:
+      - jutta_proto.cancel_custom_brew:
+          id: jura
+      - delay: 250ms
+      - switch.turn_off: cancel_custom_brew
+
+# Buttons for every predefined drink the component understands
+button:
+  - platform: template
+    name: "Brew Espresso"
+    on_press:
+      - jutta_proto.start_brew: espresso
+
+  - platform: template
+    name: "Brew Coffee"
+    on_press:
+      - jutta_proto.start_brew:
+          id: jura
+          coffee: coffee
+
+  - platform: template
+    name: "Brew Cappuccino"
+    on_press:
+      - jutta_proto.start_brew:
+          coffee: cappuccino
+
+  - platform: template
+    name: "Brew Milk Foam"
+    on_press:
+      - jutta_proto.start_brew:
+          coffee: milk_foam
+
+  - platform: template
+    name: "Dispense Hot Water"
+    on_press:
+      - jutta_proto.start_brew:
+          coffee: hot_water
+
+  - platform: template
+    name: "Brew Caffè Barista"
+    on_press:
+      - jutta_proto.start_brew:
+          coffee: caffe_barista
+
+  - platform: template
+    name: "Brew Lungo Barista"
+    on_press:
+      - jutta_proto.start_brew:
+          coffee: lungo_barista
+
+  - platform: template
+    name: "Brew Espresso Doppio"
+    on_press:
+      - jutta_proto.start_brew:
+          coffee: espresso_doppio
+
+  - platform: template
+    name: "Brew Macchiato"
+    on_press:
+      - jutta_proto.start_brew:
+          coffee: macchiato
+
+  - platform: template
+    name: "Brew Two Coffees"
+    on_press:
+      - jutta_proto.start_brew:
+          coffee: two_coffee
+
+  - platform: template
+    name: "Brew Two Espressi"
+    on_press:
+      # Demonstrates the alias spelling supported by the component
+      - jutta_proto.start_brew: two_espressi
+
+# Scripts showing the remaining automation actions
+script:
+  - id: brew_custom_lungo
+    mode: restart
+    then:
+      - jutta_proto.custom_brew:
+          id: jura
+          grind_duration: 4s
+          water_duration: 45s
+
+  - id: brew_custom_default
+    mode: restart
+    then:
+      # Omitting the optional fields falls back to the component defaults
+      - jutta_proto.custom_brew: {}
+
+  - id: show_front_page
+    then:
+      - jutta_proto.switch_page:
+          page: 0
+
+  - id: show_specialty_page
+    then:
+      - jutta_proto.switch_page:
+          id: jura
+          page: 1

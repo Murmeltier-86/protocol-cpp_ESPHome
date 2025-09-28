@@ -1,5 +1,6 @@
 #include "esphome/components/jutta_proto/jutta_proto.h"
 
+#include <algorithm>
 #include <cctype>
 #include <iomanip>
 #include <sstream>
@@ -206,15 +207,62 @@ void JuraComponent::process_handshake() {
     case HandshakeStage::IDLE:
       break;
     case HandshakeStage::HELLO: {
-      ESP_LOGD(TAG, "HELLO: requesting device type with payload '%s' (hex %s).",
-               format_printable_string(JUTTA_GET_TYPE).c_str(),
-               format_hex_string(JUTTA_GET_TYPE).c_str());
-      auto response = this->connection_->write_decoded_with_response(JUTTA_GET_TYPE, std::chrono::milliseconds{1000});
-      if (response != nullptr) {
-        this->device_type_ = *response;
-        ESP_LOGI(TAG, "Detected coffee maker response: %s", this->device_type_.c_str());
-        this->handshake_buffer_.clear();
-        this->handshake_stage_ = HandshakeStage::SEND_T1;
+      if (!this->handshake_hello_request_sent_) {
+        ESP_LOGD(TAG, "HELLO: requesting device type with payload '%s' (hex %s).",
+                 format_printable_string(JUTTA_GET_TYPE).c_str(),
+                 format_hex_string(JUTTA_GET_TYPE).c_str());
+        if (this->connection_->write_decoded(JUTTA_GET_TYPE)) {
+          this->connection_->reset_response_line_buffer();
+          this->handshake_buffer_.clear();
+          this->handshake_deadline_ = esphome::millis() + 2000;
+          this->handshake_hello_request_sent_ = true;
+          ESP_LOGD(TAG, "HELLO: device type request sent, waiting for response (deadline in 2000 ms).");
+        } else {
+          this->restart_handshake("failed to request device type");
+          break;
+        }
+      }
+
+      if (this->read_handshake_bytes()) {
+        bool handled = false;
+        while (!handled) {
+          auto newline = this->handshake_buffer_.find("\r\n");
+          if (newline == std::string::npos) {
+            break;
+          }
+
+          std::string line = this->handshake_buffer_.substr(0, newline);
+          this->handshake_buffer_.erase(0, newline + 2);
+
+          std::string lowercase_line = line;
+          std::transform(lowercase_line.begin(), lowercase_line.end(), lowercase_line.begin(),
+                         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+          if (lowercase_line.rfind("ty:", 0) == 0) {
+            if (line.size() <= 3) {
+              ESP_LOGW(TAG,
+                       "HELLO: device type response line '%s' has no payload, proceeding with unknown type.",
+                       format_printable_string(line).c_str());
+              this->device_type_ = "TY:unknown";
+            } else {
+              this->device_type_ = line;
+              ESP_LOGI(TAG, "Detected coffee maker response: %s", this->device_type_.c_str());
+            }
+            this->handshake_buffer_.clear();
+            this->handshake_deadline_ = 0;
+            this->handshake_stage_ = HandshakeStage::SEND_T1;
+            this->handshake_hello_request_sent_ = false;
+            handled = true;
+          } else {
+            ESP_LOGD(TAG, "HELLO: ignoring unexpected response line: '%s'",
+                     format_printable_string(line).c_str());
+          }
+        }
+      }
+
+      if (this->handshake_stage_ == HandshakeStage::HELLO && this->handshake_deadline_ != 0 &&
+          time_reached(esphome::millis(), this->handshake_deadline_)) {
+        this->restart_handshake("timeout waiting for device type");
       }
       break;
     }
@@ -328,8 +376,12 @@ void JuraComponent::restart_handshake(const char *reason) {
   }
   this->handshake_buffer_.clear();
   this->handshake_deadline_ = 0;
+  this->handshake_hello_request_sent_ = false;
   this->handshake_stage_ = HandshakeStage::HELLO;
   this->last_logged_stage_ = HandshakeStage::FAILED;
+  if (this->connection_ != nullptr) {
+    this->connection_->reset_response_line_buffer();
+  }
 }
 
 bool JuraComponent::read_handshake_bytes() {
@@ -337,17 +389,17 @@ bool JuraComponent::read_handshake_bytes() {
     return false;
   }
   bool read_any = false;
-  uint8_t byte = 0;
-  while (this->connection_->read_decoded(&byte)) {
+  std::string line;
+  while (this->connection_->poll_response_line(line)) {
     read_any = true;
-    this->handshake_buffer_.push_back(static_cast<char>(byte));
+    this->handshake_buffer_.append(line);
+    this->handshake_buffer_.append("\r\n");
     if (this->handshake_buffer_.size() > 128) {
       this->handshake_buffer_.erase(0, this->handshake_buffer_.size() - 128);
     }
     ESP_LOGV(TAG,
-             "Handshake buffered byte: '%s' (0x%02X); buffer size=%zu; buffer now '%s' (hex %s)",
-             format_printable_char(byte).c_str(), static_cast<unsigned int>(byte),
-             this->handshake_buffer_.size(),
+             "Handshake buffered line: '%s'; buffer size=%zu; buffer now '%s' (hex %s)",
+             format_printable_string(line).c_str(), this->handshake_buffer_.size(),
              format_buffer_preview(this->handshake_buffer_).c_str(),
              format_buffer_hex_preview(this->handshake_buffer_).c_str());
   }
@@ -393,6 +445,18 @@ void JuraComponent::switch_page(uint32_t page) {
     return;
   }
   this->coffee_maker_->switch_page(page);
+}
+
+void JuraComponent::run_sequence(const std::vector<::jutta_proto::CoffeeMaker::SequenceStep> &steps) {
+  if (!this->is_ready()) {
+    ESP_LOGW(TAG, "Cannot run sequence - component not ready.");
+    return;
+  }
+  if (this->coffee_maker_->is_locked()) {
+    ESP_LOGW(TAG, "Cannot run sequence - coffee maker busy.");
+    return;
+  }
+  this->coffee_maker_->run_sequence(steps);
 }
 
 bool JuraComponent::is_busy() const {
