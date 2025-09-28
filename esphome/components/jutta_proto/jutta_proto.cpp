@@ -472,7 +472,7 @@ void JuraComponent::process_machine_data_query() {
 }
 
 void JuraComponent::publish_machine_data_(const std::string &response) {
-  auto parsed = jutta_component::MachineDataParser::parse(response);
+  auto parsed = ::jutta_component::MachineDataParser::parse(response);
   if (!parsed.has_value()) {
     ESP_LOGW(TAG, "Failed to parse machine data XML response.");
   }
@@ -481,22 +481,22 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
     const auto &root = parsed.value();
     if (this->machine_data_statistic_sensor_ != nullptr) {
       auto formatted =
-          jutta_component::format_machine_data_section(root.find_child_case_insensitive("STATISTIC"));
+          ::jutta_component::format_machine_data_section(root.find_child_case_insensitive("STATISTIC"));
       this->machine_data_statistic_sensor_->publish_state(formatted);
     }
     if (this->machine_data_errors_sensor_ != nullptr) {
       auto formatted =
-          jutta_component::format_machine_data_section(root.find_child_case_insensitive("ALERTS"));
+          ::jutta_component::format_machine_data_section(root.find_child_case_insensitive("ALERTS"));
       this->machine_data_errors_sensor_->publish_state(formatted);
     }
     if (this->machine_data_status_sensor_ != nullptr) {
-      auto formatted = jutta_component::format_machine_data_section(
+      auto formatted = ::jutta_component::format_machine_data_section(
           root.find_child_case_insensitive("PROGRESS_STATE_INTAKE"));
       this->machine_data_status_sensor_->publish_state(formatted);
     }
     if (this->machine_data_processes_sensor_ != nullptr) {
       auto formatted =
-          jutta_component::format_machine_data_section(root.find_child_case_insensitive("PROCESSES"));
+          ::jutta_component::format_machine_data_section(root.find_child_case_insensitive("PROCESSES"));
       this->machine_data_processes_sensor_->publish_state(formatted);
     }
   } else {
