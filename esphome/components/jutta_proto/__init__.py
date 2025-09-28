@@ -114,6 +114,40 @@ SEQUENCE_COMMAND_EXPRESSIONS = {
 JURA_COMPONENT_IDS = []
 
 
+def _register_action_once(name, action_cls, schema):
+    """Register an automation action only once.
+
+    ESPHome reloads custom component modules during iterative compilation. When
+    this happens the module level decorators are re-evaluated which attempts to
+    register the same action again. The automation registry refuses duplicate
+    registrations which results in the user facing ``ID ... is already
+    registered`` error. By checking the registry first we can skip the second
+    registration and keep the reload workflow working.
+    """
+
+    registry = getattr(automation, "ACTION_REGISTRY", None)
+    already_registered = False
+
+    if registry is not None:
+        if hasattr(registry, "get"):
+            try:
+                registry.get(name)
+            except KeyError:
+                pass
+            else:
+                already_registered = True
+        elif hasattr(registry, "__contains__"):
+            already_registered = name in registry
+
+    if already_registered:
+        def decorator(func):
+            return func
+
+        return decorator
+
+    return automation.register_action(name, action_cls, schema)
+
+
 def _validate_config(config):
     if CONF_MACHINE_DATA in config and CONF_MACHINE_DATA_XML in config:
         raise cv.Invalid(
@@ -376,7 +410,7 @@ async def _get_parent(config):
     return await cg.get_variable(JURA_COMPONENT_IDS[0])
 
 
-@automation.register_action("jutta_proto.start_brew", StartBrewAction, _normalize_start_brew)
+@_register_action_once("jutta_proto.start_brew", StartBrewAction, _normalize_start_brew)
 async def start_brew_action_to_code(config, action_id, template_args, args):
     _ = args
     parent = await _get_parent(config)
@@ -385,7 +419,7 @@ async def start_brew_action_to_code(config, action_id, template_args, args):
     return var
 
 
-@automation.register_action("jutta_proto.custom_brew", CustomBrewAction, _normalize_custom_brew)
+@_register_action_once("jutta_proto.custom_brew", CustomBrewAction, _normalize_custom_brew)
 async def custom_brew_action_to_code(config, action_id, template_args, args):
     _ = args
     parent = await _get_parent(config)
@@ -397,7 +431,7 @@ async def custom_brew_action_to_code(config, action_id, template_args, args):
     return var
 
 
-@automation.register_action("jutta_proto.cancel_custom_brew", CancelCustomBrewAction, _normalize_cancel)
+@_register_action_once("jutta_proto.cancel_custom_brew", CancelCustomBrewAction, _normalize_cancel)
 async def cancel_brew_action_to_code(config, action_id, template_args, args):
     _ = args
     parent = await _get_parent(config)
@@ -405,7 +439,7 @@ async def cancel_brew_action_to_code(config, action_id, template_args, args):
     return var
 
 
-@automation.register_action("jutta_proto.switch_page", SwitchPageAction, _normalize_switch_page)
+@_register_action_once("jutta_proto.switch_page", SwitchPageAction, _normalize_switch_page)
 async def switch_page_action_to_code(config, action_id, template_args, args):
     _ = args
     parent = await _get_parent(config)
@@ -414,7 +448,7 @@ async def switch_page_action_to_code(config, action_id, template_args, args):
     return var
 
 
-@automation.register_action("jutta_proto.run_sequence", RunSequenceAction, _normalize_sequence)
+@_register_action_once("jutta_proto.run_sequence", RunSequenceAction, _normalize_sequence)
 async def run_sequence_action_to_code(config, action_id, template_args, args):
     _ = args
     parent = await _get_parent(config)
