@@ -4,12 +4,15 @@ from esphome import automation
 from esphome.components import text_sensor, uart
 from esphome.const import CONF_ID
 
-if hasattr(cv, "EntityCategory"):
-    ENTITY_CATEGORY_DIAGNOSTIC = cv.EntityCategory.DIAGNOSTIC
-else:
-    from esphome.const import EntityCategory
+try:
+    from esphome.const import ENTITY_CATEGORY_DIAGNOSTIC
+except ImportError:
+    if hasattr(cv, "EntityCategory"):
+        ENTITY_CATEGORY_DIAGNOSTIC = cv.EntityCategory.DIAGNOSTIC
+    else:
+        from esphome.const import EntityCategory
 
-    ENTITY_CATEGORY_DIAGNOSTIC = EntityCategory.DIAGNOSTIC
+        ENTITY_CATEGORY_DIAGNOSTIC = EntityCategory.DIAGNOSTIC
 
 DEPENDENCIES = ["uart"]
 AUTO_LOAD = ["uart"]
