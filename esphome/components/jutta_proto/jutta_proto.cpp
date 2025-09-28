@@ -357,6 +357,9 @@ void JuraComponent::process_handshake() {
         this->handshake_stage_ = HandshakeStage::DONE;
         this->handshake_buffer_.clear();
         this->handshake_deadline_ = 0;
+        this->machine_data_request_pending_ = false;
+        this->machine_data_request_start_ = 0;
+        this->machine_data_query_next_ = esphome::millis();
       } else {
         this->restart_handshake("failed to send @t3");
       }
@@ -372,6 +375,9 @@ void JuraComponent::process_handshake() {
     auto connection = std::move(this->connection_);
     this->coffee_maker_ = std::make_unique<::jutta_proto::CoffeeMaker>(std::move(connection));
     ESP_LOGI(TAG, "Coffee maker controller initialized.");
+    if (this->machine_data_sensor_ != nullptr && this->machine_data_query_next_ == 0) {
+      this->machine_data_query_next_ = esphome::millis();
+    }
   }
 }
 
@@ -384,6 +390,9 @@ void JuraComponent::restart_handshake(const char *reason) {
   this->handshake_hello_request_sent_ = false;
   this->handshake_stage_ = HandshakeStage::HELLO;
   this->last_logged_stage_ = HandshakeStage::FAILED;
+  this->machine_data_query_next_ = 0;
+  this->machine_data_request_pending_ = false;
+  this->machine_data_request_start_ = 0;
   if (this->connection_ != nullptr) {
     this->connection_->reset_response_line_buffer();
   }
@@ -436,6 +445,9 @@ void JuraComponent::process_machine_data_query() {
       this->publish_machine_data_(*response);
       this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
       this->machine_data_request_pending_ = false;
+
+      this->machine_data_request_start_ = 0;
+
       return true;
     }
     return false;
@@ -451,6 +463,9 @@ void JuraComponent::process_machine_data_query() {
       ESP_LOGW(TAG, "Timeout while waiting for machine data response.");
       this->machine_data_request_pending_ = false;
       this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
+
+      this->machine_data_request_start_ = 0;
+
     }
     return;
   }
@@ -475,6 +490,16 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
   sanitized.erase(std::remove_if(sanitized.begin(), sanitized.end(),
                                  [](unsigned char c) { return c == '\r' || c == '\n'; }),
                   sanitized.end());
+
+  auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
+  auto begin_it = std::find_if_not(sanitized.begin(), sanitized.end(), is_space);
+  auto end_it = std::find_if_not(sanitized.rbegin(), sanitized.rend(), is_space).base();
+  if (begin_it >= end_it) {
+    sanitized.clear();
+  } else {
+    sanitized.assign(begin_it, end_it);
+  }
+
   ESP_LOGD(TAG, "Machine data response: %s", sanitized.c_str());
   if (this->machine_data_sensor_ != nullptr) {
     this->machine_data_sensor_->publish_state(sanitized);
