@@ -243,6 +243,7 @@ class JuttaConnection {
     [[nodiscard]] bool write_decoded_unsafe(const std::string& data) const;
 
     [[nodiscard]] bool write_xml_unsafe(const std::vector<uint8_t>& data) const;
+    [[nodiscard]] bool write_plain_unsafe(const std::string& data) const;
 
     /**
      * Waits until the coffee maker responded with the given response.
@@ -310,6 +311,10 @@ class JuttaConnection {
     mutable std::string response_line_buffer_{};
 
     void reinject_decoded_front(const std::string& data) const;
+
+    static bool is_plain_command(const std::string& data);
+
+    mutable bool plain_mode_active_{false};
 
 };
 //---------------------------------------------------------------------------

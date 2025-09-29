@@ -154,6 +154,10 @@ inline bool has_xml_terminator_tail(const std::vector<uint8_t>& buffer) {
 
 JuttaConnection::JuttaConnection(esphome::uart::UARTComponent* parent) : serial(parent) {}
 
+bool JuttaConnection::is_plain_command(const std::string& data) {
+    return !data.empty() && data.front() == '&';
+}
+
 void JuttaConnection::init() {
     serial.init();
 }
@@ -174,6 +178,21 @@ bool JuttaConnection::read_decoded_unsafe(uint8_t* byte) const {
         this->decoded_rx_buffer_.pop_front();
         ESP_LOGD(TAG, "Decoded byte from buffer: '%s' (%s)", format_printable(*byte).c_str(),
                  format_hex(*byte).c_str());
+        return true;
+    }
+    if (this->plain_mode_active_) {
+        wait_for_jutta_gap();
+        std::array<uint8_t, 4> chunk{};
+        size_t read = serial.read_serial(chunk);
+        if (read == 0) {
+            ESP_LOGVV(TAG, "No plain response bytes available yet.");
+            return false;
+        }
+        *byte = chunk[0];
+        for (size_t i = 1; i < read; ++i) {
+            this->decoded_rx_buffer_.push_back(chunk[i]);
+        }
+        ESP_LOGD(TAG, "Read plain byte: '%s' (%s)", format_printable(*byte).c_str(), format_hex(*byte).c_str());
         return true;
     }
     std::array<uint8_t, 4> buffer{};
@@ -198,6 +217,26 @@ bool JuttaConnection::read_decoded_unsafe(std::vector<uint8_t>& data) const {
             data.push_back(buffered_byte);
         }
         any_data = true;
+    }
+
+    if (this->plain_mode_active_) {
+        wait_for_jutta_gap();
+        std::array<uint8_t, 4> chunk{};
+        size_t read = serial.read_serial(chunk);
+        if (read == 0) {
+            if (any_data) {
+                ESP_LOGD(TAG, "Read plain payload from buffer (%zu byte%s).", data.size(),
+                         data.size() == 1 ? "" : "s");
+                return true;
+            }
+            ESP_LOGVV(TAG, "No plain response bytes available yet.");
+            return false;
+        }
+        std::vector<uint8_t> chunk_vec(chunk.begin(), chunk.begin() + read);
+        data.insert(data.end(), chunk_vec.begin(), chunk_vec.end());
+        ESP_LOGD(TAG, "Read plain payload chunk (%zu byte%s): '%s' (hex %s)", read, read == 1 ? "" : "s",
+                 format_printable(chunk_vec).c_str(), format_hex(chunk_vec).c_str());
+        return true;
     }
 
     std::vector<std::array<uint8_t, 4>> dataBuffer;
@@ -299,10 +338,32 @@ bool JuttaConnection::write_xml_unsafe(const std::vector<uint8_t>& data) const {
     return result;
 }
 
+bool JuttaConnection::write_plain_unsafe(const std::string& data) const {
+    if (!data.empty()) {
+        std::vector<uint8_t> bytes(data.begin(), data.end());
+        ESP_LOGD(TAG, "Queueing plain payload for transmission: '%s' (hex %s)", format_printable(data).c_str(),
+                 format_hex(bytes).c_str());
+    } else {
+        ESP_LOGVV(TAG, "Requested to write an empty plain payload.");
+    }
+
+    bool result = true;
+    for (unsigned char byte : data) {
+        if (!serial.write_serial_byte(static_cast<uint8_t>(byte))) {
+            ESP_LOGE(TAG, "Failed to write plain byte 0x%02X to UART.", static_cast<int>(byte));
+            result = false;
+        }
+    }
+    serial.flush();
+    wait_for_jutta_gap();
+    return result;
+}
+
 bool JuttaConnection::write_decoded(const uint8_t& byte) {
     if (!this->wait_context_.active && !this->wait_string_context_.active) {
         flush_serial_input();
     }
+    this->plain_mode_active_ = false;
     return write_decoded_unsafe(byte);
 }
 
@@ -310,6 +371,7 @@ bool JuttaConnection::write_decoded(const std::vector<uint8_t>& data) {
     if (!this->wait_context_.active && !this->wait_string_context_.active) {
         flush_serial_input();
     }
+    this->plain_mode_active_ = false;
     return write_decoded_unsafe(data);
 }
 
@@ -317,6 +379,11 @@ bool JuttaConnection::write_decoded(const std::string& data) {
     if (!this->wait_context_.active && !this->wait_string_context_.active) {
         flush_serial_input();
     }
+    if (is_plain_command(data)) {
+        this->plain_mode_active_ = true;
+        return write_plain_unsafe(data);
+    }
+    this->plain_mode_active_ = false;
     return write_decoded_unsafe(data);
 }
 
@@ -502,6 +569,7 @@ void JuttaConnection::flush_serial_input() const {
                  this->decoded_rx_buffer_.size() == 1 ? "" : "s");
         this->decoded_rx_buffer_.clear();
     }
+    this->plain_mode_active_ = false;
 
     std::array<uint8_t, 4> discard{};
     while (true) {
@@ -579,6 +647,7 @@ std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const 
                                                                          const std::chrono::milliseconds& timeout) {
     if (!this->wait_string_context_.active) {
         flush_serial_input();
+        this->plain_mode_active_ = false;
         if (!write_decoded_unsafe(data)) {
             return nullptr;
         }
@@ -592,9 +661,21 @@ std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const 
                                                                          const std::chrono::milliseconds& timeout) {
     if (!this->wait_string_context_.active) {
         flush_serial_input();
-        if (!write_decoded_unsafe(data)) {
-            return nullptr;
+        if (is_plain_command(data)) {
+            this->plain_mode_active_ = true;
+            if (!write_plain_unsafe(data)) {
+                return nullptr;
+            }
+        } else {
+            this->plain_mode_active_ = false;
+            if (!write_decoded_unsafe(data)) {
+                return nullptr;
+            }
         }
+    } else if (is_plain_command(data)) {
+        this->plain_mode_active_ = true;
+    } else {
+        this->plain_mode_active_ = false;
     }
     ESP_LOGD(TAG, "Waiting for response after writing string payload (timeout=%lld ms).",
              static_cast<long long>(timeout.count()));
@@ -603,13 +684,31 @@ std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const 
 
 std::shared_ptr<std::string> JuttaConnection::write_xml_with_response(
     const std::string& data, const std::chrono::milliseconds& timeout) {
+    if (is_plain_command(data)) {
+        if (!this->wait_string_context_.active) {
+            flush_serial_input();
+            this->plain_mode_active_ = true;
+            if (!write_plain_unsafe(data)) {
+                return nullptr;
+            }
+        } else {
+            this->plain_mode_active_ = true;
+        }
+        ESP_LOGD(TAG, "Waiting for plain XML response after writing payload (timeout=%lld ms).",
+                 static_cast<long long>(timeout.count()));
+        return wait_for_str_unsafe(timeout);
+    }
+
     if (!this->xml_wait_context_.active) {
         flush_serial_input();
         this->xml_wait_context_.encoded_buffer.clear();
+        this->plain_mode_active_ = false;
         std::vector<uint8_t> bytes(data.begin(), data.end());
         if (!write_xml_unsafe(bytes)) {
             return nullptr;
         }
+    } else {
+        this->plain_mode_active_ = false;
     }
     ESP_LOGD(TAG, "Waiting for XML response after writing payload (timeout=%lld ms).",
              static_cast<long long>(timeout.count()));
@@ -644,6 +743,7 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         }
 
         this->wait_string_context_.active = false;
+        this->plain_mode_active_ = false;
         auto shared_response = std::make_shared<std::string>(response);
         ESP_LOGD(TAG, "Received response line: '%s'", format_printable(*shared_response).c_str());
         return shared_response;
@@ -681,6 +781,7 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
                          this->wait_string_context_.buffer.size() == 1 ? "" : "s");
                 this->wait_string_context_.buffer.clear();
             }
+            this->plain_mode_active_ = false;
             ESP_LOGW(TAG, "Timeout while waiting for generic response after %u ms.", elapsed);
         }
     }
@@ -778,6 +879,7 @@ JuttaConnection::WaitResult JuttaConnection::wait_for_response_unsafe(const std:
     if (response.empty()) {
         this->wait_context_.active = false;
         this->wait_context_.recent.clear();
+        this->plain_mode_active_ = false;
         return WaitResult::Success;
     }
 
@@ -787,6 +889,7 @@ JuttaConnection::WaitResult JuttaConnection::wait_for_response_unsafe(const std:
         if (elapsed >= static_cast<uint32_t>(timeout.count())) {
             this->wait_context_.active = false;
             this->wait_context_.recent.clear();
+            this->plain_mode_active_ = false;
             ESP_LOGW(TAG, "Timeout while waiting for response '%s' after %u ms.", format_printable(response).c_str(), elapsed);
             return WaitResult::Timeout;
         }
@@ -802,6 +905,7 @@ JuttaConnection::WaitResult JuttaConnection::wait_for_response_unsafe(const std:
         if (this->wait_context_.recent.find(response) != std::string::npos) {
             this->wait_context_.active = false;
             this->wait_context_.recent.clear();
+            this->plain_mode_active_ = false;
             ESP_LOGD(TAG, "Response '%s' detected.", format_printable(response).c_str());
             return WaitResult::Success;
         }
@@ -818,9 +922,12 @@ JuttaConnection::WaitResult JuttaConnection::write_decoded_wait_for(const std::v
                                                                     const std::chrono::milliseconds& timeout) {
     if (!this->wait_context_.active || this->wait_context_.expected != response) {
         flush_serial_input();
+        this->plain_mode_active_ = false;
         if (!write_decoded_unsafe(data)) {
             return WaitResult::Error;
         }
+    } else {
+        this->plain_mode_active_ = false;
     }
     return wait_for_response_unsafe(response, timeout);
 }
@@ -829,9 +936,21 @@ JuttaConnection::WaitResult JuttaConnection::write_decoded_wait_for(const std::s
                                                                     const std::chrono::milliseconds& timeout) {
     if (!this->wait_context_.active || this->wait_context_.expected != response) {
         flush_serial_input();
-        if (!write_decoded_unsafe(data)) {
-            return WaitResult::Error;
+        if (is_plain_command(data)) {
+            this->plain_mode_active_ = true;
+            if (!write_plain_unsafe(data)) {
+                return WaitResult::Error;
+            }
+        } else {
+            this->plain_mode_active_ = false;
+            if (!write_decoded_unsafe(data)) {
+                return WaitResult::Error;
+            }
         }
+    } else if (is_plain_command(data)) {
+        this->plain_mode_active_ = true;
+    } else {
+        this->plain_mode_active_ = false;
     }
     return wait_for_response_unsafe(response, timeout);
 }
