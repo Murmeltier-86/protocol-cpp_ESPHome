@@ -5,10 +5,14 @@
 #include <cctype>
 #include <cstdint>
 #include <iomanip>
+#include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <utility>
+#include <vector>
 
+#include "esphome/core/application.h"
 #include "esphome/core/time.h"
 #include "machine_data_parser.h"
 
@@ -32,6 +36,79 @@ struct MachineDataCommandDefinition {
 constexpr std::array<MachineDataCommandDefinition, 3> MACHINE_DATA_COMMANDS = {{{"@TR:32", "STATISTIC", "PRODUCTCOUNTER"},
                                                                               {"@TG:43", "STATISTIC", "MAINTENANCECOUNTER"},
                                                                               {"@TG:C0", "STATISTIC", "MAINTENANCEPERCENT"}}};
+
+std::string slugify(const std::string &value) {
+  std::string result;
+  result.reserve(value.size());
+  bool last_was_separator = true;
+  for (unsigned char c : value) {
+    if (std::isalnum(c) != 0) {
+      result.push_back(static_cast<char>(std::tolower(c)));
+      last_was_separator = false;
+    } else {
+      if (!last_was_separator && !result.empty()) {
+        result.push_back('_');
+        last_was_separator = true;
+      }
+    }
+  }
+  while (!result.empty() && result.back() == '_') {
+    result.pop_back();
+  }
+  if (result.empty()) {
+    result = "field";
+  }
+  return result;
+}
+
+std::string prettify_identifier(const std::string &identifier) {
+  if (identifier == "PRODUCTCOUNTER") {
+    return "Product Counter";
+  }
+  if (identifier == "MAINTENANCECOUNTER") {
+    return "Maintenance Counter";
+  }
+  if (identifier == "MAINTENANCEPERCENT") {
+    return "Maintenance Percent";
+  }
+  if (identifier == "STATISTIC") {
+    return "Statistic";
+  }
+  std::string lowered;
+  lowered.reserve(identifier.size());
+  for (unsigned char c : identifier) {
+    if (c == '_' || c == '-' || c == '.' || c == ' ') {
+      lowered.push_back(' ');
+    } else {
+      lowered.push_back(static_cast<char>(std::tolower(c)));
+    }
+  }
+  std::string result;
+  result.reserve(lowered.size());
+  bool capitalize_next = true;
+  for (unsigned char c : lowered) {
+    if (std::isspace(c) != 0) {
+      if (!result.empty() && result.back() != ' ') {
+        result.push_back(' ');
+      }
+      capitalize_next = true;
+      continue;
+    }
+    if (capitalize_next) {
+      result.push_back(static_cast<char>(std::toupper(c)));
+      capitalize_next = false;
+    } else {
+      result.push_back(static_cast<char>(c));
+    }
+  }
+  if (!result.empty() && result.back() == ' ') {
+    result.pop_back();
+  }
+  return result;
+}
+
+using MachineDataFieldList = std::vector<std::pair<std::string, std::string>>;
+using MachineDataFieldMap = std::map<std::string, std::pair<std::vector<std::string>, std::string>>;
 
 struct ProductCounterDefinition {
   const char *name;
@@ -89,6 +166,28 @@ std::optional<std::string> format_product_counter_payload(const std::string &pay
   return stream.str();
 }
 
+MachineDataFieldList parse_product_counter_fields(const std::string &payload) {
+  MachineDataFieldList fields;
+  if (payload.size() != 21) {
+    return fields;
+  }
+
+  const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
+  uint8_t header = data[0];
+
+  std::ostringstream header_stream;
+  header_stream << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+                << static_cast<int>(header);
+  fields.emplace_back("Header", header_stream.str());
+
+  for (size_t i = 0; i < PRODUCT_COUNTER_DEFINITIONS.size(); ++i) {
+    uint16_t value = read_u16_le(&data[1 + i * 2]);
+    fields.emplace_back(PRODUCT_COUNTER_DEFINITIONS[i].name, std::to_string(value));
+  }
+
+  return fields;
+}
+
 std::optional<std::string> format_maintenance_counter_payload(const std::string &payload) {
   if (payload.size() != 13) {
     return std::nullopt;
@@ -107,6 +206,28 @@ std::optional<std::string> format_maintenance_counter_payload(const std::string 
   }
 
   return stream.str();
+}
+
+MachineDataFieldList parse_maintenance_counter_fields(const std::string &payload) {
+  MachineDataFieldList fields;
+  if (payload.size() != 13) {
+    return fields;
+  }
+
+  const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
+  uint8_t header = data[0];
+
+  std::ostringstream header_stream;
+  header_stream << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+                << static_cast<int>(header);
+  fields.emplace_back("Header", header_stream.str());
+
+  for (size_t i = 0; i < MAINTENANCE_COUNTER_NAMES.size(); ++i) {
+    uint16_t value = read_u16_le(&data[1 + i * 2]);
+    fields.emplace_back(MAINTENANCE_COUNTER_NAMES[i], std::to_string(value));
+  }
+
+  return fields;
 }
 
 std::optional<std::string> format_maintenance_percent_payload(const std::string &payload) {
@@ -147,6 +268,41 @@ std::optional<std::string> format_maintenance_percent_payload(const std::string 
   return stream.str();
 }
 
+MachineDataFieldList parse_maintenance_percent_fields(const std::string &payload) {
+  MachineDataFieldList fields;
+  if (payload.size() != 13 && payload.size() != 14) {
+    return fields;
+  }
+
+  const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
+  size_t header_size = payload.size() == 14 ? 2 : 1;
+  uint16_t header = header_size == 2 ? read_u16_le(data) : static_cast<uint16_t>(data[0]);
+  size_t value_offset = header_size;
+
+  std::ostringstream header_stream;
+  header_stream << "0x" << std::uppercase << std::hex << std::setfill('0')
+                << std::setw(static_cast<int>(header_size * 2)) << header;
+  fields.emplace_back("Header", header_stream.str());
+
+  for (size_t i = 0; i < MAINTENANCE_PERCENT_NAMES.size(); ++i) {
+    size_t index = value_offset + i * 2;
+    if (index + 1 >= payload.size()) {
+      break;
+    }
+    uint16_t raw_value = read_u16_le(&data[index]);
+    std::ostringstream raw_stream;
+    raw_stream << raw_value;
+    fields.emplace_back(std::string(MAINTENANCE_PERCENT_NAMES[i]) + " Raw", raw_stream.str());
+
+    std::ostringstream percent_stream;
+    percent_stream << std::fixed << std::setprecision(2)
+                   << (static_cast<double>(raw_value) * 100.0 / 65535.0);
+    fields.emplace_back(std::string(MAINTENANCE_PERCENT_NAMES[i]) + " Percent", percent_stream.str());
+  }
+
+  return fields;
+}
+
 std::optional<std::string> parse_machine_data_response(const std::string &command, const std::string &payload) {
   if (command == std::string("@TR:32")) {
     return format_product_counter_payload(payload);
@@ -158,6 +314,19 @@ std::optional<std::string> parse_machine_data_response(const std::string &comman
     return format_maintenance_percent_payload(payload);
   }
   return std::nullopt;
+}
+
+MachineDataFieldList parse_machine_data_fields(const std::string &command, const std::string &payload) {
+  if (command == std::string("@TR:32")) {
+    return parse_product_counter_fields(payload);
+  }
+  if (command == std::string("@TG:43")) {
+    return parse_maintenance_counter_fields(payload);
+  }
+  if (command == std::string("@TG:C0")) {
+    return parse_maintenance_percent_fields(payload);
+  }
+  return {};
 }
 
 std::string to_upper_hex(const std::string &value) {
@@ -224,7 +393,8 @@ std::string xml_escape(const std::string &value) {
   return stream.str();
 }
 
-std::string build_machine_data_payload(const std::vector<std::string> &responses) {
+std::string build_machine_data_payload(const std::vector<std::string> &responses,
+                                       MachineDataFieldMap *field_map = nullptr) {
   std::ostringstream stream;
   stream << "<MACHINE_DATA>";
 
@@ -245,10 +415,13 @@ std::string build_machine_data_payload(const std::vector<std::string> &responses
     }
 
     std::string response = i < responses.size() ? responses[i] : std::string{};
+    std::optional<std::string> parsed_text;
+    if (!response.empty()) {
+      parsed_text = parse_machine_data_response(definition.command, response);
+    }
     stream << '<' << definition.element << " command=\"" << definition.command << "\"";
     if (!response.empty()) {
       stream << " raw_hex=\"" << to_upper_hex(response) << "\"";
-      auto parsed_text = parse_machine_data_response(definition.command, response);
       if (parsed_text.has_value()) {
         stream << " encoding=\"text\">" << xml_escape(parsed_text.value()) << "</" << definition.element << ">";
       } else if (is_safe_xml_text(response)) {
@@ -258,6 +431,47 @@ std::string build_machine_data_payload(const std::vector<std::string> &responses
       }
     } else {
       stream << "/>";
+    }
+
+    if (field_map != nullptr) {
+      std::vector<std::string> base_labels;
+      base_labels.push_back(prettify_identifier(definition.section));
+      base_labels.push_back(prettify_identifier(definition.element));
+      std::string key_prefix = slugify(definition.section);
+      std::string element_slug = slugify(definition.element);
+      if (!element_slug.empty()) {
+        if (!key_prefix.empty()) {
+          key_prefix.push_back('.');
+        }
+        key_prefix.append(element_slug);
+      }
+      if (!response.empty()) {
+        MachineDataFieldList fields = parse_machine_data_fields(definition.command, response);
+        for (const auto &field : fields) {
+          std::vector<std::string> labels = base_labels;
+          labels.push_back(field.first);
+          std::string value_slug = slugify(field.first);
+          std::string field_key = key_prefix.empty() ? value_slug : key_prefix + '.' + value_slug;
+          (*field_map)[field_key] = {labels, field.second};
+        }
+
+        std::vector<std::string> raw_labels = base_labels;
+        raw_labels.push_back("Raw Hex");
+        std::string raw_key = key_prefix.empty() ? std::string("raw_hex") : key_prefix + ".raw_hex";
+        (*field_map)[raw_key] = {raw_labels, to_upper_hex(response)};
+
+        if (parsed_text.has_value()) {
+          std::vector<std::string> text_labels = base_labels;
+          text_labels.push_back("Text");
+          std::string text_key = key_prefix.empty() ? std::string("text") : key_prefix + ".text";
+          (*field_map)[text_key] = {text_labels, parsed_text.value()};
+        } else if (is_safe_xml_text(response)) {
+          std::vector<std::string> text_labels = base_labels;
+          text_labels.push_back("Text");
+          std::string text_key = key_prefix.empty() ? std::string("text") : key_prefix + ".text";
+          (*field_map)[text_key] = {text_labels, response};
+        }
+      }
     }
   }
 
@@ -396,6 +610,63 @@ std::string sanitize_text_sensor_value(const std::string &value) {
   }
 
   return sanitized;
+}
+
+void JuraComponent::publish_machine_data_fields_(const MachineDataFieldMap &fields) {
+  if (!this->machine_data_auto_fields_) {
+    return;
+  }
+
+  std::set<std::string> seen;
+  for (const auto &entry : fields) {
+    auto *sensor = this->get_or_create_machine_data_field_sensor_(entry.first, entry.second.first);
+    if (sensor == nullptr) {
+      continue;
+    }
+    sensor->set_name(this->make_machine_data_field_name_(entry.second.first));
+    sensor->publish_state(sanitize_text_sensor_value(entry.second.second));
+    seen.insert(entry.first);
+  }
+
+  for (const auto &existing : this->machine_data_field_sensors_) {
+    if (seen.count(existing.first) == 0) {
+      existing.second->publish_state("");
+    }
+  }
+}
+
+text_sensor::TextSensor *JuraComponent::get_or_create_machine_data_field_sensor_(
+    const std::string &key, const std::vector<std::string> &labels) {
+  auto it = this->machine_data_field_sensors_.find(key);
+  if (it != this->machine_data_field_sensors_.end()) {
+    return it->second;
+  }
+  if (!this->machine_data_auto_fields_) {
+    return nullptr;
+  }
+
+  auto *sensor = new text_sensor::TextSensor();
+  sensor->set_name(this->make_machine_data_field_name_(labels));
+  App.register_text_sensor(sensor);
+  this->machine_data_field_sensors_[key] = sensor;
+  return sensor;
+}
+
+std::string JuraComponent::make_machine_data_field_name_(const std::vector<std::string> &labels) const {
+  std::string name = this->machine_data_field_prefix_;
+  for (const auto &label : labels) {
+    if (label.empty()) {
+      continue;
+    }
+    if (!name.empty()) {
+      name.append(" ");
+    }
+    name.append(label);
+  }
+  if (name.empty()) {
+    name = "Machine Data";
+  }
+  return name;
 }
 
 }  // namespace
@@ -770,6 +1041,9 @@ void JuraComponent::process_machine_data_query() {
           this->machine_data_request_start_ = 0;
           this->machine_data_command_index_ = 0;
           this->machine_data_responses_.clear();
+          if (this->machine_data_auto_fields_) {
+            this->machine_data_field_values_.clear();
+          }
           this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
         }
         return;
@@ -803,7 +1077,12 @@ void JuraComponent::process_machine_data_query() {
   }
 
   if (this->machine_data_command_index_ >= MACHINE_DATA_COMMANDS.size()) {
-    std::string payload = build_machine_data_payload(this->machine_data_responses_);
+    MachineDataFieldMap field_values;
+    std::string payload = build_machine_data_payload(
+        this->machine_data_responses_, this->machine_data_auto_fields_ ? &field_values : nullptr);
+    if (this->machine_data_auto_fields_) {
+      this->machine_data_field_values_ = std::move(field_values);
+    }
     this->publish_machine_data_(payload);
     this->machine_data_responses_.clear();
     this->machine_data_request_pending_ = false;
@@ -817,6 +1096,9 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
   auto parsed = MachineDataParser::parse(response);
   if (!parsed.has_value()) {
     ESP_LOGW(TAG, "Failed to parse machine data XML response.");
+    if (this->machine_data_auto_fields_) {
+      this->machine_data_field_values_.clear();
+    }
   }
 
   if (parsed.has_value()) {
@@ -858,6 +1140,9 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
 
   std::string sanitized = sanitize_text_sensor_value(response);
   ESP_LOGD(TAG, "Machine data response: %s", sanitized.c_str());
+  if (this->machine_data_auto_fields_) {
+    this->publish_machine_data_fields_(this->machine_data_field_values_);
+  }
   if (this->machine_data_sensor_ != nullptr) {
     this->machine_data_sensor_->publish_state(sanitized);
   }

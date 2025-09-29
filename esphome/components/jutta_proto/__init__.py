@@ -24,6 +24,8 @@ CONF_MACHINE_DATA_ERRORS = "errors"
 CONF_MACHINE_DATA_STATUS = "status"
 CONF_MACHINE_DATA_PROCESSES = "processes"
 CONF_MACHINE_DATA_RAW = "raw"
+CONF_MACHINE_DATA_AUTO_FIELDS = "auto_fields"
+CONF_MACHINE_DATA_FIELD_PREFIX = "field_prefix"
 
 MACHINE_DATA_SECTION_KEYS = [
     CONF_MACHINE_DATA_STATISTICS,
@@ -32,6 +34,8 @@ MACHINE_DATA_SECTION_KEYS = [
     CONF_MACHINE_DATA_PROCESSES,
     CONF_MACHINE_DATA_RAW,
 ]
+
+DEFAULT_MACHINE_DATA_FIELD_PREFIX = "JURA Machine Data"
 
 MACHINE_DATA_SENSOR_SCHEMA = cv.Any(
     text_sensor.text_sensor_schema(),
@@ -113,6 +117,10 @@ MACHINE_DATA_CONFIG_SCHEMA = cv.Any(
             cv.Optional(CONF_MACHINE_DATA_STATUS): MACHINE_DATA_SENSOR_SCHEMA,
             cv.Optional(CONF_MACHINE_DATA_PROCESSES): MACHINE_DATA_SENSOR_SCHEMA,
             cv.Optional(CONF_MACHINE_DATA_RAW): MACHINE_DATA_SENSOR_SCHEMA,
+            cv.Optional(CONF_MACHINE_DATA_AUTO_FIELDS, default=False): cv.boolean,
+            cv.Optional(
+                CONF_MACHINE_DATA_FIELD_PREFIX, default=DEFAULT_MACHINE_DATA_FIELD_PREFIX
+            ): cv.string,
         }
     ),
 )
@@ -268,6 +276,14 @@ async def to_code(config):
     if CONF_MACHINE_DATA in config:
         machine_data_cfg = config[CONF_MACHINE_DATA]
 
+        auto_fields = False
+        field_prefix = DEFAULT_MACHINE_DATA_FIELD_PREFIX
+        if isinstance(machine_data_cfg, dict):
+            auto_fields = machine_data_cfg.get(CONF_MACHINE_DATA_AUTO_FIELDS, False)
+            field_prefix = machine_data_cfg.get(
+                CONF_MACHINE_DATA_FIELD_PREFIX, DEFAULT_MACHINE_DATA_FIELD_PREFIX
+            )
+
         async def _resolve_machine_data_sensor(cfg):
             if isinstance(cfg, dict):
                 return await text_sensor.new_text_sensor(cfg)
@@ -304,6 +320,9 @@ async def to_code(config):
         else:
             sensor = await _resolve_machine_data_sensor(machine_data_cfg)
             cg.add(var.set_machine_data_sensor(sensor))
+
+        cg.add(var.set_machine_data_auto_fields(auto_fields))
+        cg.add(var.set_machine_data_field_prefix(cg.std_string(field_prefix)))
 
 
 async def _get_parent(config):
