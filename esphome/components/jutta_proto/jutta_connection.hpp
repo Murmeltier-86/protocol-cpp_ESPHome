@@ -291,7 +291,6 @@ class JuttaConnection {
         uint32_t start_time{0};
         std::string buffer{};
         bool plain{false};
-        std::vector<uint8_t> encoded_candidate{};
     };
 
     StringWaitContext wait_string_context_{};
