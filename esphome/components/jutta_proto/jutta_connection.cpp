@@ -21,7 +21,6 @@ constexpr uint32_t JUTTA_SERIAL_GAP_MS = 8;
 constexpr uint8_t JUTTA_ENCODE_BASE = 0xFF;
 constexpr uint8_t JUTTA_BIT0_MASK = static_cast<uint8_t>(1u << 2);
 constexpr uint8_t JUTTA_BIT1_MASK = static_cast<uint8_t>(1u << 5);
-constexpr std::array<uint8_t, 8> JUTTA_TERMINATOR = {0xDF, 0xFF, 0xDB, 0xDB, 0xFB, 0xFB, 0xDB, 0xDB};
 std::string format_hex(const uint8_t* data, size_t length) {
     if (length == 0) {
         return "[]";
@@ -132,13 +131,6 @@ inline bool frames_equivalent(const std::array<uint8_t, 4>& lhs, const std::arra
     return true;
 }
 
-inline std::vector<uint8_t>::const_iterator find_terminator(const std::vector<uint8_t>& buffer) {
-    if (buffer.size() < JUTTA_TERMINATOR.size()) {
-        return buffer.end();
-    }
-    return std::search(buffer.begin(), buffer.end(), JUTTA_TERMINATOR.begin(), JUTTA_TERMINATOR.end());
-}
-
 inline void wait_for_jutta_gap() {
     if (JUTTA_SERIAL_GAP_MS > 0) {
         esphome::delay(JUTTA_SERIAL_GAP_MS);
@@ -171,22 +163,13 @@ bool JuttaConnection::read_decoded_unsafe(uint8_t* byte) const {
                  format_hex(*byte).c_str());
         return true;
     }
-    std::vector<uint8_t> block;
-    if (!read_decoded_block_unsafe(block) || block.empty()) {
-        ESP_LOGVV(TAG, "Unable to assemble decoded block for single byte - waiting for more data.");
+    std::array<uint8_t, 4> buffer{};
+    if (!read_encoded_unsafe(buffer)) {
+        ESP_LOGVV(TAG, "Unable to read encoded frame for single byte - waiting for more data.");
         return false;
     }
-
-    *byte = block.front();
-    for (size_t i = 1; i < block.size(); ++i) {
-        this->decoded_rx_buffer_.push_back(block[i]);
-    }
-
+    *byte = decode(buffer);
     ESP_LOGD(TAG, "Decoded byte: '%s' (%s)", format_printable(*byte).c_str(), format_hex(*byte).c_str());
-    if (block.size() > 1) {
-        ESP_LOGVV(TAG, "Buffered %zu additional decoded byte%s for later consumption.", block.size() - 1,
-                  block.size() - 1 == 1 ? "" : "s");
-    }
     return true;
 }
 
@@ -203,103 +186,33 @@ bool JuttaConnection::read_decoded_unsafe(std::vector<uint8_t>& data) const {
         }
         any_data = true;
     }
-    std::vector<uint8_t> newly_decoded;
-    if (!read_decoded_block_unsafe(newly_decoded)) {
+
+    std::vector<std::array<uint8_t, 4>> dataBuffer;
+    size_t frames_read = read_encoded_unsafe(dataBuffer);
+    if (frames_read == 0) {
         if (any_data) {
             ESP_LOGD(TAG, "Read decoded payload from buffer (%zu byte%s).", data.size(), data.size() == 1 ? "" : "s");
             return true;
         }
-        ESP_LOGVV(TAG, "No complete encoded block available to decode yet.");
+        ESP_LOGVV(TAG, "No complete encoded frames available to decode yet.");
         return false;
     }
 
-    data.insert(data.end(), newly_decoded.begin(), newly_decoded.end());
-    return true;
-}
-
-bool JuttaConnection::read_decoded_block_unsafe(std::vector<uint8_t>& data) const {
-    ESP_LOGVV(TAG, "Attempting to assemble decoded block (encoded buffer size=%zu).",
-              this->encoded_rx_buffer_.size());
-    data.clear();
-
-    while (true) {
-        auto terminator_pos = find_terminator(this->encoded_rx_buffer_);
-        while (terminator_pos == this->encoded_rx_buffer_.end()) {
-            wait_for_jutta_gap();
-            std::array<uint8_t, 4> chunk{};
-            size_t read = serial.read_serial(chunk);
-            if (read == 0) {
-                ESP_LOGVV(TAG, "No terminator detected yet while assembling decoded block.");
-                return false;
-            }
-            if (read > chunk.size()) {
-                ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - ignoring overflow.", read);
-                read = chunk.size();
-            }
-
-            this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(),
-                                            chunk.begin() + read);
-            std::vector<uint8_t> chunk_vec(chunk.begin(), chunk.begin() + read);
-            ESP_LOGVV(TAG, "Read %zu encoded byte%s from UART: %s (buffer now %zu bytes)", read,
-                      read == 1 ? "" : "s", format_hex(chunk_vec).c_str(), this->encoded_rx_buffer_.size());
-            terminator_pos = find_terminator(this->encoded_rx_buffer_);
-        }
-
-        size_t payload_size = static_cast<size_t>(terminator_pos - this->encoded_rx_buffer_.begin());
-        ESP_LOGVV(TAG, "Detected terminator sequence after %zu encoded byte%s.", payload_size,
-                  payload_size == 1 ? "" : "s");
-
-        std::vector<uint8_t> payload(this->encoded_rx_buffer_.begin(),
-                                     this->encoded_rx_buffer_.begin() + payload_size);
-
-        // Remove payload and terminator from buffer, leaving any subsequent bytes for next block.
-        this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin(),
-                                       this->encoded_rx_buffer_.begin() + payload_size + JUTTA_TERMINATOR.size());
-
-        if (payload.empty()) {
-            ESP_LOGW(TAG, "Received terminator without payload - ignoring.");
-            continue;
-        }
-
-        if ((payload.size() % 4) != 0) {
-            ESP_LOGW(TAG, "Encoded payload size %zu is not a multiple of 4 - discarding trailing bytes.",
-                     payload.size());
-        }
-
-        size_t index = 0;
-        std::vector<uint8_t> newly_decoded;
-        newly_decoded.reserve(payload.size() / 4);
-
-        size_t offset = 0;
-        while (payload.size() >= offset + 4) {
-            std::array<uint8_t, 4> frame{};
-            std::copy_n(payload.begin() + offset, frame.size(), frame.begin());
-            offset += frame.size();
-
-            uint8_t decoded_byte = decode(frame);
-            data.push_back(decoded_byte);
-            newly_decoded.push_back(decoded_byte);
-            ESP_LOGVV(TAG, "Decoded frame %zu: %s -> '%s' (%s)", index, format_hex(frame).c_str(),
-                      format_printable(decoded_byte).c_str(), format_hex(decoded_byte).c_str());
-            ++index;
-        }
-
-        if (payload.size() > offset) {
-            ESP_LOGW(TAG, "Discarded %zu stray encoded byte%s from payload tail.", payload.size() - offset,
-                     payload.size() - offset == 1 ? "" : "s");
-        }
-
-        if (newly_decoded.empty()) {
-            ESP_LOGW(TAG, "Decoded block contained no data.");
-            continue;
-        }
-
-        ESP_LOGD(TAG, "Read decoded payload (%zu byte%s): '%s' (hex %s)", newly_decoded.size(),
-                 newly_decoded.size() == 1 ? "" : "s", format_printable(newly_decoded).c_str(),
-                 format_hex(newly_decoded).c_str());
-
-        return true;
+    size_t index = 0;
+    std::vector<uint8_t> newly_decoded;
+    newly_decoded.reserve(dataBuffer.size());
+    for (const std::array<uint8_t, 4>& buffer : dataBuffer) {
+        uint8_t decoded_byte = decode(buffer);
+        data.push_back(decoded_byte);
+        newly_decoded.push_back(decoded_byte);
+        ESP_LOGVV(TAG, "Decoded frame %zu: %s -> '%s' (%s)", index, format_hex(buffer).c_str(),
+                  format_printable(decoded_byte).c_str(), format_hex(decoded_byte).c_str());
+        ++index;
     }
+    std::string decoded = vec_to_string(newly_decoded);
+    ESP_LOGD(TAG, "Read decoded payload (%zu byte%s): '%s' (hex %s)", dataBuffer.size(),
+             dataBuffer.size() == 1 ? "" : "s", format_printable(decoded).c_str(), format_hex(newly_decoded).c_str());
+    return true;
 }
 
 bool JuttaConnection::write_decoded_unsafe(const uint8_t& byte) const {
@@ -327,18 +240,6 @@ bool JuttaConnection::write_decoded_unsafe(const std::vector<uint8_t>& data) con
         if (!write_decoded_unsafe(byte)) {
             result = false;
         }
-    }
-    if (!data.empty()) {
-        ESP_LOGVV(TAG, "Appending terminator sequence to encoded transmission: %s",
-                  format_hex(JUTTA_TERMINATOR).c_str());
-        for (uint8_t terminator_byte : JUTTA_TERMINATOR) {
-            if (!serial.write_serial_byte(terminator_byte)) {
-                ESP_LOGE(TAG, "Failed to write terminator byte 0x%02X to UART.", terminator_byte);
-                result = false;
-                break;
-            }
-        }
-        serial.flush();
     }
     return result;
 }
@@ -415,9 +316,8 @@ std::array<uint8_t, 4> JuttaConnection::encode(const uint8_t& decData) {
     std::array<uint8_t, 4> encData{};
     for (int group = 0; group < 4; ++group) {
         uint8_t encoded = JUTTA_ENCODE_BASE;
-        int shift = 6 - (group * 2);
-        uint8_t bit0 = (decData >> shift) & 0x1;
-        uint8_t bit1 = (decData >> (shift + 1)) & 0x1;
+        uint8_t bit0 = (decData >> (group * 2)) & 0x1;
+        uint8_t bit1 = (decData >> (group * 2 + 1)) & 0x1;
         if (bit0 == 0) {
             encoded = static_cast<uint8_t>(encoded - JUTTA_BIT0_MASK);
         }
@@ -435,9 +335,8 @@ uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
         uint8_t encoded = encData[group];
         uint8_t bit0 = (encoded >> 2) & 0x1;
         uint8_t bit1 = (encoded >> 5) & 0x1;
-        int shift = 6 - (group * 2);
-        decData |= static_cast<uint8_t>(bit0 << shift);
-        decData |= static_cast<uint8_t>(bit1 << (shift + 1));
+        decData |= static_cast<uint8_t>(bit0 << (group * 2));
+        decData |= static_cast<uint8_t>(bit1 << (group * 2 + 1));
     }
     return decData;
 }

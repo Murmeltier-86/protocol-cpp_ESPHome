@@ -212,8 +212,6 @@ class JuttaConnection {
      **/
     [[nodiscard]] bool read_decoded_unsafe(std::vector<uint8_t>& data) const;
 
-    [[nodiscard]] bool read_decoded_block_unsafe(std::vector<uint8_t>& data) const;
-
     void flush_serial_input() const;
 
     /**
