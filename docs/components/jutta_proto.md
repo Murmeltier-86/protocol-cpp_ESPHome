@@ -161,6 +161,27 @@ Each formatted sensor contains a human-readable rendering of its XML section. Th
 variants that have been observed in the official firmware so mixed content and nested tags are handled automatically. If only
 the `raw` sensor is configured the untouched XML payload is published instead.
 
+### Dynamic machine data fields
+
+Set the optional `fields` block to automatically expose each XML element and attribute from the machine data response as its
+own `text_sensor`. Sensors are created on demand the first time a field appears in a response and keep publishing updates as
+new XML payloads arrive. The generated entity names are derived from the XML path; you can optionally override the common
+prefix or disable attribute reporting.
+
+```yaml
+jutta_proto:
+  id: jura
+  uart_id: jura_uart
+  machine_data:
+    fields:
+      prefix: "JURA Field"
+      include_attributes: true
+```
+
+When enabled, every leaf value in the XML tree produces a dedicated sensor with a friendly name such as `JURA Field Products
+Product[2] Coffee Strength Default`. Attributes use an `@` suffix in their path and therefore become individual sensors as
+well. Empty or missing elements publish empty strings so the Home Assistant entities remain in sync with the latest payload.
+
 ## Diagnostics
 
 The component logs handshake progress during startup. The `dump_config()` output lists the detected machine type as well as the
