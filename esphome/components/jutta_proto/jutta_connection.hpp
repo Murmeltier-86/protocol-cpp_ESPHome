@@ -101,6 +101,13 @@ class JuttaConnection {
                                                                  std::chrono::milliseconds{5000});
 
     /**
+     * Sends an XML command that returns a DB-encoded XML document and waits
+     * for the response terminated by the DB terminator sequence.
+     */
+    std::shared_ptr<std::string> write_xml_with_response(
+        const std::string& data, const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
+
+    /**
      * Polls for the next CRLF-terminated response line.
      * Returns true if a complete line became available and stores it in "line" without the trailing CRLF.
      * Returns false when no complete line has been received yet.
@@ -181,6 +188,8 @@ class JuttaConnection {
      * https://github.com/Jutta-Proto/protocol-cpp#deobfuscating
      **/
     static uint8_t decode(const std::array<uint8_t, 4>& encData);
+    static std::array<uint8_t, 4> encode_xml_byte(const uint8_t& decData);
+    static uint8_t decode_xml_byte(const std::array<uint8_t, 4>& encData);
     /**
      * Writes four bytes of encoded data to the coffee maker and then waits 8ms.
      **/
@@ -233,6 +242,8 @@ class JuttaConnection {
      **/
     [[nodiscard]] bool write_decoded_unsafe(const std::string& data) const;
 
+    [[nodiscard]] bool write_xml_unsafe(const std::vector<uint8_t>& data) const;
+
     /**
      * Waits until the coffee maker responded with the given response.
      * The response has to include the "\r\n" at the end of a message.
@@ -256,6 +267,9 @@ class JuttaConnection {
     [[nodiscard]] std::shared_ptr<std::string> wait_for_str_unsafe(
         const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
 
+    [[nodiscard]] std::shared_ptr<std::string> wait_for_xml_response_unsafe(
+        const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
+
     struct WaitContext {
         bool active{false};
         std::string expected{};
@@ -274,6 +288,15 @@ class JuttaConnection {
     };
 
     StringWaitContext wait_string_context_{};
+
+    struct XmlWaitContext {
+        bool active{false};
+        std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
+        uint32_t start_time{0};
+        std::vector<uint8_t> encoded_buffer{};
+    };
+
+    XmlWaitContext xml_wait_context_{};
 
 
     // Buffer of partially received encoded bytes that haven't formed a full

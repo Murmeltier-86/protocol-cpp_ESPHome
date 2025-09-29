@@ -21,6 +21,7 @@ constexpr uint32_t JUTTA_SERIAL_GAP_MS = 8;
 constexpr uint8_t JUTTA_ENCODE_BASE = 0xFF;
 constexpr uint8_t JUTTA_BIT0_MASK = static_cast<uint8_t>(1u << 2);
 constexpr uint8_t JUTTA_BIT1_MASK = static_cast<uint8_t>(1u << 5);
+constexpr std::array<uint8_t, 8> JUTTA_XML_TERMINATOR = {0xDF, 0xFF, 0xDB, 0xDB, 0xFB, 0xFB, 0xDB, 0xDB};
 std::string format_hex(const uint8_t* data, size_t length) {
     if (length == 0) {
         return "[]";
@@ -135,6 +136,18 @@ inline void wait_for_jutta_gap() {
     if (JUTTA_SERIAL_GAP_MS > 0) {
         esphome::delay(JUTTA_SERIAL_GAP_MS);
     }
+}
+
+inline bool has_xml_terminator_tail(const std::vector<uint8_t>& buffer) {
+    if (buffer.size() < JUTTA_XML_TERMINATOR.size()) {
+        return false;
+    }
+    size_t payload_size = buffer.size() - JUTTA_XML_TERMINATOR.size();
+    if (payload_size % 4 != 0) {
+        return false;
+    }
+    return std::equal(JUTTA_XML_TERMINATOR.begin(), JUTTA_XML_TERMINATOR.end(),
+                      buffer.end() - JUTTA_XML_TERMINATOR.size());
 }
 
 }  // namespace
@@ -252,6 +265,40 @@ bool JuttaConnection::write_decoded_unsafe(const std::string& data) const {
     return write_decoded_unsafe(bytes);
 }
 
+bool JuttaConnection::write_xml_unsafe(const std::vector<uint8_t>& data) const {
+    if (!data.empty()) {
+        ESP_LOGD(TAG, "Queueing %zu XML byte%s for transmission: '%s' (hex %s)", data.size(),
+                 data.size() == 1 ? "" : "s", format_printable(data).c_str(), format_hex(data).c_str());
+    } else {
+        ESP_LOGVV(TAG, "Requested to write an empty XML payload.");
+    }
+
+    bool result = true;
+    size_t index = 0;
+    for (uint8_t byte : data) {
+        auto encoded = encode_xml_byte(byte);
+        ESP_LOGVV(TAG, "XML encoded frame %zu: '%s' -> %s", index, format_printable(byte).c_str(),
+                  format_hex(encoded).c_str());
+        if (!write_encoded_unsafe(encoded)) {
+            result = false;
+        }
+        ++index;
+    }
+
+    if (!JUTTA_XML_TERMINATOR.empty()) {
+        ESP_LOGVV(TAG, "Appending XML terminator: %s", format_hex(JUTTA_XML_TERMINATOR).c_str());
+    }
+    for (uint8_t terminator_byte : JUTTA_XML_TERMINATOR) {
+        if (!serial.write_serial_byte(terminator_byte)) {
+            ESP_LOGE(TAG, "Failed to write XML terminator byte 0x%02X to UART.", terminator_byte);
+            result = false;
+        }
+    }
+    serial.flush();
+    wait_for_jutta_gap();
+    return result;
+}
+
 bool JuttaConnection::write_decoded(const uint8_t& byte) {
     if (!this->wait_context_.active && !this->wait_string_context_.active) {
         flush_serial_input();
@@ -337,6 +384,37 @@ uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
         uint8_t bit1 = (encoded >> 5) & 0x1;
         decData |= static_cast<uint8_t>(bit0 << (group * 2));
         decData |= static_cast<uint8_t>(bit1 << (group * 2 + 1));
+    }
+    return decData;
+}
+
+std::array<uint8_t, 4> JuttaConnection::encode_xml_byte(const uint8_t& decData) {
+    std::array<uint8_t, 4> encData{};
+    for (int group = 0; group < 4; ++group) {
+        uint8_t encoded = JUTTA_ENCODE_BASE;
+        int shift = 6 - 2 * group;
+        uint8_t bit0 = (decData >> shift) & 0x1;
+        uint8_t bit1 = (decData >> (shift + 1)) & 0x1;
+        if (bit0 == 0) {
+            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT0_MASK);
+        }
+        if (bit1 == 0) {
+            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT1_MASK);
+        }
+        encData[group] = encoded;
+    }
+    return encData;
+}
+
+uint8_t JuttaConnection::decode_xml_byte(const std::array<uint8_t, 4>& encData) {
+    uint8_t decData = 0;
+    for (int group = 0; group < 4; ++group) {
+        uint8_t encoded = encData[group];
+        uint8_t bit0 = (encoded >> 2) & 0x1;
+        uint8_t bit1 = (encoded >> 5) & 0x1;
+        int shift = 6 - 2 * group;
+        decData |= static_cast<uint8_t>(bit0 << shift);
+        decData |= static_cast<uint8_t>(bit1 << (shift + 1));
     }
     return decData;
 }
@@ -523,6 +601,21 @@ std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const 
     return wait_for_str_unsafe(timeout);
 }
 
+std::shared_ptr<std::string> JuttaConnection::write_xml_with_response(
+    const std::string& data, const std::chrono::milliseconds& timeout) {
+    if (!this->xml_wait_context_.active) {
+        flush_serial_input();
+        this->xml_wait_context_.encoded_buffer.clear();
+        std::vector<uint8_t> bytes(data.begin(), data.end());
+        if (!write_xml_unsafe(bytes)) {
+            return nullptr;
+        }
+    }
+    ESP_LOGD(TAG, "Waiting for XML response after writing payload (timeout=%lld ms).",
+             static_cast<long long>(timeout.count()));
+    return wait_for_xml_response_unsafe(timeout);
+}
+
 std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chrono::milliseconds& timeout) {
     if (!this->wait_string_context_.active) {
         this->wait_string_context_.active = true;
@@ -589,6 +682,81 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
                 this->wait_string_context_.buffer.clear();
             }
             ESP_LOGW(TAG, "Timeout while waiting for generic response after %u ms.", elapsed);
+        }
+    }
+
+    return nullptr;
+}
+
+std::shared_ptr<std::string> JuttaConnection::wait_for_xml_response_unsafe(
+    const std::chrono::milliseconds& timeout) {
+    if (!this->xml_wait_context_.active) {
+        this->xml_wait_context_.active = true;
+        this->xml_wait_context_.timeout = timeout;
+        this->xml_wait_context_.start_time = esphome::millis();
+        this->xml_wait_context_.encoded_buffer.clear();
+        ESP_LOGD(TAG, "Waiting for XML response (timeout=%lld ms).", static_cast<long long>(timeout.count()));
+    }
+
+    auto try_complete = [&]() -> std::shared_ptr<std::string> {
+        if (!has_xml_terminator_tail(this->xml_wait_context_.encoded_buffer)) {
+            return nullptr;
+        }
+
+        std::vector<uint8_t> payload(this->xml_wait_context_.encoded_buffer.begin(),
+                                     this->xml_wait_context_.encoded_buffer.end() - JUTTA_XML_TERMINATOR.size());
+        this->xml_wait_context_.encoded_buffer.clear();
+        this->xml_wait_context_.active = false;
+
+        std::vector<uint8_t> decoded;
+        decoded.reserve(payload.size() / 4);
+        for (size_t i = 0; i < payload.size(); i += 4) {
+            std::array<uint8_t, 4> frame{payload[i], payload[i + 1], payload[i + 2], payload[i + 3]};
+            decoded.push_back(decode_xml_byte(frame));
+        }
+
+        std::string response = vec_to_string(decoded);
+        auto shared_response = std::make_shared<std::string>(response);
+        ESP_LOGD(TAG, "Received XML response (%zu decoded byte%s): '%s' (hex %s)", decoded.size(),
+                 decoded.size() == 1 ? "" : "s", format_printable(response).c_str(), format_hex(decoded).c_str());
+        return shared_response;
+    };
+
+    if (auto ready = try_complete(); ready != nullptr) {
+        return ready;
+    }
+
+    wait_for_jutta_gap();
+    std::array<uint8_t, 4> chunk{};
+    size_t read = serial.read_serial(chunk);
+    if (read > chunk.size()) {
+        ESP_LOGW(TAG, "Invalid amount of UART data found while reading XML response (%zu byte).", read);
+        read = chunk.size();
+    }
+
+    if (read > 0) {
+        this->xml_wait_context_.encoded_buffer.insert(this->xml_wait_context_.encoded_buffer.end(), chunk.begin(),
+                                                     chunk.begin() + read);
+        std::vector<uint8_t> chunk_vec(chunk.begin(), chunk.begin() + read);
+        ESP_LOGVV(TAG, "Read %zu XML encoded byte%s from UART: %s (buffer now %zu bytes)", read,
+                  read == 1 ? "" : "s", format_hex(chunk_vec).c_str(),
+                  this->xml_wait_context_.encoded_buffer.size());
+
+        if (auto ready = try_complete(); ready != nullptr) {
+            return ready;
+        }
+    } else {
+        ESP_LOGVV(TAG, "No XML encoded data found (buffer size=%zu).",
+                  this->xml_wait_context_.encoded_buffer.size());
+    }
+
+    if (timeout.count() > 0) {
+        uint32_t now = esphome::millis();
+        uint32_t elapsed = now - this->xml_wait_context_.start_time;
+        if (elapsed >= static_cast<uint32_t>(timeout.count())) {
+            this->xml_wait_context_.active = false;
+            this->xml_wait_context_.encoded_buffer.clear();
+            ESP_LOGW(TAG, "Timeout while waiting for XML response after %u ms.", elapsed);
         }
     }
 
