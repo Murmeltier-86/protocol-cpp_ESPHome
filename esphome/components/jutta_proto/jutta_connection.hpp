@@ -101,8 +101,9 @@ class JuttaConnection {
                                                                  std::chrono::milliseconds{5000});
 
     /**
-     * Sends an XML command that returns a DB-encoded XML document and waits
-     * for the response terminated by the DB terminator sequence.
+     * Sends an XML ("@...") or plain ("&...") command and waits for the response.
+     * Plain commands bypass DB encoding and are terminated by CRLF, while XML
+     * commands are DB-encoded and use the XML terminator sequence.
      */
     std::shared_ptr<std::string> write_xml_with_response(
         const std::string& data, const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
@@ -242,6 +243,8 @@ class JuttaConnection {
      **/
     [[nodiscard]] bool write_decoded_unsafe(const std::string& data) const;
 
+    [[nodiscard]] bool write_plain_unsafe(const std::string& data) const;
+
     [[nodiscard]] bool write_xml_unsafe(const std::vector<uint8_t>& data) const;
 
     /**
@@ -265,7 +268,7 @@ class JuttaConnection {
      * Not thread safe!
      **/
     [[nodiscard]] std::shared_ptr<std::string> wait_for_str_unsafe(
-        const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
+        const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000}, bool plain_mode = false);
 
     [[nodiscard]] std::shared_ptr<std::string> wait_for_xml_response_unsafe(
         const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
@@ -285,6 +288,7 @@ class JuttaConnection {
         std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
         uint32_t start_time{0};
         std::string buffer{};
+        bool plain_mode{false};
     };
 
     StringWaitContext wait_string_context_{};

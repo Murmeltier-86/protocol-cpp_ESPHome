@@ -265,6 +265,32 @@ bool JuttaConnection::write_decoded_unsafe(const std::string& data) const {
     return write_decoded_unsafe(bytes);
 }
 
+bool JuttaConnection::write_plain_unsafe(const std::string& data) const {
+    if (!data.empty()) {
+        std::vector<uint8_t> bytes(data.begin(), data.end());
+        ESP_LOGD(TAG, "Queueing %zu plain byte%s for transmission: '%s' (hex %s)", data.size(),
+                 data.size() == 1 ? "" : "s", format_printable(data).c_str(), format_hex(bytes).c_str());
+    } else {
+        ESP_LOGVV(TAG, "Requested to write an empty plain payload.");
+    }
+
+    bool result = true;
+    for (unsigned char ch : data) {
+        uint8_t byte = static_cast<uint8_t>(ch);
+        if (!serial.write_serial_byte(byte)) {
+            ESP_LOGE(TAG, "Failed to write plain byte 0x%02X to UART.", byte);
+            result = false;
+        }
+    }
+
+    if (!data.empty()) {
+        serial.flush();
+        wait_for_jutta_gap();
+    }
+
+    return result;
+}
+
 bool JuttaConnection::write_xml_unsafe(const std::vector<uint8_t>& data) const {
     if (!data.empty()) {
         ESP_LOGD(TAG, "Queueing %zu XML byte%s for transmission: '%s' (hex %s)", data.size(),
@@ -585,7 +611,7 @@ std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const 
     }
     ESP_LOGD(TAG, "Waiting for response after writing decoded payload (timeout=%lld ms).",
              static_cast<long long>(timeout.count()));
-    return wait_for_str_unsafe(timeout);
+    return wait_for_str_unsafe(timeout, false);
 }
 
 std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const std::string& data,
@@ -598,11 +624,24 @@ std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const 
     }
     ESP_LOGD(TAG, "Waiting for response after writing string payload (timeout=%lld ms).",
              static_cast<long long>(timeout.count()));
-    return wait_for_str_unsafe(timeout);
+    return wait_for_str_unsafe(timeout, false);
 }
 
 std::shared_ptr<std::string> JuttaConnection::write_xml_with_response(
     const std::string& data, const std::chrono::milliseconds& timeout) {
+    bool plain_mode = !data.empty() && data.front() == '&';
+    if (plain_mode) {
+        if (!this->wait_string_context_.active) {
+            flush_serial_input();
+            if (!write_plain_unsafe(data)) {
+                return nullptr;
+            }
+        }
+        ESP_LOGD(TAG, "Waiting for plain response after writing payload (timeout=%lld ms).",
+                 static_cast<long long>(timeout.count()));
+        return wait_for_str_unsafe(timeout, true);
+    }
+
     if (!this->xml_wait_context_.active) {
         flush_serial_input();
         this->xml_wait_context_.encoded_buffer.clear();
@@ -616,13 +655,23 @@ std::shared_ptr<std::string> JuttaConnection::write_xml_with_response(
     return wait_for_xml_response_unsafe(timeout);
 }
 
-std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chrono::milliseconds& timeout) {
+std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chrono::milliseconds& timeout,
+                                                                  bool plain_mode) {
     if (!this->wait_string_context_.active) {
         this->wait_string_context_.active = true;
         this->wait_string_context_.timeout = timeout;
         this->wait_string_context_.start_time = esphome::millis();
         this->wait_string_context_.buffer.clear();
-        ESP_LOGD(TAG, "Waiting for any response (timeout=%lld ms).", static_cast<long long>(timeout.count()));
+        this->wait_string_context_.plain_mode = plain_mode;
+        ESP_LOGD(TAG, "Waiting for %sresponse (timeout=%lld ms).", plain_mode ? "plain " : "any ",
+                 static_cast<long long>(timeout.count()));
+    } else if (this->wait_string_context_.plain_mode != plain_mode) {
+        ESP_LOGW(TAG,
+                 "wait_for_str_unsafe called with mismatched mode (expected %s, got %s) - resetting context.",
+                 this->wait_string_context_.plain_mode ? "plain" : "decoded", plain_mode ? "plain" : "decoded");
+        this->wait_string_context_.active = false;
+        this->wait_string_context_.buffer.clear();
+        return nullptr;
     }
 
     auto try_complete = [&]() -> std::shared_ptr<std::string> {
@@ -653,16 +702,39 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         return ready;
     }
 
-    std::vector<uint8_t> buffer;
-    if (read_decoded_unsafe(buffer) && !buffer.empty()) {
-        std::string incoming = vec_to_string(buffer);
-        this->wait_string_context_.buffer.append(incoming);
-        ESP_LOGD(TAG, "Received chunk while waiting for response: '%s' (hex %s) -> buffer '%s'",
-                 format_printable(incoming).c_str(), format_hex(buffer).c_str(),
-                 format_printable(this->wait_string_context_.buffer).c_str());
+    if (this->wait_string_context_.plain_mode) {
+        wait_for_jutta_gap();
+        std::array<uint8_t, 4> chunk{};
+        size_t read = serial.read_serial(chunk);
+        if (read > chunk.size()) {
+            ESP_LOGW(TAG, "Invalid amount of UART data found while waiting for plain response (%zu byte).", read);
+            read = chunk.size();
+        }
 
-        if (auto ready = try_complete(); ready != nullptr) {
-            return ready;
+        if (read > 0) {
+            std::string incoming(reinterpret_cast<const char*>(chunk.data()), read);
+            this->wait_string_context_.buffer.append(incoming);
+            std::vector<uint8_t> chunk_vec(chunk.begin(), chunk.begin() + read);
+            ESP_LOGD(TAG, "Received plain chunk while waiting for response: '%s' (hex %s) -> buffer '%s'",
+                     format_printable(incoming).c_str(), format_hex(chunk_vec).c_str(),
+                     format_printable(this->wait_string_context_.buffer).c_str());
+
+            if (auto ready = try_complete(); ready != nullptr) {
+                return ready;
+            }
+        }
+    } else {
+        std::vector<uint8_t> buffer;
+        if (read_decoded_unsafe(buffer) && !buffer.empty()) {
+            std::string incoming = vec_to_string(buffer);
+            this->wait_string_context_.buffer.append(incoming);
+            ESP_LOGD(TAG, "Received chunk while waiting for response: '%s' (hex %s) -> buffer '%s'",
+                     format_printable(incoming).c_str(), format_hex(buffer).c_str(),
+                     format_printable(this->wait_string_context_.buffer).c_str());
+
+            if (auto ready = try_complete(); ready != nullptr) {
+                return ready;
+            }
         }
     }
 
