@@ -244,6 +244,11 @@ class JuttaConnection {
 
     [[nodiscard]] bool write_xml_unsafe(const std::vector<uint8_t>& data) const;
 
+    [[nodiscard]] bool write_plain_unsafe(const std::string& data) const;
+
+    std::shared_ptr<std::string> write_plain_with_response(
+        const std::string& data, const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
+
     /**
      * Waits until the coffee maker responded with the given response.
      * The response has to include the "\r\n" at the end of a message.
@@ -285,6 +290,7 @@ class JuttaConnection {
         std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
         uint32_t start_time{0};
         std::string buffer{};
+        bool plain{false};
     };
 
     StringWaitContext wait_string_context_{};
