@@ -1,6 +1,7 @@
 #include "esphome/components/jutta_proto/jutta_proto.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <iomanip>
 #include <sstream>
@@ -19,7 +20,118 @@ static const char *const TAG = "jutta_proto";
 constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
 constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
-const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
+
+struct MachineDataCommandDefinition {
+  const char *command;
+  const char *section;
+  const char *element;
+};
+
+constexpr std::array<MachineDataCommandDefinition, 3> MACHINE_DATA_COMMANDS = {{{"@TR:32", "STATISTIC", "PRODUCTCOUNTER"},
+                                                                              {"@TG:43", "STATISTIC", "MAINTENANCECOUNTER"},
+                                                                              {"@TG:C0", "STATISTIC", "MAINTENANCEPERCENT"}}};
+
+std::string to_upper_hex(const std::string &value) {
+  if (value.empty()) {
+    return "";
+  }
+  std::ostringstream stream;
+  stream << std::uppercase << std::hex << std::setfill('0');
+  for (unsigned char c : value) {
+    stream << std::setw(2) << static_cast<int>(c);
+  }
+  return stream.str();
+}
+
+bool is_safe_xml_text(const std::string &value) {
+  if (value.empty()) {
+    return true;
+  }
+  for (unsigned char c : value) {
+    if (c < 0x20 || c == 0x7F) {
+      return false;
+    }
+    switch (c) {
+      case '&':
+      case '<':
+      case '>':
+        return false;
+      default:
+        break;
+    }
+  }
+  return true;
+}
+
+std::string xml_escape(const std::string &value) {
+  std::ostringstream stream;
+  for (unsigned char c : value) {
+    switch (c) {
+      case '&':
+        stream << "&amp;";
+        break;
+      case '<':
+        stream << "&lt;";
+        break;
+      case '>':
+        stream << "&gt;";
+        break;
+      case '\"':
+        stream << "&quot;";
+        break;
+      case 0x27:
+        stream << "&apos;";
+        break;
+      default:
+        stream << static_cast<char>(c);
+        break;
+    }
+  }
+  return stream.str();
+}
+
+std::string build_machine_data_payload(const std::vector<std::string> &responses) {
+  std::ostringstream stream;
+  stream << "<MACHINE_DATA>";
+
+  std::string open_section;
+  auto close_section = [&]() {
+    if (!open_section.empty()) {
+      stream << "</" << open_section << ">";
+      open_section.clear();
+    }
+  };
+
+  for (size_t i = 0; i < MACHINE_DATA_COMMANDS.size(); ++i) {
+    const auto &definition = MACHINE_DATA_COMMANDS[i];
+    if (open_section != definition.section) {
+      close_section();
+      open_section = definition.section;
+      stream << '<' << open_section << '>';
+    }
+
+    std::string response = i < responses.size() ? responses[i] : std::string{};
+    stream << '<' << definition.element << " command=\"" << definition.command << "\"";
+    if (!response.empty()) {
+      stream << " raw_hex=\"" << to_upper_hex(response) << "\"";
+      if (is_safe_xml_text(response)) {
+        stream << " encoding=\"text\">" << xml_escape(response) << "</" << definition.element << ">";
+      } else {
+        stream << " encoding=\"hex\"/>";
+      }
+    } else {
+      stream << "/>";
+    }
+  }
+
+  close_section();
+
+  stream << "<ALERTS/>";
+  stream << "<PROGRESS_STATE_INTAKE/>";
+  stream << "<PROCESSES/>";
+  stream << "</MACHINE_DATA>";
+  return stream.str();
+}
 
 std::string format_printable_char(uint8_t byte) {
   switch (byte) {
@@ -492,46 +604,76 @@ void JuraComponent::process_machine_data_query() {
   if (this->is_busy()) {
     return;
   }
+  if (MACHINE_DATA_COMMANDS.empty()) {
+    return;
+  }
 
   uint32_t now = esphome::millis();
 
-  auto handle_response = [&](const std::shared_ptr<std::string> &response) {
-    if (response != nullptr) {
-      this->publish_machine_data_(*response);
-      this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
-      this->machine_data_request_pending_ = false;
-      return true;
-    }
-    return false;
-  };
-
   if (this->machine_data_request_pending_) {
-    auto response = this->coffee_maker_->connection->write_xml_with_response(
-        MACHINE_DATA_COMMAND, std::chrono::milliseconds{MACHINE_DATA_REQUEST_TIMEOUT_MS});
-    if (handle_response(response)) {
+    if (this->machine_data_command_index_ >= MACHINE_DATA_COMMANDS.size()) {
+      this->machine_data_request_pending_ = false;
+    } else {
+      const auto &definition = MACHINE_DATA_COMMANDS[this->machine_data_command_index_];
+      auto response = this->coffee_maker_->connection->write_xml_with_response(
+          definition.command, std::chrono::milliseconds{MACHINE_DATA_REQUEST_TIMEOUT_MS});
+      if (response != nullptr) {
+        if (this->machine_data_responses_.size() != MACHINE_DATA_COMMANDS.size()) {
+          this->machine_data_responses_.assign(MACHINE_DATA_COMMANDS.size(), std::string{});
+        }
+        this->machine_data_responses_[this->machine_data_command_index_] = *response;
+        ++this->machine_data_command_index_;
+        this->machine_data_request_pending_ = false;
+        this->machine_data_request_start_ = 0;
+      } else {
+        if (time_reached(now, this->machine_data_request_start_ + MACHINE_DATA_REQUEST_TIMEOUT_MS)) {
+          ESP_LOGW(TAG, "Timeout while waiting for machine data response to command '%s'.",
+                   definition.command);
+          this->machine_data_request_pending_ = false;
+          this->machine_data_request_start_ = 0;
+          this->machine_data_command_index_ = 0;
+          this->machine_data_responses_.clear();
+          this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
+        }
+        return;
+      }
+    }
+  }
+
+  if (this->machine_data_command_index_ == 0) {
+    if (this->machine_data_query_next_ != 0 &&
+        !time_reached(now, this->machine_data_query_next_)) {
       return;
     }
-    if (time_reached(now, this->machine_data_request_start_ + MACHINE_DATA_REQUEST_TIMEOUT_MS)) {
-      ESP_LOGW(TAG, "Timeout while waiting for machine data response.");
-      this->machine_data_request_pending_ = false;
-      this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
+    if (this->machine_data_responses_.size() != MACHINE_DATA_COMMANDS.size()) {
+      this->machine_data_responses_.assign(MACHINE_DATA_COMMANDS.size(), std::string{});
     }
-    return;
   }
 
-  if (this->machine_data_query_next_ != 0 &&
-      !time_reached(now, this->machine_data_query_next_)) {
-    return;
+  while (this->machine_data_command_index_ < MACHINE_DATA_COMMANDS.size()) {
+    const auto &definition = MACHINE_DATA_COMMANDS[this->machine_data_command_index_];
+    ESP_LOGV(TAG, "Requesting machine data command '%s' (%s/%s).", definition.command,
+             definition.section, definition.element);
+    this->machine_data_request_start_ = esphome::millis();
+    auto response = this->coffee_maker_->connection->write_xml_with_response(
+        definition.command, std::chrono::milliseconds{MACHINE_DATA_REQUEST_TIMEOUT_MS});
+    if (response == nullptr) {
+      this->machine_data_request_pending_ = true;
+      return;
+    }
+    this->machine_data_responses_[this->machine_data_command_index_] = *response;
+    ++this->machine_data_command_index_;
   }
 
-  this->machine_data_request_start_ = now;
-  auto response = this->coffee_maker_->connection->write_xml_with_response(
-      MACHINE_DATA_COMMAND, std::chrono::milliseconds{MACHINE_DATA_REQUEST_TIMEOUT_MS});
-  if (handle_response(response)) {
-    return;
+  if (this->machine_data_command_index_ >= MACHINE_DATA_COMMANDS.size()) {
+    std::string payload = build_machine_data_payload(this->machine_data_responses_);
+    this->publish_machine_data_(payload);
+    this->machine_data_responses_.clear();
+    this->machine_data_request_pending_ = false;
+    this->machine_data_request_start_ = 0;
+    this->machine_data_command_index_ = 0;
+    this->machine_data_query_next_ = esphome::millis() + MACHINE_DATA_QUERY_INTERVAL_MS;
   }
-
-  this->machine_data_request_pending_ = true;
 }
 
 void JuraComponent::publish_machine_data_(const std::string &response) {
