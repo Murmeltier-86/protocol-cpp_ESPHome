@@ -7,11 +7,8 @@
 #include <iomanip>
 #include <optional>
 #include <sstream>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 
-#include "esphome/core/application.h"
 #include "esphome/core/time.h"
 #include "machine_data_parser.h"
 
@@ -399,119 +396,6 @@ std::string sanitize_text_sensor_value(const std::string &value) {
   }
 
   return sanitized;
-}
-
-std::string canonicalize_machine_data_path(const std::string &path) {
-  std::string canonical = path;
-  std::transform(canonical.begin(), canonical.end(), canonical.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-  return canonical;
-}
-
-std::string build_machine_data_field_sensor_name(const std::string &prefix, const std::string &path) {
-  std::string readable;
-  readable.reserve(path.size());
-  bool last_was_space = true;
-
-  auto append_space = [&]() {
-    if (!last_was_space) {
-      readable.push_back(' ');
-      last_was_space = true;
-    }
-  };
-
-  for (char c : path) {
-    switch (c) {
-      case '/':
-      case '_':
-      case '-':
-      case '@':
-      case '[':
-      case ']':
-      case ':':
-        append_space();
-        break;
-      default:
-        if (std::isspace(static_cast<unsigned char>(c))) {
-          append_space();
-        } else {
-          last_was_space = false;
-          readable.push_back(c);
-        }
-        break;
-    }
-  }
-
-  if (!readable.empty() && readable.back() == ' ') {
-    readable.pop_back();
-  }
-
-  bool new_word = true;
-  for (char &c : readable) {
-    if (std::isspace(static_cast<unsigned char>(c))) {
-      new_word = true;
-      continue;
-    }
-    if (new_word) {
-      c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-      new_word = false;
-    } else {
-      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-  }
-
-  if (readable.empty()) {
-    readable = "Field";
-  }
-
-  if (prefix.empty()) {
-    return readable;
-  }
-  return prefix + " " + readable;
-}
-
-void collect_machine_data_fields(const MachineDataNode &node, const std::string &path, bool include_attributes,
-                                std::vector<std::pair<std::string, std::string>> &fields) {
-  if (node.name == "#text") {
-    if (!path.empty() && !node.text.empty()) {
-      fields.emplace_back(path, node.text);
-    }
-    return;
-  }
-
-  std::string current_path = path.empty() ? node.name : path + "/" + node.name;
-
-  if (include_attributes) {
-    for (const auto &attribute : node.attributes) {
-      if (!attribute.first.empty()) {
-        fields.emplace_back(current_path + "/@" + attribute.first, attribute.second);
-      }
-    }
-  }
-
-  if (!node.text.empty()) {
-    fields.emplace_back(current_path, node.text);
-  }
-
-  std::unordered_map<std::string, size_t> child_counts;
-  for (const auto &child : node.children) {
-    if (child.name == "#text") {
-      if (!child.text.empty()) {
-        fields.emplace_back(current_path, child.text);
-      }
-      continue;
-    }
-
-    size_t &index = child_counts[child.name];
-    std::string child_path = current_path.empty() ? child.name : current_path + "/" + child.name;
-    if (index > 0) {
-      child_path.append("[");
-      child_path.append(std::to_string(index + 1));
-      child_path.push_back(']');
-    }
-    ++index;
-    collect_machine_data_fields(child, child_path, include_attributes, fields);
-  }
 }
 
 }  // namespace
@@ -957,9 +841,6 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
           format_machine_data_section(root.find_child_case_insensitive("PROCESSES"));
       this->machine_data_processes_sensor_->publish_state(sanitize_text_sensor_value(formatted));
     }
-    if (this->machine_data_fields_enabled_) {
-      this->publish_machine_data_fields_(root);
-    }
   } else {
     if (this->machine_data_statistic_sensor_ != nullptr) {
       this->machine_data_statistic_sensor_->publish_state("");
@@ -973,71 +854,12 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
     if (this->machine_data_processes_sensor_ != nullptr) {
       this->machine_data_processes_sensor_->publish_state("");
     }
-    if (this->machine_data_fields_enabled_) {
-      this->clear_machine_data_field_sensors_();
-    }
   }
 
   std::string sanitized = sanitize_text_sensor_value(response);
   ESP_LOGD(TAG, "Machine data response: %s", sanitized.c_str());
   if (this->machine_data_sensor_ != nullptr) {
     this->machine_data_sensor_->publish_state(sanitized);
-  }
-}
-
-void JuraComponent::enable_machine_data_field_sensors(const std::string &prefix, bool include_attributes) {
-  this->machine_data_fields_enabled_ = true;
-  this->machine_data_field_prefix_ = prefix;
-  this->machine_data_field_include_attributes_ = include_attributes;
-}
-
-text_sensor::TextSensor *JuraComponent::get_or_create_machine_data_field_sensor_(const std::string &key,
-                                                                                const std::string &path) {
-  auto it = this->machine_data_field_sensors_.find(key);
-  if (it != this->machine_data_field_sensors_.end()) {
-    return it->second;
-  }
-
-  auto sensor = std::make_unique<text_sensor::TextSensor>();
-  sensor->set_name(build_machine_data_field_sensor_name(this->machine_data_field_prefix_, path));
-  auto *raw_sensor = sensor.get();
-  App.register_text_sensor(raw_sensor);
-  this->machine_data_field_sensor_storage_.push_back(std::move(sensor));
-  this->machine_data_field_sensors_.emplace(key, raw_sensor);
-  return raw_sensor;
-}
-
-void JuraComponent::publish_machine_data_fields_(const MachineDataNode &root) {
-  std::vector<std::pair<std::string, std::string>> fields;
-  collect_machine_data_fields(root, "", this->machine_data_field_include_attributes_, fields);
-
-  std::unordered_set<std::string> seen;
-  seen.reserve(fields.size());
-
-  for (auto &field : fields) {
-    if (field.first.empty()) {
-      continue;
-    }
-    std::string key = canonicalize_machine_data_path(field.first);
-    auto *sensor = this->get_or_create_machine_data_field_sensor_(key, field.first);
-    if (sensor != nullptr) {
-      sensor->publish_state(sanitize_text_sensor_value(field.second));
-      seen.insert(std::move(key));
-    }
-  }
-
-  for (auto &entry : this->machine_data_field_sensors_) {
-    if (seen.find(entry.first) == seen.end() && entry.second != nullptr) {
-      entry.second->publish_state("");
-    }
-  }
-}
-
-void JuraComponent::clear_machine_data_field_sensors_() {
-  for (auto &entry : this->machine_data_field_sensors_) {
-    if (entry.second != nullptr) {
-      entry.second->publish_state("");
-    }
   }
 }
 

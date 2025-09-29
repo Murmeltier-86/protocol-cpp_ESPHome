@@ -24,11 +24,6 @@ CONF_MACHINE_DATA_ERRORS = "errors"
 CONF_MACHINE_DATA_STATUS = "status"
 CONF_MACHINE_DATA_PROCESSES = "processes"
 CONF_MACHINE_DATA_RAW = "raw"
-CONF_MACHINE_DATA_FIELDS = "fields"
-CONF_MACHINE_DATA_FIELD_PREFIX = "prefix"
-CONF_MACHINE_DATA_FIELD_INCLUDE_ATTRIBUTES = "include_attributes"
-
-DEFAULT_MACHINE_DATA_FIELD_PREFIX = "JURA Machine Data"
 
 MACHINE_DATA_SECTION_KEYS = [
     CONF_MACHINE_DATA_STATISTICS,
@@ -118,20 +113,6 @@ MACHINE_DATA_CONFIG_SCHEMA = cv.Any(
             cv.Optional(CONF_MACHINE_DATA_STATUS): MACHINE_DATA_SENSOR_SCHEMA,
             cv.Optional(CONF_MACHINE_DATA_PROCESSES): MACHINE_DATA_SENSOR_SCHEMA,
             cv.Optional(CONF_MACHINE_DATA_RAW): MACHINE_DATA_SENSOR_SCHEMA,
-            cv.Optional(
-                CONF_MACHINE_DATA_FIELDS,
-                default={},
-            ): cv.Schema(
-                {
-                    cv.Optional(
-                        CONF_MACHINE_DATA_FIELD_PREFIX,
-                        default=DEFAULT_MACHINE_DATA_FIELD_PREFIX,
-                    ): cv.string,
-                    cv.Optional(
-                        CONF_MACHINE_DATA_FIELD_INCLUDE_ATTRIBUTES, default=True
-                    ): cv.boolean,
-                }
-            ),
         }
     ),
 )
@@ -292,48 +273,33 @@ async def to_code(config):
                 return await text_sensor.new_text_sensor(cfg)
             return await cg.get_variable(cfg)
 
-        if isinstance(machine_data_cfg, dict):
-            fields_cfg = machine_data_cfg.get(CONF_MACHINE_DATA_FIELDS)
-            if fields_cfg is not None:
-                cg.add(
-                    var.enable_machine_data_field_sensors(
-                        fields_cfg[CONF_MACHINE_DATA_FIELD_PREFIX],
-                        fields_cfg[CONF_MACHINE_DATA_FIELD_INCLUDE_ATTRIBUTES],
-                    )
+        if isinstance(machine_data_cfg, dict) and any(
+            key in machine_data_cfg for key in MACHINE_DATA_SECTION_KEYS
+        ):
+            if CONF_MACHINE_DATA_STATISTICS in machine_data_cfg:
+                sensor = await _resolve_machine_data_sensor(
+                    machine_data_cfg[CONF_MACHINE_DATA_STATISTICS]
                 )
-
-            section_keys_present = any(
-                key in machine_data_cfg for key in MACHINE_DATA_SECTION_KEYS
-            )
-
-            if section_keys_present:
-                if CONF_MACHINE_DATA_STATISTICS in machine_data_cfg:
-                    sensor = await _resolve_machine_data_sensor(
-                        machine_data_cfg[CONF_MACHINE_DATA_STATISTICS]
-                    )
-                    cg.add(var.set_machine_data_statistic_sensor(sensor))
-                if CONF_MACHINE_DATA_ERRORS in machine_data_cfg:
-                    sensor = await _resolve_machine_data_sensor(
-                        machine_data_cfg[CONF_MACHINE_DATA_ERRORS]
-                    )
-                    cg.add(var.set_machine_data_errors_sensor(sensor))
-                if CONF_MACHINE_DATA_STATUS in machine_data_cfg:
-                    sensor = await _resolve_machine_data_sensor(
-                        machine_data_cfg[CONF_MACHINE_DATA_STATUS]
-                    )
-                    cg.add(var.set_machine_data_status_sensor(sensor))
-                if CONF_MACHINE_DATA_PROCESSES in machine_data_cfg:
-                    sensor = await _resolve_machine_data_sensor(
-                        machine_data_cfg[CONF_MACHINE_DATA_PROCESSES]
-                    )
-                    cg.add(var.set_machine_data_processes_sensor(sensor))
-                if CONF_MACHINE_DATA_RAW in machine_data_cfg:
-                    sensor = await _resolve_machine_data_sensor(
-                        machine_data_cfg[CONF_MACHINE_DATA_RAW]
-                    )
-                    cg.add(var.set_machine_data_sensor(sensor))
-            elif fields_cfg is None:
-                sensor = await _resolve_machine_data_sensor(machine_data_cfg)
+                cg.add(var.set_machine_data_statistic_sensor(sensor))
+            if CONF_MACHINE_DATA_ERRORS in machine_data_cfg:
+                sensor = await _resolve_machine_data_sensor(
+                    machine_data_cfg[CONF_MACHINE_DATA_ERRORS]
+                )
+                cg.add(var.set_machine_data_errors_sensor(sensor))
+            if CONF_MACHINE_DATA_STATUS in machine_data_cfg:
+                sensor = await _resolve_machine_data_sensor(
+                    machine_data_cfg[CONF_MACHINE_DATA_STATUS]
+                )
+                cg.add(var.set_machine_data_status_sensor(sensor))
+            if CONF_MACHINE_DATA_PROCESSES in machine_data_cfg:
+                sensor = await _resolve_machine_data_sensor(
+                    machine_data_cfg[CONF_MACHINE_DATA_PROCESSES]
+                )
+                cg.add(var.set_machine_data_processes_sensor(sensor))
+            if CONF_MACHINE_DATA_RAW in machine_data_cfg:
+                sensor = await _resolve_machine_data_sensor(
+                    machine_data_cfg[CONF_MACHINE_DATA_RAW]
+                )
                 cg.add(var.set_machine_data_sensor(sensor))
         else:
             sensor = await _resolve_machine_data_sensor(machine_data_cfg)
