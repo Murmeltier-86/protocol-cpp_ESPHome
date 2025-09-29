@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 #include <utility>
 
@@ -30,6 +32,122 @@ struct MachineDataCommandDefinition {
 constexpr std::array<MachineDataCommandDefinition, 3> MACHINE_DATA_COMMANDS = {{{"@TR:32", "STATISTIC", "PRODUCTCOUNTER"},
                                                                               {"@TG:43", "STATISTIC", "MAINTENANCECOUNTER"},
                                                                               {"@TG:C0", "STATISTIC", "MAINTENANCEPERCENT"}}};
+
+struct ProductCounterDefinition {
+  const char *name;
+  const char *code;
+};
+
+constexpr std::array<ProductCounterDefinition, 10> PRODUCT_COUNTER_DEFINITIONS = {{{"Espresso", "02"},
+                                                                                   {"Coffee", "03"},
+                                                                                   {"Cappuccino", "04"},
+                                                                                   {"Espresso Macchiato", "06"},
+                                                                                   {"Milk Foam", "08"},
+                                                                                   {"Hotwater Portion", "0D"},
+                                                                                   {"Cafe Barista", "28"},
+                                                                                   {"Barista Lungo", "29"},
+                                                                                   {"Espresso Doppio", "30"},
+                                                                                   {"2 Espressi", "12"}}};
+
+constexpr std::array<const char *, 6> MAINTENANCE_COUNTER_NAMES = {{"Cleaning", "FilterChange", "Decalc",
+                                                                   "CappuRinse", "CoffeeRinse", "CappuClean"}};
+
+constexpr std::array<const char *, 3> MAINTENANCE_PERCENT_NAMES = {{"Cleaning", "FilterChange", "Decalc"}};
+
+uint16_t read_u16_le(const uint8_t *ptr) {
+  return static_cast<uint16_t>(static_cast<uint16_t>(ptr[0]) |
+                               (static_cast<uint16_t>(ptr[1]) << 8));
+}
+
+uint32_t read_u32_le(const uint8_t *ptr) {
+  return static_cast<uint32_t>(ptr[0]) | (static_cast<uint32_t>(ptr[1]) << 8) |
+         (static_cast<uint32_t>(ptr[2]) << 16) | (static_cast<uint32_t>(ptr[3]) << 24);
+}
+
+std::optional<std::string> format_product_counter_payload(const std::string &payload) {
+  if (payload.size() != 21) {
+    return std::nullopt;
+  }
+
+  const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
+  uint8_t header = data[0];
+
+  std::ostringstream stream;
+  stream << "header=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+         << static_cast<int>(header) << std::dec;
+
+  for (size_t i = 0; i < PRODUCT_COUNTER_DEFINITIONS.size(); ++i) {
+    uint16_t value = read_u16_le(&data[1 + i * 2]);
+    stream << "; " << PRODUCT_COUNTER_DEFINITIONS[i].name;
+    if (PRODUCT_COUNTER_DEFINITIONS[i].code != nullptr) {
+      stream << '[' << PRODUCT_COUNTER_DEFINITIONS[i].code << ']';
+    }
+    stream << '=' << value;
+  }
+
+  return stream.str();
+}
+
+std::optional<std::string> format_maintenance_counter_payload(const std::string &payload) {
+  if (payload.size() != 13) {
+    return std::nullopt;
+  }
+
+  const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
+  uint8_t header = data[0];
+
+  std::ostringstream stream;
+  stream << "header=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+         << static_cast<int>(header) << std::dec;
+
+  for (size_t i = 0; i < MAINTENANCE_COUNTER_NAMES.size(); ++i) {
+    uint16_t value = read_u16_le(&data[1 + i * 2]);
+    stream << "; " << MAINTENANCE_COUNTER_NAMES[i] << '=' << value;
+  }
+
+  return stream.str();
+}
+
+std::optional<std::string> format_maintenance_percent_payload(const std::string &payload) {
+  if (payload.size() != 13) {
+    return std::nullopt;
+  }
+
+  const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
+  uint8_t header = data[0];
+
+  std::ostringstream stream;
+  stream << "header=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+         << static_cast<int>(header) << std::dec;
+
+  for (size_t i = 0; i < MAINTENANCE_PERCENT_NAMES.size(); ++i) {
+    uint32_t value = read_u32_le(&data[1 + i * 4]);
+    stream << "; " << MAINTENANCE_PERCENT_NAMES[i] << '=' << value;
+    if (value > 100) {
+      double scaled = static_cast<double>(value) / 100.0;
+      if (scaled <= 100.0) {
+        std::ostringstream percent_stream;
+        percent_stream << std::fixed << std::setprecision(2) << scaled;
+        stream << " (" << percent_stream.str() << "%)";
+      }
+    }
+  }
+
+  return stream.str();
+}
+
+std::optional<std::string> parse_machine_data_response(const std::string &command, const std::string &payload) {
+  if (command == std::string("@TR:32")) {
+    return format_product_counter_payload(payload);
+  }
+  if (command == std::string("@TG:43")) {
+    return format_maintenance_counter_payload(payload);
+  }
+  if (command == std::string("@TG:C0")) {
+    return format_maintenance_percent_payload(payload);
+  }
+  return std::nullopt;
+}
 
 std::string to_upper_hex(const std::string &value) {
   if (value.empty()) {
@@ -114,7 +232,10 @@ std::string build_machine_data_payload(const std::vector<std::string> &responses
     stream << '<' << definition.element << " command=\"" << definition.command << "\"";
     if (!response.empty()) {
       stream << " raw_hex=\"" << to_upper_hex(response) << "\"";
-      if (is_safe_xml_text(response)) {
+      auto parsed_text = parse_machine_data_response(definition.command, response);
+      if (parsed_text.has_value()) {
+        stream << " encoding=\"text\">" << xml_escape(parsed_text.value()) << "</" << definition.element << ">";
+      } else if (is_safe_xml_text(response)) {
         stream << " encoding=\"text\">" << xml_escape(response) << "</" << definition.element << ">";
       } else {
         stream << " encoding=\"hex\"/>";
