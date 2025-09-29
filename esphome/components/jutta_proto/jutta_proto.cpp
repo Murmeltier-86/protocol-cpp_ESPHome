@@ -52,7 +52,8 @@ constexpr std::array<ProductCounterDefinition, 10> PRODUCT_COUNTER_DEFINITIONS =
 constexpr std::array<const char *, 6> MAINTENANCE_COUNTER_NAMES = {{"Cleaning", "FilterChange", "Decalc",
                                                                    "CappuRinse", "CoffeeRinse", "CappuClean"}};
 
-constexpr std::array<const char *, 3> MAINTENANCE_PERCENT_NAMES = {{"Cleaning", "FilterChange", "Decalc"}};
+constexpr std::array<const char *, 6> MAINTENANCE_PERCENT_NAMES = {{"Cleaning", "FilterChange", "Decalc",
+                                                                   "CappuRinse", "CoffeeRinse", "CappuClean"}};
 
 uint16_t read_u16_le(const uint8_t *ptr) {
   return static_cast<uint16_t>(static_cast<uint16_t>(ptr[0]) |
@@ -109,28 +110,38 @@ std::optional<std::string> format_maintenance_counter_payload(const std::string 
 }
 
 std::optional<std::string> format_maintenance_percent_payload(const std::string &payload) {
-  if (payload.size() != 13) {
+  if (payload.size() != 13 && payload.size() != 14) {
     return std::nullopt;
   }
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
-  uint8_t header = data[0];
+  size_t header_size = payload.size() == 14 ? 2 : 1;
+  uint16_t header = header_size == 2 ? read_u16_le(data) : static_cast<uint16_t>(data[0]);
+  size_t value_offset = header_size;
+  size_t values_bytes = payload.size() - value_offset;
+  if (values_bytes % 2 != 0) {
+    return std::nullopt;
+  }
+  size_t value_count = values_bytes / 2;
 
   std::ostringstream stream;
-  stream << "header=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
-         << static_cast<int>(header) << std::dec;
+  stream << "header=0x" << std::uppercase << std::hex << std::setfill('0')
+         << std::setw(static_cast<int>(header_size * 2)) << header << std::dec;
 
-  for (size_t i = 0; i < MAINTENANCE_PERCENT_NAMES.size(); ++i) {
-    uint32_t value = read_u32_le(&data[1 + i * 4]);
-    stream << "; " << MAINTENANCE_PERCENT_NAMES[i] << '=' << value;
-    if (value > 100) {
-      double scaled = static_cast<double>(value) / 100.0;
-      if (scaled <= 100.0) {
-        std::ostringstream percent_stream;
-        percent_stream << std::fixed << std::setprecision(2) << scaled;
-        stream << " (" << percent_stream.str() << "%)";
-      }
+  for (size_t i = 0; i < value_count; ++i) {
+    uint16_t raw_value = read_u16_le(&data[value_offset + i * 2]);
+    const char *name = i < MAINTENANCE_PERCENT_NAMES.size() ? MAINTENANCE_PERCENT_NAMES[i] : nullptr;
+    stream << "; ";
+    if (name != nullptr) {
+      stream << name;
+    } else {
+      stream << "Value" << (i + 1);
     }
+    stream << '=' << raw_value;
+    std::ostringstream percent_stream;
+    percent_stream << std::fixed << std::setprecision(2)
+                   << (static_cast<double>(raw_value) * 100.0 / 65535.0);
+    stream << " (" << percent_stream.str() << "%)";
   }
 
   return stream.str();
@@ -161,9 +172,14 @@ std::string to_upper_hex(const std::string &value) {
   return stream.str();
 }
 
+bool is_valid_utf8(const std::string &value);
+
 bool is_safe_xml_text(const std::string &value) {
   if (value.empty()) {
     return true;
+  }
+  if (!is_valid_utf8(value)) {
+    return false;
   }
   for (unsigned char c : value) {
     if (c < 0x20 || c == 0x7F) {
