@@ -222,6 +222,7 @@ class JuttaConnection {
     [[nodiscard]] bool read_decoded_unsafe(std::vector<uint8_t>& data) const;
 
     void flush_serial_input() const;
+    void drain_serial_input_until_idle(uint32_t duration_ms, uint8_t consecutive_idle_reads = 2) const;
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
@@ -300,6 +301,7 @@ class JuttaConnection {
         std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
         uint32_t start_time{0};
         std::vector<uint8_t> encoded_buffer{};
+        bool plain_request{false};
     };
 
     XmlWaitContext xml_wait_context_{};

@@ -22,6 +22,7 @@ constexpr uint8_t JUTTA_ENCODE_BASE = 0xFF;
 constexpr uint8_t JUTTA_BIT0_MASK = static_cast<uint8_t>(1u << 2);
 constexpr uint8_t JUTTA_BIT1_MASK = static_cast<uint8_t>(1u << 5);
 constexpr std::array<uint8_t, 8> JUTTA_XML_TERMINATOR = {0xDF, 0xFF, 0xDB, 0xDB, 0xFB, 0xFB, 0xDB, 0xDB};
+constexpr std::array<uint8_t, 2> JUTTA_PLAIN_TERMINATOR = {'\r', '\n'};
 std::string format_hex(const uint8_t* data, size_t length) {
     if (length == 0) {
         return "[]";
@@ -545,6 +546,42 @@ void JuttaConnection::flush_serial_input() const {
     }
 }
 
+void JuttaConnection::drain_serial_input_until_idle(uint32_t duration_ms, uint8_t consecutive_idle_reads) const {
+    ESP_LOGD(TAG,
+             "Draining serial input before XML request for %u ms (discarding %zu buffered encoded bytes and %zu decoded byte%s).",
+             duration_ms, this->encoded_rx_buffer_.size(), this->decoded_rx_buffer_.size(),
+             this->decoded_rx_buffer_.size() == 1 ? "" : "s");
+    this->encoded_rx_buffer_.clear();
+    if (!this->decoded_rx_buffer_.empty()) {
+        this->decoded_rx_buffer_.clear();
+    }
+
+    const uint32_t start = esphome::millis();
+    uint8_t idle_reads = 0;
+    std::array<uint8_t, 4> chunk{};
+
+    while ((esphome::millis() - start) < duration_ms || idle_reads < consecutive_idle_reads) {
+        size_t read = serial.read_serial(chunk);
+        if (read > chunk.size()) {
+            ESP_LOGW(TAG, "Invalid amount of UART data found while draining (%zu byte).", read);
+            read = chunk.size();
+        }
+
+        if (read == 0) {
+            ++idle_reads;
+        } else {
+            idle_reads = 0;
+            std::vector<uint8_t> drained(chunk.begin(), chunk.begin() + read);
+            ESP_LOGVV(TAG, "Drained %zu byte%s before XML request: %s", read, read == 1 ? "" : "s",
+                      format_hex(drained).c_str());
+        }
+
+        wait_for_jutta_gap();
+    }
+
+    ESP_LOGD(TAG, "Finished draining serial input before XML request.");
+}
+
 void JuttaConnection::reinject_decoded_front(const std::string& data) const {
     if (data.empty()) {
         return;
@@ -658,18 +695,26 @@ std::shared_ptr<std::string> JuttaConnection::write_plain_with_response(
 
 std::shared_ptr<std::string> JuttaConnection::write_xml_with_response(
     const std::string& data, const std::chrono::milliseconds& timeout) {
-    if (!data.empty() && data[0] == '&') {
-        return write_plain_with_response(data, timeout);
-    }
+    bool plain_request = !data.empty() && data[0] == '&';
     if (!this->xml_wait_context_.active) {
-        flush_serial_input();
+        drain_serial_input_until_idle(50);
         this->xml_wait_context_.encoded_buffer.clear();
-        std::vector<uint8_t> bytes(data.begin(), data.end());
-        if (!write_xml_unsafe(bytes)) {
-            return nullptr;
+        this->xml_wait_context_.plain_request = plain_request;
+
+        if (plain_request) {
+            if (!write_plain_unsafe(data)) {
+                return nullptr;
+            }
+        } else {
+            std::vector<uint8_t> bytes(data.begin(), data.end());
+            if (!write_xml_unsafe(bytes)) {
+                return nullptr;
+            }
         }
     }
-    ESP_LOGD(TAG, "Waiting for XML response after writing payload (timeout=%lld ms).",
+    ESP_LOGD(TAG,
+             "Waiting for XML response after writing %s payload (timeout=%lld ms).",
+             this->xml_wait_context_.plain_request ? "plain" : "encoded",
              static_cast<long long>(timeout.count()));
     return wait_for_xml_response_unsafe(timeout);
 }
@@ -810,14 +855,62 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_xml_response_unsafe(
     }
 
     auto try_complete = [&]() -> std::shared_ptr<std::string> {
-        if (!has_xml_terminator_tail(this->xml_wait_context_.encoded_buffer)) {
+        auto plain_it = std::search(this->xml_wait_context_.encoded_buffer.begin(),
+                                    this->xml_wait_context_.encoded_buffer.end(),
+                                    JUTTA_PLAIN_TERMINATOR.begin(), JUTTA_PLAIN_TERMINATOR.end());
+        if (plain_it != this->xml_wait_context_.encoded_buffer.end()) {
+            size_t terminator_index = plain_it - this->xml_wait_context_.encoded_buffer.begin();
+            std::vector<uint8_t> payload(this->xml_wait_context_.encoded_buffer.begin(),
+                                         this->xml_wait_context_.encoded_buffer.begin() + terminator_index);
+            std::vector<uint8_t> remainder(plain_it + JUTTA_PLAIN_TERMINATOR.size(),
+                                           this->xml_wait_context_.encoded_buffer.end());
+
+            this->xml_wait_context_.encoded_buffer.clear();
+            this->xml_wait_context_.active = false;
+            this->xml_wait_context_.plain_request = false;
+
+            if (!remainder.empty()) {
+                this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.begin(), remainder.begin(), remainder.end());
+                ESP_LOGV(TAG,
+                         "Re-queued %zu byte%s of trailing data after plain XML response terminator: %s",
+                         remainder.size(), remainder.size() == 1 ? "" : "s", format_hex(remainder).c_str());
+            }
+
+            std::string response = vec_to_string(payload);
+            auto shared_response = std::make_shared<std::string>(response);
+            ESP_LOGD(TAG, "Received plain XML response (%zu byte%s): '%s' (hex %s)", payload.size(),
+                     payload.size() == 1 ? "" : "s", format_printable(response).c_str(), format_hex(payload).c_str());
+            return shared_response;
+        }
+
+        auto terminator_it = std::search(this->xml_wait_context_.encoded_buffer.begin(),
+                                         this->xml_wait_context_.encoded_buffer.end(),
+                                         JUTTA_XML_TERMINATOR.begin(), JUTTA_XML_TERMINATOR.end());
+        if (terminator_it == this->xml_wait_context_.encoded_buffer.end()) {
+            return nullptr;
+        }
+
+        size_t payload_size = terminator_it - this->xml_wait_context_.encoded_buffer.begin();
+        if (payload_size % 4 != 0) {
+            ESP_LOGW(TAG, "XML payload size %zu before terminator is not divisible by 4 - waiting for more data.",
+                     payload_size);
             return nullptr;
         }
 
         std::vector<uint8_t> payload(this->xml_wait_context_.encoded_buffer.begin(),
-                                     this->xml_wait_context_.encoded_buffer.end() - JUTTA_XML_TERMINATOR.size());
+                                     this->xml_wait_context_.encoded_buffer.begin() + payload_size);
+        std::vector<uint8_t> remainder(terminator_it + JUTTA_XML_TERMINATOR.size(),
+                                       this->xml_wait_context_.encoded_buffer.end());
+
         this->xml_wait_context_.encoded_buffer.clear();
         this->xml_wait_context_.active = false;
+        this->xml_wait_context_.plain_request = false;
+
+        if (!remainder.empty()) {
+            this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.begin(), remainder.begin(), remainder.end());
+            ESP_LOGV(TAG, "Re-queued %zu byte%s of trailing data after XML terminator: %s", remainder.size(),
+                     remainder.size() == 1 ? "" : "s", format_hex(remainder).c_str());
+        }
 
         std::vector<uint8_t> decoded;
         decoded.reserve(payload.size() / 4);
@@ -867,6 +960,7 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_xml_response_unsafe(
         if (elapsed >= static_cast<uint32_t>(timeout.count())) {
             this->xml_wait_context_.active = false;
             this->xml_wait_context_.encoded_buffer.clear();
+            this->xml_wait_context_.plain_request = false;
             ESP_LOGW(TAG, "Timeout while waiting for XML response after %u ms.", elapsed);
         }
     }
