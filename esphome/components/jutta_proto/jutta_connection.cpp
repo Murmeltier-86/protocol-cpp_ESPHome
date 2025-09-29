@@ -150,10 +150,6 @@ inline bool has_xml_terminator_tail(const std::vector<uint8_t>& buffer) {
                       buffer.end() - JUTTA_XML_TERMINATOR.size());
 }
 
-inline bool has_db_terminator_tail(const std::vector<uint8_t>& buffer) {
-    return has_xml_terminator_tail(buffer);
-}
-
 }  // namespace
 
 JuttaConnection::JuttaConnection(esphome::uart::UARTComponent* parent) : serial(parent) {}
@@ -533,33 +529,19 @@ void JuttaConnection::flush_serial_input() const {
         this->decoded_rx_buffer_.clear();
     }
 
-    std::array<uint8_t, 16> discard{};
-    size_t total_discarded = 0;
-    uint8_t idle_reads = 0;
-    uint32_t deadline = esphome::millis() + 50;
-    while ((esphome::millis() < deadline) && idle_reads < 2) {
+    std::array<uint8_t, 4> discard{};
+    while (true) {
         size_t read = serial.read_serial(discard);
+        if (read == 0) {
+            break;
+        }
         if (read > discard.size()) {
             ESP_LOGW(TAG, "Invalid amount of UART data found while flushing (%zu byte).", read);
-            read = discard.size();
         }
-        if (read == 0) {
-            ++idle_reads;
-            wait_for_jutta_gap();
-            continue;
-        }
-
-        idle_reads = 0;
-        total_discarded += read;
-        std::vector<uint8_t> discard_vec(discard.begin(), discard.begin() + read);
+        std::vector<uint8_t> discard_vec(discard.begin(), discard.begin() + std::min(read, discard.size()));
         ESP_LOGVV(TAG, "Flushed %zu encoded byte%s from UART: %s", read, read == 1 ? "" : "s",
                   format_hex(discard_vec).c_str());
         wait_for_jutta_gap();
-    }
-
-    if (total_discarded > 0) {
-        ESP_LOGD(TAG, "Discarded %zu UART byte%s while flushing.", total_discarded,
-                 total_discarded == 1 ? "" : "s");
     }
 }
 
@@ -698,54 +680,12 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         this->wait_string_context_.timeout = timeout;
         this->wait_string_context_.start_time = esphome::millis();
         this->wait_string_context_.buffer.clear();
-        this->wait_string_context_.encoded_candidate.clear();
         ESP_LOGD(TAG, "Waiting for %s response (timeout=%lld ms).",
                  this->wait_string_context_.plain ? "plain" : "decoded",
                  static_cast<long long>(timeout.count()));
     }
 
-    auto append_incoming = [&](const std::vector<uint8_t>& chunk) -> std::string {
-        if (chunk.empty()) {
-            return {};
-        }
-        std::string incoming = vec_to_string(chunk);
-        this->wait_string_context_.buffer.append(incoming);
-        if (this->wait_string_context_.plain) {
-            for (uint8_t byte : chunk) {
-                if (is_possible_encoded_byte(byte)) {
-                    this->wait_string_context_.encoded_candidate.push_back(byte);
-                } else {
-                    this->wait_string_context_.encoded_candidate.clear();
-                }
-            }
-        }
-        return incoming;
-    };
-
     auto try_complete = [&]() -> std::shared_ptr<std::string> {
-        if (this->wait_string_context_.plain &&
-            has_db_terminator_tail(this->wait_string_context_.encoded_candidate)) {
-            const auto& encoded = this->wait_string_context_.encoded_candidate;
-            std::vector<uint8_t> payload(encoded.begin(), encoded.end() - JUTTA_XML_TERMINATOR.size());
-            std::vector<uint8_t> decoded;
-            decoded.reserve(payload.size() / 4);
-            for (size_t i = 0; i < payload.size(); i += 4) {
-                std::array<uint8_t, 4> frame{payload[i], payload[i + 1], payload[i + 2], payload[i + 3]};
-                decoded.push_back(decode(frame));
-            }
-
-            this->wait_string_context_.buffer.clear();
-            this->wait_string_context_.encoded_candidate.clear();
-            this->wait_string_context_.active = false;
-            this->wait_string_context_.plain = false;
-
-            auto response = std::make_shared<std::string>(vec_to_string(decoded));
-            ESP_LOGD(TAG,
-                     "Received DB encoded response while waiting for plain data: '%s' (hex %s)",
-                     format_printable(*response).c_str(), format_hex(decoded).c_str());
-            return response;
-        }
-
         auto terminator = this->wait_string_context_.buffer.find("\r\n");
         if (terminator == std::string::npos) {
             return nullptr;
@@ -754,7 +694,6 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         std::string response = this->wait_string_context_.buffer.substr(0, terminator);
         std::string remainder = this->wait_string_context_.buffer.substr(terminator + 2);
         this->wait_string_context_.buffer.clear();
-        this->wait_string_context_.encoded_candidate.clear();
 
         if (!remainder.empty()) {
             for (auto it = remainder.rbegin(); it != remainder.rend(); ++it) {
@@ -785,7 +724,8 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
             drained.push_back(this->decoded_rx_buffer_.front());
             this->decoded_rx_buffer_.pop_front();
         }
-        std::string incoming = append_incoming(drained);
+        std::string incoming = vec_to_string(drained);
+        this->wait_string_context_.buffer.append(incoming);
         ESP_LOGD(TAG, "Drained buffered response fragment: '%s' (hex %s) -> buffer '%s'",
                  format_printable(incoming).c_str(), format_hex(drained).c_str(),
                  format_printable(this->wait_string_context_.buffer).c_str());
@@ -807,7 +747,8 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         }
         if (read > 0) {
             std::vector<uint8_t> chunk_vec(chunk.begin(), chunk.begin() + read);
-            std::string incoming = append_incoming(chunk_vec);
+            std::string incoming = vec_to_string(chunk_vec);
+            this->wait_string_context_.buffer.append(incoming);
             ESP_LOGD(TAG, "Received plain chunk while waiting for response: '%s' (hex %s) -> buffer '%s'",
                      format_printable(incoming).c_str(), format_hex(chunk_vec).c_str(),
                      format_printable(this->wait_string_context_.buffer).c_str());
@@ -823,7 +764,8 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
     } else {
         std::vector<uint8_t> buffer;
         if (read_decoded_unsafe(buffer) && !buffer.empty()) {
-            std::string incoming = append_incoming(buffer);
+            std::string incoming = vec_to_string(buffer);
+            this->wait_string_context_.buffer.append(incoming);
             ESP_LOGD(TAG, "Received chunk while waiting for response: '%s' (hex %s) -> buffer '%s'",
                      format_printable(incoming).c_str(), format_hex(buffer).c_str(),
                      format_printable(this->wait_string_context_.buffer).c_str());
@@ -850,7 +792,6 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
                          this->wait_string_context_.buffer.size() == 1 ? "" : "s");
                 this->wait_string_context_.buffer.clear();
             }
-            this->wait_string_context_.encoded_candidate.clear();
             ESP_LOGW(TAG, "Timeout while waiting for generic response after %u ms.", elapsed);
         }
     }
