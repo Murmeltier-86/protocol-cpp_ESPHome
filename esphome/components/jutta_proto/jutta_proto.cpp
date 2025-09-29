@@ -652,7 +652,6 @@ text_sensor::TextSensor *JuraComponent::get_or_create_machine_data_field_sensor_
   std::string name = this->make_machine_data_field_name_(labels);
   sensor->set_name(name.c_str());
   sensor->set_internal(false);
-  sensor->set_parent(this);
   App.register_text_sensor(sensor);
   this->machine_data_field_sensors_[key] = sensor;
   return sensor;
