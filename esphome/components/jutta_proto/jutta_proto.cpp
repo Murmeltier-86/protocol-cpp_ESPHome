@@ -999,7 +999,9 @@ text_sensor::TextSensor *JuraComponent::get_or_create_machine_data_field_sensor_
   }
 
   auto sensor = std::make_unique<text_sensor::TextSensor>();
-  sensor->set_name(build_machine_data_field_sensor_name(this->machine_data_field_prefix_, path));
+  auto sensor_name =
+      build_machine_data_field_sensor_name(this->machine_data_field_prefix_, path);
+  sensor->set_name(sensor_name.c_str());
   auto *raw_sensor = sensor.get();
   App.register_text_sensor(raw_sensor);
   this->machine_data_field_sensor_storage_.push_back(std::move(sensor));
