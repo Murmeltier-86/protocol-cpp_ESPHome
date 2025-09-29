@@ -52,8 +52,7 @@ constexpr std::array<ProductCounterDefinition, 10> PRODUCT_COUNTER_DEFINITIONS =
 constexpr std::array<const char *, 6> MAINTENANCE_COUNTER_NAMES = {{"Cleaning", "FilterChange", "Decalc",
                                                                    "CappuRinse", "CoffeeRinse", "CappuClean"}};
 
-constexpr std::array<const char *, 6> MAINTENANCE_PERCENT_NAMES = {{"Cleaning", "FilterChange", "Decalc",
-                                                                   "CappuRinse", "CoffeeRinse", "CappuClean"}};
+constexpr std::array<const char *, 3> MAINTENANCE_PERCENT_NAMES = {{"Cleaning", "FilterChange", "Decalc"}};
 
 uint16_t read_u16_le(const uint8_t *ptr) {
   return static_cast<uint16_t>(static_cast<uint16_t>(ptr[0]) |
@@ -110,12 +109,7 @@ std::optional<std::string> format_maintenance_counter_payload(const std::string 
 }
 
 std::optional<std::string> format_maintenance_percent_payload(const std::string &payload) {
-  constexpr size_t kHeaderSize = 1;
-  constexpr size_t kEntrySize = 2;
-  constexpr double kMaxPercentValue = 65535.0;
-
-  const size_t expected_size = kHeaderSize + MAINTENANCE_PERCENT_NAMES.size() * kEntrySize;
-  if (payload.size() < expected_size) {
+  if (payload.size() != 13) {
     return std::nullopt;
   }
 
@@ -127,20 +121,16 @@ std::optional<std::string> format_maintenance_percent_payload(const std::string 
          << static_cast<int>(header) << std::dec;
 
   for (size_t i = 0; i < MAINTENANCE_PERCENT_NAMES.size(); ++i) {
-    const size_t offset = kHeaderSize + i * kEntrySize;
-    uint16_t raw_value = read_u16_le(&data[offset]);
-    stream << "; " << MAINTENANCE_PERCENT_NAMES[i] << '=' << raw_value;
-
-    double percent = static_cast<double>(raw_value) * 100.0 / kMaxPercentValue;
-    if (percent >= 0.0 && percent <= 100.0) {
-      std::ostringstream percent_stream;
-      percent_stream << std::fixed << std::setprecision(2) << percent;
-      stream << " (" << percent_stream.str() << "%)";
+    uint32_t value = read_u32_le(&data[1 + i * 4]);
+    stream << "; " << MAINTENANCE_PERCENT_NAMES[i] << '=' << value;
+    if (value > 100) {
+      double scaled = static_cast<double>(value) / 100.0;
+      if (scaled <= 100.0) {
+        std::ostringstream percent_stream;
+        percent_stream << std::fixed << std::setprecision(2) << scaled;
+        stream << " (" << percent_stream.str() << "%)";
+      }
     }
-  }
-
-  if (payload.size() > expected_size) {
-    stream << "; extra_bytes=0x" << to_upper_hex(payload.substr(expected_size));
   }
 
   return stream.str();
