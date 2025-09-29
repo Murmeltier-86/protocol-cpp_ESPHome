@@ -257,31 +257,6 @@ bool JuttaConnection::write_decoded_unsafe(const std::vector<uint8_t>& data) con
     return result;
 }
 
-bool JuttaConnection::write_plain_unsafe(const std::string& data) const {
-    if (!data.empty()) {
-        std::vector<uint8_t> bytes(data.begin(), data.end());
-        ESP_LOGD(TAG, "Writing plain payload (%zu byte%s): '%s' (hex %s)", data.size(),
-                 data.size() == 1 ? "" : "s", format_printable(data).c_str(), format_hex(bytes).c_str());
-    } else {
-        ESP_LOGVV(TAG, "Requested to write an empty plain payload.");
-    }
-
-    bool result = true;
-    for (unsigned char c : data) {
-        if (!serial.write_serial_byte(static_cast<uint8_t>(c))) {
-            ESP_LOGE(TAG, "Failed to write plain byte 0x%02X to UART.", static_cast<int>(c));
-            result = false;
-        }
-    }
-
-    if (!data.empty()) {
-        serial.flush();
-        wait_for_jutta_gap();
-    }
-
-    return result;
-}
-
 bool JuttaConnection::write_decoded_unsafe(const std::string& data) const {
     // Bad compiler support:
     // return std::ranges::all_of(data.begin(), data.end(), [this](char c) { return write_decoded_unsafe(static_cast<uint8_t>(c)); });
@@ -626,26 +601,8 @@ std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const 
     return wait_for_str_unsafe(timeout);
 }
 
-std::shared_ptr<std::string> JuttaConnection::write_plain_with_response(
-    const std::string& data, const std::chrono::milliseconds& timeout) {
-    if (!this->plain_wait_context_.active) {
-        flush_serial_input();
-        this->plain_wait_context_.buffer.clear();
-        if (!write_plain_unsafe(data)) {
-            return nullptr;
-        }
-    }
-    ESP_LOGD(TAG, "Waiting for plain response after writing payload (timeout=%lld ms).",
-             static_cast<long long>(timeout.count()));
-    return wait_for_plain_response_unsafe(timeout);
-}
-
 std::shared_ptr<std::string> JuttaConnection::write_xml_with_response(
     const std::string& data, const std::chrono::milliseconds& timeout) {
-    if (!data.empty() && data.front() == '&') {
-        ESP_LOGD(TAG, "Routing plain command through plain response handler: '%s'", format_printable(data).c_str());
-        return write_plain_with_response(data, timeout);
-    }
     if (!this->xml_wait_context_.active) {
         flush_serial_input();
         this->xml_wait_context_.encoded_buffer.clear();
@@ -725,80 +682,6 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
                 this->wait_string_context_.buffer.clear();
             }
             ESP_LOGW(TAG, "Timeout while waiting for generic response after %u ms.", elapsed);
-        }
-    }
-
-    return nullptr;
-}
-
-std::shared_ptr<std::string> JuttaConnection::wait_for_plain_response_unsafe(
-    const std::chrono::milliseconds& timeout) {
-    if (!this->plain_wait_context_.active) {
-        this->plain_wait_context_.active = true;
-        this->plain_wait_context_.timeout = timeout;
-        this->plain_wait_context_.start_time = esphome::millis();
-        this->plain_wait_context_.buffer.clear();
-        ESP_LOGD(TAG, "Waiting for plain response line (timeout=%lld ms).",
-                 static_cast<long long>(timeout.count()));
-    }
-
-    auto try_complete = [&]() -> std::shared_ptr<std::string> {
-        auto terminator = this->plain_wait_context_.buffer.find("\r\n");
-        if (terminator == std::string::npos) {
-            return nullptr;
-        }
-
-        std::string response = this->plain_wait_context_.buffer.substr(0, terminator);
-        std::string remainder = this->plain_wait_context_.buffer.substr(terminator + 2);
-        this->plain_wait_context_.buffer.clear();
-        this->plain_wait_context_.active = false;
-
-        if (!remainder.empty()) {
-            ESP_LOGV(TAG, "Discarded %zu trailing plain byte%s after CRLF.", remainder.size(),
-                     remainder.size() == 1 ? "" : "s");
-        }
-
-        auto shared_response = std::make_shared<std::string>(response);
-        ESP_LOGD(TAG, "Received plain response line: '%s'", format_printable(*shared_response).c_str());
-        return shared_response;
-    };
-
-    if (auto ready = try_complete(); ready != nullptr) {
-        return ready;
-    }
-
-    wait_for_jutta_gap();
-    std::array<uint8_t, 4> chunk{};
-    size_t read = serial.read_serial(chunk);
-    if (read > chunk.size()) {
-        read = chunk.size();
-    }
-
-    if (read > 0) {
-        std::vector<uint8_t> bytes(chunk.begin(), chunk.begin() + read);
-        std::string incoming(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-        this->plain_wait_context_.buffer.append(incoming);
-        ESP_LOGD(TAG, "Received plain chunk while waiting for response: '%s' (hex %s) -> buffer '%s'",
-                 format_printable(incoming).c_str(), format_hex(bytes).c_str(),
-                 format_printable(this->plain_wait_context_.buffer).c_str());
-
-        if (auto ready = try_complete(); ready != nullptr) {
-            return ready;
-        }
-    }
-
-    if (timeout.count() > 0) {
-        uint32_t now = esphome::millis();
-        uint32_t elapsed = now - this->plain_wait_context_.start_time;
-        if (elapsed >= static_cast<uint32_t>(timeout.count())) {
-            this->plain_wait_context_.active = false;
-            if (!this->plain_wait_context_.buffer.empty()) {
-                ESP_LOGV(TAG, "Timeout while waiting for plain response - discarded %zu buffered byte%s.",
-                         this->plain_wait_context_.buffer.size(),
-                         this->plain_wait_context_.buffer.size() == 1 ? "" : "s");
-                this->plain_wait_context_.buffer.clear();
-            }
-            ESP_LOGW(TAG, "Timeout while waiting for plain response after %u ms.", elapsed);
         }
     }
 
