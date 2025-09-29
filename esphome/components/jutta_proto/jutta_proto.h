@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include "esphome/core/automation.h"
@@ -19,8 +18,6 @@
 
 namespace esphome {
 namespace jutta_component {
-
-struct MachineDataNode;
 
 class JuraComponent : public esphome::Component, public esphome::uart::UARTDevice {
  public:
@@ -51,7 +48,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_machine_data_processes_sensor(text_sensor::TextSensor *sensor) {
     this->machine_data_processes_sensor_ = sensor;
   }
-  void enable_machine_data_field_sensors(const std::string &prefix, bool include_attributes);
 
  protected:
   enum class HandshakeStage { IDLE, HELLO, SEND_T1, WAIT_T2, SEND_T2, WAIT_T3, SEND_T3, DONE, FAILED };
@@ -64,10 +60,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   static bool time_reached(uint32_t now, uint32_t target);
   void process_machine_data_query();
   void publish_machine_data_(const std::string &response);
-  void publish_machine_data_fields_(const MachineDataNode &root);
-  void clear_machine_data_field_sensors_();
-  text_sensor::TextSensor *get_or_create_machine_data_field_sensor_(const std::string &key,
-                                                                   const std::string &path);
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
   std::unique_ptr<::jutta_proto::CoffeeMaker> coffee_maker_;
@@ -85,11 +77,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   text_sensor::TextSensor *machine_data_errors_sensor_{nullptr};
   text_sensor::TextSensor *machine_data_status_sensor_{nullptr};
   text_sensor::TextSensor *machine_data_processes_sensor_{nullptr};
-  bool machine_data_fields_enabled_{false};
-  bool machine_data_field_include_attributes_{true};
-  std::string machine_data_field_prefix_{};
-  std::unordered_map<std::string, text_sensor::TextSensor *> machine_data_field_sensors_;
-  std::vector<std::unique_ptr<text_sensor::TextSensor>> machine_data_field_sensor_storage_;
   uint32_t machine_data_query_next_{0};
   bool machine_data_request_pending_{false};
   uint32_t machine_data_request_start_{0};
