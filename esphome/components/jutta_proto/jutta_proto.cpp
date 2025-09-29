@@ -612,6 +612,8 @@ std::string sanitize_text_sensor_value(const std::string &value) {
   return sanitized;
 }
 
+}  // namespace
+
 void JuraComponent::publish_machine_data_fields_(const MachineDataFieldMap &fields) {
   if (!this->machine_data_auto_fields_) {
     return;
@@ -623,7 +625,8 @@ void JuraComponent::publish_machine_data_fields_(const MachineDataFieldMap &fiel
     if (sensor == nullptr) {
       continue;
     }
-    sensor->set_name(this->make_machine_data_field_name_(entry.second.first));
+    std::string name = this->make_machine_data_field_name_(entry.second.first);
+    sensor->set_name(name.c_str());
     sensor->publish_state(sanitize_text_sensor_value(entry.second.second));
     seen.insert(entry.first);
   }
@@ -646,7 +649,8 @@ text_sensor::TextSensor *JuraComponent::get_or_create_machine_data_field_sensor_
   }
 
   auto *sensor = new text_sensor::TextSensor();
-  sensor->set_name(this->make_machine_data_field_name_(labels));
+  std::string name = this->make_machine_data_field_name_(labels);
+  sensor->set_name(name.c_str());
   App.register_text_sensor(sensor);
   this->machine_data_field_sensors_[key] = sensor;
   return sensor;
@@ -668,8 +672,6 @@ std::string JuraComponent::make_machine_data_field_name_(const std::vector<std::
   }
   return name;
 }
-
-}  // namespace
 
 const char *JuraComponent::handshake_stage_name(JuraComponent::HandshakeStage stage) {
   switch (stage) {
