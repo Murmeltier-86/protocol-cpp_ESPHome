@@ -150,7 +150,29 @@ jutta_proto:
     status: jura_status
     processes: jura_processes
     raw: jura_machine_raw
+
+To expose every XML field as its own dynamically generated text sensor, enable `auto_fields`.
+Each discovered field is published with a sensor name that starts with `field_prefix` followed
+by a human-readable representation of the XML path:
+
+```yaml
+text_sensor:
+  - platform: template
+    name: "JURA Machine Data Raw"
+    id: jura_machine_raw
+
+jutta_proto:
+  id: jura
+  uart_id: jura_uart
+  machine_data:
+    raw: jura_machine_raw
+    auto_fields: true
+    field_prefix: "JURA Machine"
 ```
+
+With `auto_fields` enabled, the component creates `text_sensor` entities for every attribute and
+leaf node in the machine data response (for example, individual product counters or maintenance
+percentages). The sensors update automatically whenever the coffee maker reports new values.
 
 !!! note
     The repository includes a `joe_codes_example.xml` file under `jura_joe_xml_bundle_final/`. Copy it to your ESPHome config
