@@ -530,11 +530,18 @@ void JuttaConnection::flush_serial_input() const {
     }
 
     std::array<uint8_t, 4> discard{};
-    while (true) {
+    uint32_t start = esphome::millis();
+    uint32_t deadline = start + 50;
+    int idle_reads = 0;
+    while (idle_reads < 2 && static_cast<int32_t>(esphome::millis() - deadline) < 0) {
         size_t read = serial.read_serial(discard);
         if (read == 0) {
-            break;
+            ++idle_reads;
+            wait_for_jutta_gap();
+            continue;
         }
+
+        idle_reads = 0;
         if (read > discard.size()) {
             ESP_LOGW(TAG, "Invalid amount of UART data found while flushing (%zu byte).", read);
         }
@@ -624,6 +631,7 @@ std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const 
     if (this->wait_string_context_.active && this->wait_string_context_.plain) {
         this->wait_string_context_.active = false;
         this->wait_string_context_.buffer.clear();
+        this->wait_string_context_.encoded_buffer.clear();
     }
     if (!this->wait_string_context_.active) {
         flush_serial_input();
@@ -632,6 +640,7 @@ std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const 
         }
     }
     this->wait_string_context_.plain = false;
+    this->wait_string_context_.encoded_buffer.clear();
     ESP_LOGD(TAG, "Waiting for response after writing string payload (timeout=%lld ms).",
              static_cast<long long>(timeout.count()));
     return wait_for_str_unsafe(timeout);
@@ -642,6 +651,7 @@ std::shared_ptr<std::string> JuttaConnection::write_plain_with_response(
     if (this->wait_string_context_.active && !this->wait_string_context_.plain) {
         this->wait_string_context_.active = false;
         this->wait_string_context_.buffer.clear();
+        this->wait_string_context_.encoded_buffer.clear();
     }
     if (!this->wait_string_context_.active) {
         flush_serial_input();
@@ -649,8 +659,10 @@ std::shared_ptr<std::string> JuttaConnection::write_plain_with_response(
             return nullptr;
         }
         this->wait_string_context_.plain = true;
+        this->wait_string_context_.encoded_buffer.clear();
     }
     this->wait_string_context_.plain = true;
+    this->wait_string_context_.encoded_buffer.clear();
     ESP_LOGD(TAG, "Waiting for plain response after writing payload (timeout=%lld ms).",
              static_cast<long long>(timeout.count()));
     return wait_for_str_unsafe(timeout);
@@ -680,12 +692,67 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         this->wait_string_context_.timeout = timeout;
         this->wait_string_context_.start_time = esphome::millis();
         this->wait_string_context_.buffer.clear();
+        this->wait_string_context_.encoded_buffer.clear();
         ESP_LOGD(TAG, "Waiting for %s response (timeout=%lld ms).",
                  this->wait_string_context_.plain ? "plain" : "decoded",
                  static_cast<long long>(timeout.count()));
     }
 
     auto try_complete = [&]() -> std::shared_ptr<std::string> {
+        if (this->wait_string_context_.plain && !this->wait_string_context_.encoded_buffer.empty()) {
+            auto search_start = this->wait_string_context_.encoded_buffer.begin();
+            while (search_start != this->wait_string_context_.encoded_buffer.end()) {
+                auto terminator_it =
+                    std::search(search_start, this->wait_string_context_.encoded_buffer.end(),
+                                JUTTA_XML_TERMINATOR.begin(), JUTTA_XML_TERMINATOR.end());
+                if (terminator_it == this->wait_string_context_.encoded_buffer.end()) {
+                    break;
+                }
+
+                size_t payload_size = static_cast<size_t>(
+                    std::distance(this->wait_string_context_.encoded_buffer.begin(), terminator_it));
+                if (payload_size % 4 != 0) {
+                    ESP_LOGW(TAG,
+                             "Ignoring misaligned encoded fragment while waiting for response (payload size=%zu).",
+                             payload_size);
+                    this->wait_string_context_.encoded_buffer.erase(
+                        this->wait_string_context_.encoded_buffer.begin(), terminator_it + 1);
+                    search_start = this->wait_string_context_.encoded_buffer.begin();
+                    continue;
+                }
+
+                std::vector<uint8_t> payload(this->wait_string_context_.encoded_buffer.begin(),
+                                              this->wait_string_context_.encoded_buffer.begin() + payload_size);
+                std::vector<uint8_t> remainder(terminator_it + JUTTA_XML_TERMINATOR.size(),
+                                               this->wait_string_context_.encoded_buffer.end());
+
+                this->wait_string_context_.encoded_buffer.assign(remainder.begin(), remainder.end());
+                this->wait_string_context_.buffer.clear();
+                this->wait_string_context_.active = false;
+                this->wait_string_context_.plain = false;
+
+                if (!remainder.empty()) {
+                    this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.begin(), remainder.begin(), remainder.end());
+                    ESP_LOGV(TAG, "Re-queued %zu encoded byte%s of trailing response data for later processing.",
+                             remainder.size(), remainder.size() == 1 ? "" : "s");
+                }
+
+                std::vector<uint8_t> decoded;
+                decoded.reserve(payload_size / 4);
+                for (size_t i = 0; i < payload.size(); i += 4) {
+                    std::array<uint8_t, 4> frame{payload[i], payload[i + 1], payload[i + 2], payload[i + 3]};
+                    decoded.push_back(decode_xml_byte(frame));
+                }
+
+                std::string response = vec_to_string(decoded);
+                auto shared_response = std::make_shared<std::string>(response);
+                ESP_LOGD(TAG, "Received response via encoded terminator (%zu decoded byte%s): '%s' (hex %s)",
+                         decoded.size(), decoded.size() == 1 ? "" : "s", format_printable(response).c_str(),
+                         format_hex(decoded).c_str());
+                return shared_response;
+            }
+        }
+
         auto terminator = this->wait_string_context_.buffer.find("\r\n");
         if (terminator == std::string::npos) {
             return nullptr;
@@ -705,6 +772,7 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
 
         this->wait_string_context_.active = false;
         this->wait_string_context_.plain = false;
+        this->wait_string_context_.encoded_buffer.clear();
         auto shared_response = std::make_shared<std::string>(response);
         ESP_LOGD(TAG, "Received response line: '%s'", format_printable(*shared_response).c_str());
         return shared_response;
@@ -749,6 +817,8 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
             std::vector<uint8_t> chunk_vec(chunk.begin(), chunk.begin() + read);
             std::string incoming = vec_to_string(chunk_vec);
             this->wait_string_context_.buffer.append(incoming);
+            this->wait_string_context_.encoded_buffer.insert(
+                this->wait_string_context_.encoded_buffer.end(), chunk.begin(), chunk.begin() + read);
             ESP_LOGD(TAG, "Received plain chunk while waiting for response: '%s' (hex %s) -> buffer '%s'",
                      format_printable(incoming).c_str(), format_hex(chunk_vec).c_str(),
                      format_printable(this->wait_string_context_.buffer).c_str());
@@ -791,6 +861,16 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
                          this->wait_string_context_.buffer.size(),
                          this->wait_string_context_.buffer.size() == 1 ? "" : "s");
                 this->wait_string_context_.buffer.clear();
+            }
+            if (!this->wait_string_context_.encoded_buffer.empty()) {
+                this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.begin(),
+                                                this->wait_string_context_.encoded_buffer.begin(),
+                                                this->wait_string_context_.encoded_buffer.end());
+                ESP_LOGV(TAG,
+                         "Timeout while waiting for generic response - re-queued %zu encoded buffered byte%s.",
+                         this->wait_string_context_.encoded_buffer.size(),
+                         this->wait_string_context_.encoded_buffer.size() == 1 ? "" : "s");
+                this->wait_string_context_.encoded_buffer.clear();
             }
             ESP_LOGW(TAG, "Timeout while waiting for generic response after %u ms.", elapsed);
         }
