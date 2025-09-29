@@ -506,7 +506,7 @@ void JuraComponent::process_machine_data_query() {
   };
 
   if (this->machine_data_request_pending_) {
-    auto response = this->coffee_maker_->connection->write_plain_with_response(
+    auto response = this->coffee_maker_->connection->write_xml_with_response(
         MACHINE_DATA_COMMAND, std::chrono::milliseconds{MACHINE_DATA_REQUEST_TIMEOUT_MS});
     if (handle_response(response)) {
       return;
@@ -525,7 +525,7 @@ void JuraComponent::process_machine_data_query() {
   }
 
   this->machine_data_request_start_ = now;
-  auto response = this->coffee_maker_->connection->write_plain_with_response(
+  auto response = this->coffee_maker_->connection->write_xml_with_response(
       MACHINE_DATA_COMMAND, std::chrono::milliseconds{MACHINE_DATA_REQUEST_TIMEOUT_MS});
   if (handle_response(response)) {
     return;
