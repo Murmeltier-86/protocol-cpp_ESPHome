@@ -299,6 +299,7 @@ class JuttaConnection {
         std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
         uint32_t start_time{0};
         std::vector<uint8_t> raw_buffer{};
+        bool retry_required{false};
     };
 
     XmlWaitContext xml_wait_context_{};
