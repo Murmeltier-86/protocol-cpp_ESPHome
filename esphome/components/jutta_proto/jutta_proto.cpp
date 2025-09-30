@@ -193,25 +193,40 @@ uint16_t read_u16_le(const uint8_t *ptr) {
                                (static_cast<uint16_t>(ptr[1]) << 8));
 }
 
+uint16_t read_u16_be(const uint8_t *ptr) {
+  return static_cast<uint16_t>((static_cast<uint16_t>(ptr[0]) << 8) |
+                               static_cast<uint16_t>(ptr[1]));
+}
+
 uint32_t read_u32_le(const uint8_t *ptr) {
   return static_cast<uint32_t>(ptr[0]) | (static_cast<uint32_t>(ptr[1]) << 8) |
          (static_cast<uint32_t>(ptr[2]) << 16) | (static_cast<uint32_t>(ptr[3]) << 24);
 }
 
 std::optional<std::string> format_product_counter_payload(const std::string &payload) {
-  if (payload.size() != 21) {
+  if (payload.size() != 20 && payload.size() != 21) {
     return std::nullopt;
   }
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
-  uint8_t header = data[0];
+  bool has_header = payload.size() == 21;
+  size_t value_offset = has_header ? 1 : 0;
+  if (payload.size() - value_offset < PRODUCT_COUNTER_DEFINITIONS.size() * 2) {
+    return std::nullopt;
+  }
+
+  uint8_t header = has_header ? data[0] : 0;
 
   std::ostringstream stream;
-  stream << "header=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
-         << static_cast<int>(header) << std::dec;
+  if (has_header) {
+    stream << "header=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+           << static_cast<int>(header) << std::dec;
+  } else {
+    stream << "header=(absent)";
+  }
 
   for (size_t i = 0; i < PRODUCT_COUNTER_DEFINITIONS.size(); ++i) {
-    uint16_t value = read_u16_le(&data[1 + i * 2]);
+    uint16_t value = read_u16_be(&data[value_offset + i * 2]);
     stream << "; " << PRODUCT_COUNTER_DEFINITIONS[i].name;
     if (PRODUCT_COUNTER_DEFINITIONS[i].code != nullptr) {
       stream << '[' << PRODUCT_COUNTER_DEFINITIONS[i].code << ']';
@@ -224,20 +239,29 @@ std::optional<std::string> format_product_counter_payload(const std::string &pay
 
 MachineDataFieldList parse_product_counter_fields(const std::string &payload) {
   MachineDataFieldList fields;
-  if (payload.size() != 21) {
+  if (payload.size() != 20 && payload.size() != 21) {
     return fields;
   }
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
-  uint8_t header = data[0];
+  bool has_header = payload.size() == 21;
+  size_t value_offset = has_header ? 1 : 0;
+  if (payload.size() - value_offset < PRODUCT_COUNTER_DEFINITIONS.size() * 2) {
+    return fields;
+  }
 
-  std::ostringstream header_stream;
-  header_stream << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
-                << static_cast<int>(header);
-  fields.push_back({"Header", header_stream.str(), std::nullopt, ""});
+  if (has_header) {
+    uint8_t header = data[0];
+    std::ostringstream header_stream;
+    header_stream << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+                  << static_cast<int>(header);
+    fields.push_back({"Header", header_stream.str(), std::nullopt, ""});
+  } else {
+    fields.push_back({"Header", "(absent)", std::nullopt, ""});
+  }
 
   for (size_t i = 0; i < PRODUCT_COUNTER_DEFINITIONS.size(); ++i) {
-    uint16_t value = read_u16_le(&data[1 + i * 2]);
+    uint16_t value = read_u16_be(&data[value_offset + i * 2]);
     fields.push_back({PRODUCT_COUNTER_DEFINITIONS[i].name, std::to_string(value),
                       static_cast<float>(value), ""});
   }
