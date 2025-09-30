@@ -65,6 +65,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool read_handshake_bytes();
   static bool time_reached(uint32_t now, uint32_t target);
   void process_machine_data_query();
+  bool has_machine_data_subscribers_() const;
   void publish_machine_data_(const std::string &response);
   void publish_machine_data_fields_(const std::map<std::string, std::pair<std::vector<std::string>, std::string>> &fields);
   text_sensor::TextSensor *find_machine_data_field_sensor_(const std::string &key);
