@@ -289,6 +289,18 @@ async def to_code(config):
                 return await text_sensor.new_text_sensor(cfg)
             return await cg.get_variable(cfg)
 
+        machine_data_sensor_cfg = None
+        if isinstance(machine_data_cfg, dict):
+            excluded_sensor_keys = set(MACHINE_DATA_SECTION_KEYS) | {
+                CONF_MACHINE_DATA_AUTO_FIELDS,
+                CONF_MACHINE_DATA_FIELD_PREFIX,
+            }
+            machine_data_sensor_cfg = {
+                key: value
+                for key, value in machine_data_cfg.items()
+                if key not in excluded_sensor_keys
+            }
+
         if isinstance(machine_data_cfg, dict) and any(
             key in machine_data_cfg for key in MACHINE_DATA_SECTION_KEYS
         ):
@@ -317,8 +329,11 @@ async def to_code(config):
                     machine_data_cfg[CONF_MACHINE_DATA_RAW]
                 )
                 cg.add(var.set_machine_data_sensor(sensor))
-        else:
+        elif not isinstance(machine_data_cfg, dict):
             sensor = await _resolve_machine_data_sensor(machine_data_cfg)
+            cg.add(var.set_machine_data_sensor(sensor))
+        elif machine_data_sensor_cfg:
+            sensor = await _resolve_machine_data_sensor(machine_data_sensor_cfg)
             cg.add(var.set_machine_data_sensor(sensor))
 
         cg.add(var.set_machine_data_auto_fields(auto_fields))
