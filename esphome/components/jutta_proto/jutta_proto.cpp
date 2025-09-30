@@ -187,19 +187,6 @@ constexpr std::array<const char *, 6> MAINTENANCE_COUNTER_NAMES = {{"Cleaning", 
 
 constexpr std::array<const char *, 3> MAINTENANCE_PERCENT_NAMES = {{"Cleaning", "FilterChange", "Decalc"}};
 
-std::optional<size_t> expected_machine_data_payload_size(const std::string &command) {
-  if (command == std::string("@TR:32")) {
-    return 21;
-  }
-  if (command == std::string("@TG:43")) {
-    return 13;
-  }
-  if (command == std::string("@TG:C0")) {
-    return 13;
-  }
-  return std::nullopt;
-}
-
 float decode_percent_fixed_point(uint32_t raw_value) {
   // Percentages in the maintenance payload are encoded in the upper 16 bits
   // using a Q8.8 fixed-point representation. The remaining 16 bits contain an
@@ -341,19 +328,28 @@ MachineDataFieldList parse_maintenance_counter_fields(const std::string &payload
 }
 
 std::optional<std::string> format_maintenance_percent_payload(const std::string &payload) {
-  if (payload.size() != 13) {
+  if (payload.empty()) {
     return std::nullopt;
   }
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
-  uint8_t header = data[0];
-  size_t value_offset = 1;
+
+  size_t header_size = 1;
+  if (payload.size() >= 2 && (payload.size() % 4) == 2) {
+    header_size = 2;
+  }
+  if (payload.size() < header_size) {
+    return std::nullopt;
+  }
+
+  uint16_t header = header_size == 2 ? read_u16_be(data) : static_cast<uint16_t>(data[0]);
+  size_t value_offset = header_size;
   size_t values_bytes = payload.size() - value_offset;
   size_t value_count = values_bytes / 4;
 
   std::ostringstream stream;
-  stream << "header=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
-         << static_cast<int>(header) << std::dec;
+  stream << "header=0x" << std::uppercase << std::hex << std::setfill('0')
+         << std::setw(static_cast<int>(header_size * 2)) << header << std::dec;
 
   for (size_t i = 0; i < value_count; ++i) {
     uint32_t raw_value = read_u32_be(&data[value_offset + i * 4]);
@@ -384,16 +380,25 @@ std::optional<std::string> format_maintenance_percent_payload(const std::string 
 
 MachineDataFieldList parse_maintenance_percent_fields(const std::string &payload) {
   MachineDataFieldList fields;
-  if (payload.size() != 13) {
+  if (payload.empty()) {
     return fields;
   }
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
-  size_t value_offset = 1;
+  size_t header_size = 1;
+  if (payload.size() >= 2 && (payload.size() % 4) == 2) {
+    header_size = 2;
+  }
+  if (payload.size() < header_size) {
+    return fields;
+  }
+
+  uint16_t header = header_size == 2 ? read_u16_be(data) : static_cast<uint16_t>(data[0]);
+  size_t value_offset = header_size;
 
   std::ostringstream header_stream;
-  header_stream << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
-                << static_cast<int>(data[0]);
+  header_stream << "0x" << std::uppercase << std::hex << std::setfill('0')
+                << std::setw(static_cast<int>(header_size * 2)) << header;
   fields.push_back({"Header", header_stream.str(), std::nullopt, ""});
 
   size_t values_bytes = payload.size() - value_offset;
@@ -1415,22 +1420,6 @@ void JuraComponent::process_machine_data_query() {
       auto response = this->coffee_maker_->connection->write_xml_with_response(
           definition.command, std::chrono::milliseconds{MACHINE_DATA_REQUEST_TIMEOUT_MS});
       if (response != nullptr) {
-        auto expected = expected_machine_data_payload_size(definition.command);
-        if (expected.has_value() && response->size() != *expected) {
-          ESP_LOGW(TAG,
-                   "Discarding machine data response for command '%s' with unexpected length %zu (expected %zu).",
-                   definition.command, response->size(), *expected);
-          this->machine_data_request_pending_ = false;
-          this->machine_data_request_start_ = 0;
-          this->machine_data_command_index_ = 0;
-          this->machine_data_responses_.clear();
-          if (this->machine_data_auto_fields_ || !this->machine_data_field_sensors_.empty() ||
-              !this->machine_data_numeric_field_sensors_.empty()) {
-            this->machine_data_field_values_.clear();
-          }
-          this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
-          return;
-        }
         if (this->machine_data_responses_.size() != MACHINE_DATA_COMMANDS.size()) {
           this->machine_data_responses_.assign(MACHINE_DATA_COMMANDS.size(), std::string{});
         }
@@ -1476,21 +1465,6 @@ void JuraComponent::process_machine_data_query() {
         definition.command, std::chrono::milliseconds{MACHINE_DATA_REQUEST_TIMEOUT_MS});
     if (response == nullptr) {
       this->machine_data_request_pending_ = true;
-      return;
-    }
-    auto expected = expected_machine_data_payload_size(definition.command);
-    if (expected.has_value() && response->size() != *expected) {
-      ESP_LOGW(TAG, "Discarding machine data response for command '%s' with unexpected length %zu (expected %zu).",
-               definition.command, response->size(), *expected);
-      this->machine_data_responses_.clear();
-      this->machine_data_request_pending_ = false;
-      this->machine_data_request_start_ = 0;
-      this->machine_data_command_index_ = 0;
-      if (this->machine_data_auto_fields_ || !this->machine_data_field_sensors_.empty() ||
-          !this->machine_data_numeric_field_sensors_.empty()) {
-        this->machine_data_field_values_.clear();
-      }
-      this->machine_data_query_next_ = esphome::millis() + MACHINE_DATA_QUERY_INTERVAL_MS;
       return;
     }
     this->machine_data_responses_[this->machine_data_command_index_] = *response;
