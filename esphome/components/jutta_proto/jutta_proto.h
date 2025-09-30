@@ -70,6 +70,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   text_sensor::TextSensor *get_or_create_machine_data_field_sensor_(
       const std::string &key, const std::vector<std::string> &labels);
   std::string make_machine_data_field_name_(const std::vector<std::string> &labels) const;
+  void initialize_machine_data_field_sensors_();
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
   std::unique_ptr<::jutta_proto::CoffeeMaker> coffee_maker_;

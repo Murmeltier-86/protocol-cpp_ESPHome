@@ -657,6 +657,75 @@ text_sensor::TextSensor *JuraComponent::get_or_create_machine_data_field_sensor_
   return sensor;
 }
 
+void JuraComponent::initialize_machine_data_field_sensors_() {
+  if (!this->machine_data_auto_fields_) {
+    return;
+  }
+
+  for (const auto &definition : MACHINE_DATA_COMMANDS) {
+    std::vector<std::string> base_labels;
+    base_labels.push_back(prettify_identifier(definition.section));
+    base_labels.push_back(prettify_identifier(definition.element));
+
+    std::string key_prefix = slugify(definition.section);
+    std::string element_slug = slugify(definition.element);
+    if (!element_slug.empty()) {
+      if (!key_prefix.empty()) {
+        key_prefix.push_back('.');
+      }
+      key_prefix.append(element_slug);
+    }
+
+    auto register_field = [&](const std::string &field_name, const std::string &slug) {
+      if (field_name.empty() || slug.empty()) {
+        return;
+      }
+      std::vector<std::string> labels = base_labels;
+      labels.push_back(field_name);
+      std::string field_key;
+      if (key_prefix.empty()) {
+        field_key = slug;
+      } else {
+        field_key = key_prefix + '.' + slug;
+      }
+      auto *sensor = this->get_or_create_machine_data_field_sensor_(field_key, labels);
+      if (sensor != nullptr) {
+        sensor->publish_state("");
+      }
+    };
+
+    auto register_fields_from_list = [&](const std::vector<std::string> &names) {
+      for (const auto &name : names) {
+        register_field(name, slugify(name));
+      }
+    };
+
+    if (definition.command == std::string("@TR:32")) {
+      std::vector<std::string> names = {"Header"};
+      for (const auto &entry : PRODUCT_COUNTER_DEFINITIONS) {
+        names.emplace_back(entry.name);
+      }
+      register_fields_from_list(names);
+    } else if (definition.command == std::string("@TG:43")) {
+      std::vector<std::string> names = {"Header"};
+      for (const auto *name : MAINTENANCE_COUNTER_NAMES) {
+        names.emplace_back(name);
+      }
+      register_fields_from_list(names);
+    } else if (definition.command == std::string("@TG:C0")) {
+      std::vector<std::string> names = {"Header"};
+      for (const auto *name : MAINTENANCE_PERCENT_NAMES) {
+        names.emplace_back(std::string(name) + " Raw");
+        names.emplace_back(std::string(name) + " Percent");
+      }
+      register_fields_from_list(names);
+    }
+
+    register_field("Raw Hex", "raw_hex");
+    register_field("Text", "text");
+  }
+}
+
 std::string JuraComponent::make_machine_data_field_name_(const std::vector<std::string> &labels) const {
   std::string name = this->machine_data_field_prefix_;
   for (const auto &label : labels) {
@@ -707,6 +776,10 @@ void JuraComponent::setup() {
 
   this->connection_ = std::make_unique<::jutta_proto::JuttaConnection>(this->parent_);
   this->connection_->init();
+
+  if (this->machine_data_auto_fields_) {
+    this->initialize_machine_data_field_sensors_();
+  }
 
   this->handshake_stage_ = HandshakeStage::HELLO;
   ESP_LOGI(TAG, "Starting handshake with coffee maker...");
