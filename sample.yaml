@@ -26,11 +26,28 @@ jutta_proto:
     raw: jura_machine_raw
     auto_fields: true
     field_prefix: "JURA Machine"
+    fields:
+      statistic.maintenancepercent.cleaning_percent:
+        sensor: jura_cleaning_percent
+      statistic.productcounter.espresso:
+        sensor: jura_espresso_counter
 
 text_sensor:
   - platform: template
     id: jura_machine_raw
     name: "JURA Machine Data Raw"
+
+sensor:
+  - platform: template
+    id: jura_cleaning_percent
+    name: "JURA Cleaning Percent"
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    state_class: measurement
+  - platform: template
+    id: jura_espresso_counter
+    name: "JURA Espresso Counter"
+    state_class: total_increasing
 
 # Convenience switches to remotely power the machine on/off
 switch:
