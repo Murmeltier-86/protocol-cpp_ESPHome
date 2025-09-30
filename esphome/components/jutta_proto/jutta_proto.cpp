@@ -27,6 +27,14 @@ constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
 constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
 
+template<typename Sensor>
+auto try_set_unique_id(Sensor *sensor, const std::string &unique_id)
+    -> decltype(sensor->set_unique_id(unique_id), void()) {
+  sensor->set_unique_id(unique_id);
+}
+
+inline void try_set_unique_id(...) {}
+
 struct MachineDataCommandDefinition {
   const char *command;
   const char *section;
@@ -658,7 +666,9 @@ void JuraComponent::register_machine_data_field_sensor_(const std::string &key,
     existing->set_name(name.c_str());
     std::string unique_id = this->make_machine_data_field_unique_id_(key);
     if (!unique_id.empty()) {
-      existing->set_unique_id(unique_id.c_str());
+
+      try_set_unique_id(existing, unique_id);
+
     }
     existing->publish_state("");
     return;
@@ -668,7 +678,9 @@ void JuraComponent::register_machine_data_field_sensor_(const std::string &key,
   sensor->set_name(name.c_str());
   std::string unique_id = this->make_machine_data_field_unique_id_(key);
   if (!unique_id.empty()) {
-    sensor->set_unique_id(unique_id.c_str());
+
+    try_set_unique_id(sensor, unique_id);
+
   }
   sensor->set_internal(false);
   App.register_text_sensor(sensor);
