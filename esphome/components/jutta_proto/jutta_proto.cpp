@@ -185,22 +185,16 @@ constexpr std::array<ProductCounterDefinition, 10> PRODUCT_COUNTER_DEFINITIONS =
 constexpr std::array<const char *, 6> MAINTENANCE_COUNTER_NAMES = {{"Cleaning", "FilterChange", "Decalc",
                                                                    "CappuRinse", "CoffeeRinse", "CappuClean"}};
 
-constexpr std::array<const char *, 6> MAINTENANCE_PERCENT_NAMES = {{"Cleaning", "FilterChange", "Decalc",
-                                                                   "CappuRinse", "CoffeeRinse", "CappuClean"}};
-
-uint16_t read_u16_le(const uint8_t *ptr) {
-  return static_cast<uint16_t>(static_cast<uint16_t>(ptr[0]) |
-                               (static_cast<uint16_t>(ptr[1]) << 8));
-}
+constexpr std::array<const char *, 3> MAINTENANCE_PERCENT_NAMES = {{"Cleaning", "FilterChange", "Decalc"}};
 
 uint16_t read_u16_be(const uint8_t *ptr) {
   return static_cast<uint16_t>((static_cast<uint16_t>(ptr[0]) << 8) |
                                static_cast<uint16_t>(ptr[1]));
 }
 
-uint32_t read_u32_le(const uint8_t *ptr) {
-  return static_cast<uint32_t>(ptr[0]) | (static_cast<uint32_t>(ptr[1]) << 8) |
-         (static_cast<uint32_t>(ptr[2]) << 16) | (static_cast<uint32_t>(ptr[3]) << 24);
+uint32_t read_u32_be(const uint8_t *ptr) {
+  return (static_cast<uint32_t>(ptr[0]) << 24) | (static_cast<uint32_t>(ptr[1]) << 16) |
+         (static_cast<uint32_t>(ptr[2]) << 8) | static_cast<uint32_t>(ptr[3]);
 }
 
 std::optional<std::string> format_product_counter_payload(const std::string &payload) {
@@ -282,7 +276,7 @@ std::optional<std::string> format_maintenance_counter_payload(const std::string 
          << static_cast<int>(header) << std::dec;
 
   for (size_t i = 0; i < MAINTENANCE_COUNTER_NAMES.size(); ++i) {
-    uint16_t value = read_u16_le(&data[1 + i * 2]);
+    uint16_t value = read_u16_be(&data[1 + i * 2]);
     stream << "; " << MAINTENANCE_COUNTER_NAMES[i] << '=' << value;
   }
 
@@ -304,7 +298,7 @@ MachineDataFieldList parse_maintenance_counter_fields(const std::string &payload
   fields.push_back({"Header", header_stream.str(), std::nullopt, ""});
 
   for (size_t i = 0; i < MAINTENANCE_COUNTER_NAMES.size(); ++i) {
-    uint16_t value = read_u16_le(&data[1 + i * 2]);
+    uint16_t value = read_u16_be(&data[1 + i * 2]);
     fields.push_back({MAINTENANCE_COUNTER_NAMES[i], std::to_string(value), static_cast<float>(value),
                       ""});
   }
@@ -319,32 +313,28 @@ std::optional<std::string> format_maintenance_percent_payload(const std::string 
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
   size_t header_size = payload.size() == 14 ? 2 : 1;
-  uint16_t header = header_size == 2 ? read_u16_le(data) : static_cast<uint16_t>(data[0]);
+  uint16_t header = header_size == 2 ? read_u16_be(data) : static_cast<uint16_t>(data[0]);
   size_t value_offset = header_size;
   size_t values_bytes = payload.size() - value_offset;
-  if (values_bytes % 2 != 0) {
+  if (values_bytes % 4 != 0) {
     return std::nullopt;
   }
-  size_t value_count = values_bytes / 2;
+  size_t value_count = values_bytes / 4;
 
   std::ostringstream stream;
   stream << "header=0x" << std::uppercase << std::hex << std::setfill('0')
          << std::setw(static_cast<int>(header_size * 2)) << header << std::dec;
 
   for (size_t i = 0; i < value_count; ++i) {
-    uint16_t raw_value = read_u16_le(&data[value_offset + i * 2]);
+    uint32_t raw_value = read_u32_be(&data[value_offset + i * 4]);
     const char *name = i < MAINTENANCE_PERCENT_NAMES.size() ? MAINTENANCE_PERCENT_NAMES[i] : nullptr;
     stream << "; ";
     if (name != nullptr) {
-      stream << name;
+      stream << name << " Raw32";
     } else {
-      stream << "Value" << (i + 1);
+      stream << "Value" << (i + 1) << " Raw32";
     }
     stream << '=' << raw_value;
-    std::ostringstream percent_stream;
-    percent_stream << std::fixed << std::setprecision(2)
-                   << (static_cast<double>(raw_value) * 100.0 / 65535.0);
-    stream << " (" << percent_stream.str() << "%)";
   }
 
   return stream.str();
@@ -358,7 +348,7 @@ MachineDataFieldList parse_maintenance_percent_fields(const std::string &payload
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
   size_t header_size = payload.size() == 14 ? 2 : 1;
-  uint16_t header = header_size == 2 ? read_u16_le(data) : static_cast<uint16_t>(data[0]);
+  uint16_t header = header_size == 2 ? read_u16_be(data) : static_cast<uint16_t>(data[0]);
   size_t value_offset = header_size;
 
   std::ostringstream header_stream;
@@ -366,22 +356,30 @@ MachineDataFieldList parse_maintenance_percent_fields(const std::string &payload
                 << std::setw(static_cast<int>(header_size * 2)) << header;
   fields.push_back({"Header", header_stream.str(), std::nullopt, ""});
 
-  for (size_t i = 0; i < MAINTENANCE_PERCENT_NAMES.size(); ++i) {
-    size_t index = value_offset + i * 2;
-    if (index + 1 >= payload.size()) {
+  size_t values_bytes = payload.size() - value_offset;
+  if (values_bytes % 4 != 0) {
+    return fields;
+  }
+
+  size_t value_count = values_bytes / 4;
+  for (size_t i = 0; i < value_count; ++i) {
+    size_t index = value_offset + i * 4;
+    if (index + 3 >= payload.size()) {
       break;
     }
-    uint16_t raw_value = read_u16_le(&data[index]);
+    uint32_t raw_value = read_u32_be(&data[index]);
     std::ostringstream raw_stream;
     raw_stream << raw_value;
-    fields.push_back({std::string(MAINTENANCE_PERCENT_NAMES[i]) + " Raw", raw_stream.str(),
-                      static_cast<float>(raw_value), ""});
-
-    std::ostringstream percent_stream;
-    percent_stream << std::fixed << std::setprecision(2)
-                   << (static_cast<double>(raw_value) * 100.0 / 65535.0);
-    fields.push_back({std::string(MAINTENANCE_PERCENT_NAMES[i]) + " Percent", percent_stream.str(),
-                      static_cast<float>(static_cast<double>(raw_value) * 100.0 / 65535.0), "%"});
+    const char *name = i < MAINTENANCE_PERCENT_NAMES.size() ? MAINTENANCE_PERCENT_NAMES[i] : nullptr;
+    std::string field_name;
+    if (name != nullptr) {
+      field_name = std::string(name) + " Raw32";
+    } else {
+      std::ostringstream fallback_name;
+      fallback_name << "Value" << (i + 1) << " Raw32";
+      field_name = fallback_name.str();
+    }
+    fields.push_back({field_name, raw_stream.str(), static_cast<float>(raw_value), ""});
   }
 
   return fields;
@@ -952,9 +950,7 @@ void JuraComponent::initialize_machine_data_field_sensors_() {
     } else if (definition.command == std::string("@TG:C0")) {
       register_text_field("Header", slugify("Header"));
       for (const auto *name : MAINTENANCE_PERCENT_NAMES) {
-        register_numeric_field(std::string(name) + " Raw", slugify(std::string(name) + " Raw"), "");
-        register_numeric_field(std::string(name) + " Percent",
-                               slugify(std::string(name) + " Percent"), "%");
+        register_numeric_field(std::string(name) + " Raw32", slugify(std::string(name) + " Raw32"), "");
       }
     }
 
