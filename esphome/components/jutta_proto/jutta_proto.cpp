@@ -666,7 +666,9 @@ void JuraComponent::register_machine_data_field_sensor_(const std::string &key,
     existing->set_name(name.c_str());
     std::string unique_id = this->make_machine_data_field_unique_id_(key);
     if (!unique_id.empty()) {
+
       try_set_unique_id(existing, unique_id);
+
     }
     existing->publish_state("");
     return;
@@ -676,7 +678,9 @@ void JuraComponent::register_machine_data_field_sensor_(const std::string &key,
   sensor->set_name(name.c_str());
   std::string unique_id = this->make_machine_data_field_unique_id_(key);
   if (!unique_id.empty()) {
+
     try_set_unique_id(sensor, unique_id);
+
   }
   sensor->set_internal(false);
   App.register_text_sensor(sensor);
