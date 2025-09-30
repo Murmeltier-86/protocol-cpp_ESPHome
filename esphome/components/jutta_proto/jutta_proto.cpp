@@ -656,12 +656,20 @@ void JuraComponent::register_machine_data_field_sensor_(const std::string &key,
   std::string name = this->make_machine_data_field_name_(labels);
   if (existing != nullptr) {
     existing->set_name(name.c_str());
+    std::string unique_id = this->make_machine_data_field_unique_id_(key);
+    if (!unique_id.empty()) {
+      existing->set_unique_id(unique_id.c_str());
+    }
     existing->publish_state("");
     return;
   }
 
   auto *sensor = new text_sensor::TextSensor();
   sensor->set_name(name.c_str());
+  std::string unique_id = this->make_machine_data_field_unique_id_(key);
+  if (!unique_id.empty()) {
+    sensor->set_unique_id(unique_id.c_str());
+  }
   sensor->set_internal(false);
   App.register_text_sensor(sensor);
   sensor->publish_state("");
@@ -749,6 +757,25 @@ std::string JuraComponent::make_machine_data_field_name_(const std::vector<std::
     name = "Machine Data";
   }
   return name;
+}
+
+std::string JuraComponent::make_machine_data_field_unique_id_(const std::string &key) const {
+  std::string node_slug = slugify(App.get_name());
+  std::string device_slug = this->device_type_.empty() ? std::string("jura") : slugify(this->device_type_);
+
+  std::string key_slug = key;
+  std::replace(key_slug.begin(), key_slug.end(), '.', '_');
+
+  if (node_slug.empty()) {
+    node_slug = "esphome";
+  }
+
+  std::string unique_id = node_slug;
+  unique_id.append("_jutta_");
+  unique_id.append(device_slug);
+  unique_id.append("_");
+  unique_id.append(key_slug);
+  return unique_id;
 }
 
 const char *JuraComponent::handshake_stage_name(JuraComponent::HandshakeStage stage) {
