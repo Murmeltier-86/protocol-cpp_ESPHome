@@ -45,6 +45,16 @@ constexpr std::array<MachineDataCommandDefinition, 3> MACHINE_DATA_COMMANDS = {{
                                                                               {"@TG:43", "STATISTIC", "MAINTENANCECOUNTER"},
                                                                               {"@TG:C0", "STATISTIC", "MAINTENANCEPERCENT"}}};
 
+std::optional<size_t> expected_machine_data_payload_size(const std::string &command) {
+  if (command == "@TR:32") {
+    return 21;
+  }
+  if (command == "@TG:43" || command == "@TG:C0") {
+    return 13;
+  }
+  return std::nullopt;
+}
+
 std::string slugify(const std::string &value) {
   std::string result;
   result.reserve(value.size());
@@ -1358,7 +1368,20 @@ void JuraComponent::process_machine_data_query() {
     return;
   }
 
+  auto fail_current_query = [&]() {
+    this->machine_data_request_pending_ = false;
+    this->machine_data_request_start_ = 0;
+    this->machine_data_command_index_ = 0;
+    this->machine_data_responses_.clear();
+    this->machine_data_responses_valid_ = false;
+    this->machine_data_query_next_ = esphome::millis() + MACHINE_DATA_QUERY_INTERVAL_MS;
+  };
+
   uint32_t now = esphome::millis();
+
+  if (!this->machine_data_request_pending_ && this->machine_data_command_index_ == 0) {
+    this->machine_data_responses_valid_ = true;
+  }
 
   if (this->machine_data_request_pending_) {
     if (this->machine_data_command_index_ >= MACHINE_DATA_COMMANDS.size()) {
@@ -1371,23 +1394,27 @@ void JuraComponent::process_machine_data_query() {
         if (this->machine_data_responses_.size() != MACHINE_DATA_COMMANDS.size()) {
           this->machine_data_responses_.assign(MACHINE_DATA_COMMANDS.size(), std::string{});
         }
+        auto expected_length = expected_machine_data_payload_size(definition.command);
+        if (expected_length.has_value() && response->size() != expected_length.value()) {
+          ESP_LOGW(TAG,
+                   "Discarding machine data response for command '%s' due to unexpected length (expected %zu byte%s, got %zu).",
+                   definition.command, expected_length.value(), expected_length.value() == 1 ? "" : "s",
+                   response->size());
+          fail_current_query();
+          return;
+        }
         this->machine_data_responses_[this->machine_data_command_index_] = *response;
         ++this->machine_data_command_index_;
         this->machine_data_request_pending_ = false;
         this->machine_data_request_start_ = 0;
       } else {
         if (time_reached(now, this->machine_data_request_start_ + MACHINE_DATA_REQUEST_TIMEOUT_MS)) {
-          ESP_LOGW(TAG, "Timeout while waiting for machine data response to command '%s'.",
-                   definition.command);
-          this->machine_data_request_pending_ = false;
-          this->machine_data_request_start_ = 0;
-          this->machine_data_command_index_ = 0;
-          this->machine_data_responses_.clear();
+          ESP_LOGW(TAG, "Timeout while waiting for machine data response to command '%s'.", definition.command);
+          fail_current_query();
           if (this->machine_data_auto_fields_ || !this->machine_data_field_sensors_.empty() ||
               !this->machine_data_numeric_field_sensors_.empty()) {
             this->machine_data_field_values_.clear();
           }
-          this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
         }
         return;
       }
@@ -1415,11 +1442,33 @@ void JuraComponent::process_machine_data_query() {
       this->machine_data_request_pending_ = true;
       return;
     }
+    auto expected_length = expected_machine_data_payload_size(definition.command);
+    if (expected_length.has_value() && response->size() != expected_length.value()) {
+      ESP_LOGW(TAG,
+               "Discarding machine data response for command '%s' due to unexpected length (expected %zu byte%s, got %zu).",
+               definition.command, expected_length.value(), expected_length.value() == 1 ? "" : "s",
+               response->size());
+      fail_current_query();
+      if (this->machine_data_auto_fields_ || !this->machine_data_field_sensors_.empty() ||
+          !this->machine_data_numeric_field_sensors_.empty()) {
+        this->machine_data_field_values_.clear();
+      }
+      return;
+    }
     this->machine_data_responses_[this->machine_data_command_index_] = *response;
     ++this->machine_data_command_index_;
   }
 
   if (this->machine_data_command_index_ >= MACHINE_DATA_COMMANDS.size()) {
+    if (!this->machine_data_responses_valid_) {
+      ESP_LOGW(TAG, "Skipping machine data publish due to invalid responses.");
+      this->machine_data_responses_.clear();
+      this->machine_data_request_pending_ = false;
+      this->machine_data_request_start_ = 0;
+      this->machine_data_command_index_ = 0;
+      this->machine_data_query_next_ = esphome::millis() + MACHINE_DATA_QUERY_INTERVAL_MS;
+      return;
+    }
     bool collect_fields = this->machine_data_auto_fields_ || !this->machine_data_field_sensors_.empty() ||
                           !this->machine_data_numeric_field_sensors_.empty();
     MachineDataFieldMap field_values;

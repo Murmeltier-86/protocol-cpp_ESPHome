@@ -320,31 +320,23 @@ bool JuttaConnection::write_xml_unsafe(const std::vector<uint8_t>& data) const {
     std::vector<uint8_t> escaped;
     db_escape(data, escaped);
 
-    if (!escaped.empty()) {
-        ESP_LOGVV(TAG, "Escaped XML payload (%zu byte%s): %s", escaped.size(), escaped.size() == 1 ? "" : "s",
-                  format_hex(escaped).c_str());
+    std::vector<uint8_t> frame;
+    frame.reserve(escaped.size() + JUTTA_XML_TERMINATOR.size());
+    frame.insert(frame.end(), escaped.begin(), escaped.end());
+    frame.insert(frame.end(), JUTTA_XML_TERMINATOR.begin(), JUTTA_XML_TERMINATOR.end());
+
+    ESP_LOGD(TAG, "Transmitting XML frame (%zu byte%s encoded): %s", frame.size(), frame.size() == 1 ? "" : "s",
+             format_hex(frame).c_str());
+
+    bool result = serial.write_serial_buffer(frame);
+    if (!result) {
+        ESP_LOGE(TAG, "Failed to write XML frame to UART.");
+        return false;
     }
 
-    bool result = true;
-    for (uint8_t byte : escaped) {
-        if (!serial.write_serial_byte(byte)) {
-            ESP_LOGE(TAG, "Failed to write escaped XML byte 0x%02X to UART.", byte);
-            result = false;
-        }
-    }
-
-    if (!JUTTA_XML_TERMINATOR.empty()) {
-        ESP_LOGVV(TAG, "Appending XML terminator: %s", format_hex(JUTTA_XML_TERMINATOR).c_str());
-    }
-    for (uint8_t terminator_byte : JUTTA_XML_TERMINATOR) {
-        if (!serial.write_serial_byte(terminator_byte)) {
-            ESP_LOGE(TAG, "Failed to write XML terminator byte 0x%02X to UART.", terminator_byte);
-            result = false;
-        }
-    }
     serial.flush();
     wait_for_jutta_gap();
-    return result;
+    return true;
 }
 
 bool JuttaConnection::write_plain_unsafe(const std::string& data) const {
