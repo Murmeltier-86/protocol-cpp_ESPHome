@@ -417,6 +417,16 @@ void format_node_recursive(const MachineDataNode &node, std::string &out, int in
   }
 }
 
+void collect_text_recursive(const MachineDataNode &node, std::string &out) {
+  if (is_text_node(node)) {
+    out.append(node.text);
+    return;
+  }
+  for (const auto &child : node.children) {
+    collect_text_recursive(child, out);
+  }
+}
+
 }  // namespace
 
 const MachineDataNode *MachineDataNode::find_child_case_insensitive(const std::string &name) const {
@@ -430,6 +440,22 @@ const MachineDataNode *MachineDataNode::find_child_case_insensitive(const std::s
     }
   }
   return nullptr;
+}
+
+std::optional<std::string> MachineDataNode::get_attribute_case_insensitive(const std::string &name) const {
+  std::string target = to_upper(name);
+  for (const auto &attribute : this->attributes) {
+    if (to_upper(attribute.first) == target) {
+      return attribute.second;
+    }
+  }
+  return std::nullopt;
+}
+
+std::string MachineDataNode::collect_text_content() const {
+  std::string text;
+  collect_text_recursive(*this, text);
+  return text;
 }
 
 std::optional<MachineDataNode> MachineDataParser::parse(const std::string &input) {

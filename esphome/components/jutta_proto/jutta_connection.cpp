@@ -17,7 +17,7 @@ namespace jutta_proto {
 static const char* TAG = "jutta_connection";
 
 namespace {
-constexpr uint32_t JUTTA_SERIAL_GAP_MS = 8;
+constexpr uint32_t JUTTA_SERIAL_GAP_MS = 30;
 constexpr uint8_t JUTTA_ENCODE_BASE = 0xFF;
 constexpr uint8_t JUTTA_BIT0_MASK = static_cast<uint8_t>(1u << 2);
 constexpr uint8_t JUTTA_BIT1_MASK = static_cast<uint8_t>(1u << 5);
@@ -698,6 +698,7 @@ std::shared_ptr<std::string> JuttaConnection::write_xml_with_response(
     }
     if (!this->xml_wait_context_.active) {
         flush_serial_input();
+        wait_for_jutta_gap();
         this->xml_wait_context_.raw_buffer.clear();
         std::vector<uint8_t> bytes(data.begin(), data.end());
         if (!write_xml_unsafe(bytes)) {
