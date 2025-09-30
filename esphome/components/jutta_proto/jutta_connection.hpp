@@ -120,6 +120,11 @@ class JuttaConnection {
     void reset_response_line_buffer();
 
     /**
+     * Discards any pending UART input data and buffered decoded bytes.
+     */
+    void flush_serial_input() const;
+
+    /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
      * [Thread Safe]
      **/
@@ -218,8 +223,6 @@ class JuttaConnection {
      * Not thread safe!
      **/
     [[nodiscard]] bool read_decoded_unsafe(std::vector<uint8_t>& data) const;
-
-    void flush_serial_input() const;
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
