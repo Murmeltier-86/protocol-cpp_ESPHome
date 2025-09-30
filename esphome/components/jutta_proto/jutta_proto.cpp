@@ -187,6 +187,17 @@ constexpr std::array<const char *, 6> MAINTENANCE_COUNTER_NAMES = {{"Cleaning", 
 
 constexpr std::array<const char *, 3> MAINTENANCE_PERCENT_NAMES = {{"Cleaning", "FilterChange", "Decalc"}};
 
+float decode_percent_fixed_point(uint32_t raw_value) {
+  constexpr float SCALE = 65536.0f;  // Q16.16 fixed-point scaling factor.
+  return raw_value / SCALE;
+}
+
+std::string format_percent_value(float value) {
+  std::ostringstream stream;
+  stream << std::fixed << std::setprecision(1) << value;
+  return stream.str();
+}
+
 uint16_t read_u16_be(const uint8_t *ptr) {
   return static_cast<uint16_t>((static_cast<uint16_t>(ptr[0]) << 8) |
                                static_cast<uint16_t>(ptr[1]));
@@ -327,14 +338,16 @@ std::optional<std::string> format_maintenance_percent_payload(const std::string 
 
   for (size_t i = 0; i < value_count; ++i) {
     uint32_t raw_value = read_u32_be(&data[value_offset + i * 4]);
+    float percent = decode_percent_fixed_point(raw_value);
     const char *name = i < MAINTENANCE_PERCENT_NAMES.size() ? MAINTENANCE_PERCENT_NAMES[i] : nullptr;
     stream << "; ";
     if (name != nullptr) {
-      stream << name << " Raw32";
+      stream << name << " Percent=" << std::fixed << std::setprecision(1) << percent;
+      stream << " (Raw=" << raw_value << ")";
     } else {
-      stream << "Value" << (i + 1) << " Raw32";
+      stream << "Value" << (i + 1) << " Percent=" << std::fixed << std::setprecision(1) << percent;
+      stream << " (Raw=" << raw_value << ")";
     }
-    stream << '=' << raw_value;
   }
 
   return stream.str();
@@ -368,18 +381,30 @@ MachineDataFieldList parse_maintenance_percent_fields(const std::string &payload
       break;
     }
     uint32_t raw_value = read_u32_be(&data[index]);
+    float percent = decode_percent_fixed_point(raw_value);
+    std::string percent_text = format_percent_value(percent);
     std::ostringstream raw_stream;
     raw_stream << raw_value;
     const char *name = i < MAINTENANCE_PERCENT_NAMES.size() ? MAINTENANCE_PERCENT_NAMES[i] : nullptr;
     std::string field_name;
     if (name != nullptr) {
-      field_name = std::string(name) + " Raw32";
+      field_name = std::string(name) + " Percent";
     } else {
       std::ostringstream fallback_name;
-      fallback_name << "Value" << (i + 1) << " Raw32";
+      fallback_name << "Value" << (i + 1) << " Percent";
       field_name = fallback_name.str();
     }
-    fields.push_back({field_name, raw_stream.str(), static_cast<float>(raw_value), ""});
+    fields.push_back({field_name, percent_text, percent, "%"});
+
+    std::string raw_field_name;
+    if (name != nullptr) {
+      raw_field_name = std::string(name) + " Raw";
+    } else {
+      std::ostringstream fallback_name;
+      fallback_name << "Value" << (i + 1) << " Raw";
+      raw_field_name = fallback_name.str();
+    }
+    fields.push_back({raw_field_name, raw_stream.str(), static_cast<float>(raw_value), ""});
   }
 
   return fields;
@@ -950,7 +975,8 @@ void JuraComponent::initialize_machine_data_field_sensors_() {
     } else if (definition.command == std::string("@TG:C0")) {
       register_text_field("Header", slugify("Header"));
       for (const auto *name : MAINTENANCE_PERCENT_NAMES) {
-        register_numeric_field(std::string(name) + " Raw32", slugify(std::string(name) + " Raw32"), "");
+        register_numeric_field(std::string(name) + " Percent", slugify(std::string(name) + " Percent"), "%");
+        register_numeric_field(std::string(name) + " Raw", slugify(std::string(name) + " Raw"), "");
       }
     }
 
