@@ -219,26 +219,21 @@ uint32_t read_u32_be(const uint8_t *ptr) {
 }
 
 std::optional<std::string> format_product_counter_payload(const std::string &payload) {
-  if (payload.size() != 20 && payload.size() != 21) {
+  if (payload.size() != 21) {
     return std::nullopt;
   }
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
-  bool has_header = payload.size() == 21;
-  size_t value_offset = has_header ? 1 : 0;
+  size_t value_offset = 1;
   if (payload.size() - value_offset < PRODUCT_COUNTER_DEFINITIONS.size() * 2) {
     return std::nullopt;
   }
 
-  uint8_t header = has_header ? data[0] : 0;
+  uint8_t header = data[0];
 
   std::ostringstream stream;
-  if (has_header) {
-    stream << "header=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
-           << static_cast<int>(header) << std::dec;
-  } else {
-    stream << "header=(absent)";
-  }
+  stream << "header=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+         << static_cast<int>(header) << std::dec;
 
   for (size_t i = 0; i < PRODUCT_COUNTER_DEFINITIONS.size(); ++i) {
     uint16_t value = read_u16_be(&data[value_offset + i * 2]);
@@ -254,26 +249,21 @@ std::optional<std::string> format_product_counter_payload(const std::string &pay
 
 MachineDataFieldList parse_product_counter_fields(const std::string &payload) {
   MachineDataFieldList fields;
-  if (payload.size() != 20 && payload.size() != 21) {
+  if (payload.size() != 21) {
     return fields;
   }
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
-  bool has_header = payload.size() == 21;
-  size_t value_offset = has_header ? 1 : 0;
+  size_t value_offset = 1;
   if (payload.size() - value_offset < PRODUCT_COUNTER_DEFINITIONS.size() * 2) {
     return fields;
   }
 
-  if (has_header) {
-    uint8_t header = data[0];
-    std::ostringstream header_stream;
-    header_stream << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
-                  << static_cast<int>(header);
-    fields.push_back({"Header", header_stream.str(), std::nullopt, ""});
-  } else {
-    fields.push_back({"Header", "(absent)", std::nullopt, ""});
-  }
+  uint8_t header = data[0];
+  std::ostringstream header_stream;
+  header_stream << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+                << static_cast<int>(header);
+  fields.push_back({"Header", header_stream.str(), std::nullopt, ""});
 
   for (size_t i = 0; i < PRODUCT_COUNTER_DEFINITIONS.size(); ++i) {
     uint16_t value = read_u16_be(&data[value_offset + i * 2]);
@@ -328,28 +318,18 @@ MachineDataFieldList parse_maintenance_counter_fields(const std::string &payload
 }
 
 std::optional<std::string> format_maintenance_percent_payload(const std::string &payload) {
-  if (payload.empty()) {
+  if (payload.size() != 13) {
     return std::nullopt;
   }
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
-
-  size_t header_size = 1;
-  if (payload.size() >= 2 && (payload.size() % 4) == 2) {
-    header_size = 2;
-  }
-  if (payload.size() < header_size) {
-    return std::nullopt;
-  }
-
-  uint16_t header = header_size == 2 ? read_u16_be(data) : static_cast<uint16_t>(data[0]);
-  size_t value_offset = header_size;
-  size_t values_bytes = payload.size() - value_offset;
-  size_t value_count = values_bytes / 4;
+  uint8_t header = data[0];
+  size_t value_offset = 1;
+  constexpr size_t value_count = 3;
 
   std::ostringstream stream;
-  stream << "header=0x" << std::uppercase << std::hex << std::setfill('0')
-         << std::setw(static_cast<int>(header_size * 2)) << header << std::dec;
+  stream << "header=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+         << static_cast<int>(header) << std::dec;
 
   for (size_t i = 0; i < value_count; ++i) {
     uint32_t raw_value = read_u32_be(&data[value_offset + i * 4]);
@@ -380,34 +360,21 @@ std::optional<std::string> format_maintenance_percent_payload(const std::string 
 
 MachineDataFieldList parse_maintenance_percent_fields(const std::string &payload) {
   MachineDataFieldList fields;
-  if (payload.empty()) {
+  if (payload.size() != 13) {
     return fields;
   }
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
-  size_t header_size = 1;
-  if (payload.size() >= 2 && (payload.size() % 4) == 2) {
-    header_size = 2;
-  }
-  if (payload.size() < header_size) {
-    return fields;
-  }
-
-  uint16_t header = header_size == 2 ? read_u16_be(data) : static_cast<uint16_t>(data[0]);
-  size_t value_offset = header_size;
+  uint8_t header = data[0];
+  size_t value_offset = 1;
 
   std::ostringstream header_stream;
-  header_stream << "0x" << std::uppercase << std::hex << std::setfill('0')
-                << std::setw(static_cast<int>(header_size * 2)) << header;
+  header_stream << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+                << static_cast<int>(header);
   fields.push_back({"Header", header_stream.str(), std::nullopt, ""});
 
-  size_t values_bytes = payload.size() - value_offset;
-  size_t value_count = values_bytes / 4;
-  for (size_t i = 0; i < value_count; ++i) {
+  for (size_t i = 0; i < 3; ++i) {
     size_t index = value_offset + i * 4;
-    if (index + 3 >= payload.size()) {
-      break;
-    }
     uint32_t raw_value = read_u32_be(&data[index]);
     uint16_t auxiliary_value = decode_percent_auxiliary(raw_value);
     float percent = decode_percent_fixed_point(raw_value);

@@ -300,7 +300,7 @@ class JuttaConnection {
         bool active{false};
         std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
         uint32_t start_time{0};
-        std::vector<uint8_t> encoded_buffer{};
+        std::vector<uint8_t> encoded_buffer{};  // Accumulates raw DB-encoded bytes until a full frame arrives.
     };
 
     XmlWaitContext xml_wait_context_{};
