@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -12,6 +13,7 @@
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
+#include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/uart/uart.h"
 
@@ -56,6 +58,15 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     this->machine_data_field_prefix_ = prefix;
   }
   void add_machine_data_field_sensor(const std::string &key, text_sensor::TextSensor *sensor);
+  void add_machine_data_field_sensor(const std::string &key, sensor::Sensor *sensor);
+
+  struct MachineDataFieldValue {
+    std::vector<std::string> labels;
+    std::string text_value;
+    std::optional<float> numeric_value;
+    std::string unit;
+  };
+  using MachineDataFieldMap = std::map<std::string, MachineDataFieldValue>;
 
  protected:
   enum class HandshakeStage { IDLE, HELLO, SEND_T1, WAIT_T2, SEND_T2, WAIT_T3, SEND_T3, DONE, FAILED };
@@ -69,9 +80,12 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void process_machine_data_query();
   bool has_machine_data_subscribers_() const;
   void publish_machine_data_(const std::string &response);
-  void publish_machine_data_fields_(const std::map<std::string, std::pair<std::vector<std::string>, std::string>> &fields);
+  void publish_machine_data_fields_(const MachineDataFieldMap &fields);
   text_sensor::TextSensor *find_machine_data_field_sensor_(const std::string &key);
-  void register_machine_data_field_sensor_(const std::string &key, const std::vector<std::string> &labels);
+  sensor::Sensor *find_machine_data_numeric_sensor_(const std::string &key);
+  void register_machine_data_text_sensor_(const std::string &key, const std::vector<std::string> &labels);
+  void register_machine_data_numeric_sensor_(const std::string &key, const std::vector<std::string> &labels,
+                                             const std::string &unit);
   std::string make_machine_data_field_name_(const std::vector<std::string> &labels) const;
   std::string make_machine_data_field_unique_id_(const std::string &key) const;
   void initialize_machine_data_field_sensors_();
@@ -95,8 +109,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool machine_data_auto_fields_{false};
   std::string machine_data_field_prefix_{""};
   std::map<std::string, text_sensor::TextSensor *> machine_data_field_sensors_;
+  std::map<std::string, sensor::Sensor *> machine_data_numeric_field_sensors_;
   std::set<std::string> machine_data_field_user_keys_;
-  std::map<std::string, std::pair<std::vector<std::string>, std::string>> machine_data_field_values_;
+  std::set<std::string> machine_data_numeric_field_user_keys_;
+  MachineDataFieldMap machine_data_field_values_;
   uint32_t machine_data_query_next_{0};
   bool machine_data_request_pending_{false};
   uint32_t machine_data_request_start_{0};

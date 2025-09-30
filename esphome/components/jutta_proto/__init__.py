@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
-from esphome.components import text_sensor, uart
+from esphome.components import sensor, text_sensor, uart
 from esphome.const import CONF_ID
 
 DEPENDENCIES = ["uart"]
@@ -19,6 +19,8 @@ CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
+CONF_MACHINE_DATA_SENSOR = "sensor"
+CONF_MACHINE_DATA_TEXT_SENSOR = "text_sensor"
 CONF_MACHINE_DATA_STATISTICS = "statistics"
 CONF_MACHINE_DATA_ERRORS = "errors"
 CONF_MACHINE_DATA_STATUS = "status"
@@ -38,12 +40,25 @@ MACHINE_DATA_SECTION_KEYS = [
 
 DEFAULT_MACHINE_DATA_FIELD_PREFIX = ""
 
-MACHINE_DATA_SENSOR_SCHEMA = cv.Any(
+MACHINE_DATA_TEXT_SENSOR_SCHEMA = cv.Any(
     text_sensor.text_sensor_schema(),
     cv.use_id(text_sensor.TextSensor),
 )
 
-MACHINE_DATA_FIELD_MAP_SCHEMA = cv.Schema({cv.string: MACHINE_DATA_SENSOR_SCHEMA})
+MACHINE_DATA_NUMERIC_SENSOR_SCHEMA = cv.Any(
+    sensor.sensor_schema(),
+    cv.use_id(sensor.Sensor),
+)
+
+MACHINE_DATA_FIELD_MAP_SCHEMA = cv.Schema(
+    {
+        cv.string: cv.Any(
+            cv.Schema({cv.Required(CONF_MACHINE_DATA_SENSOR): MACHINE_DATA_NUMERIC_SENSOR_SCHEMA}),
+            cv.Schema({cv.Required(CONF_MACHINE_DATA_TEXT_SENSOR): MACHINE_DATA_TEXT_SENSOR_SCHEMA}),
+            MACHINE_DATA_TEXT_SENSOR_SCHEMA,
+        )
+    }
+)
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -112,14 +127,14 @@ JURA_COMPONENT_IDS = []
 
 
 MACHINE_DATA_CONFIG_SCHEMA = cv.Any(
-    MACHINE_DATA_SENSOR_SCHEMA,
+    MACHINE_DATA_TEXT_SENSOR_SCHEMA,
     cv.Schema(
         {
-            cv.Optional(CONF_MACHINE_DATA_STATISTICS): MACHINE_DATA_SENSOR_SCHEMA,
-            cv.Optional(CONF_MACHINE_DATA_ERRORS): MACHINE_DATA_SENSOR_SCHEMA,
-            cv.Optional(CONF_MACHINE_DATA_STATUS): MACHINE_DATA_SENSOR_SCHEMA,
-            cv.Optional(CONF_MACHINE_DATA_PROCESSES): MACHINE_DATA_SENSOR_SCHEMA,
-            cv.Optional(CONF_MACHINE_DATA_RAW): MACHINE_DATA_SENSOR_SCHEMA,
+            cv.Optional(CONF_MACHINE_DATA_STATISTICS): MACHINE_DATA_TEXT_SENSOR_SCHEMA,
+            cv.Optional(CONF_MACHINE_DATA_ERRORS): MACHINE_DATA_TEXT_SENSOR_SCHEMA,
+            cv.Optional(CONF_MACHINE_DATA_STATUS): MACHINE_DATA_TEXT_SENSOR_SCHEMA,
+            cv.Optional(CONF_MACHINE_DATA_PROCESSES): MACHINE_DATA_TEXT_SENSOR_SCHEMA,
+            cv.Optional(CONF_MACHINE_DATA_RAW): MACHINE_DATA_TEXT_SENSOR_SCHEMA,
             cv.Optional(CONF_MACHINE_DATA_AUTO_FIELDS, default=False): cv.boolean,
             cv.Optional(
                 CONF_MACHINE_DATA_FIELD_PREFIX, default=DEFAULT_MACHINE_DATA_FIELD_PREFIX
@@ -291,10 +306,28 @@ async def to_code(config):
         else:
             field_mappings_cfg = {}
 
-        async def _resolve_machine_data_sensor(cfg):
+        async def _resolve_machine_data_text_sensor(cfg):
             if isinstance(cfg, dict):
                 return await text_sensor.new_text_sensor(cfg)
             return await cg.get_variable(cfg)
+
+        async def _resolve_machine_data_field_sensor(cfg):
+            if isinstance(cfg, dict):
+                if CONF_MACHINE_DATA_SENSOR in cfg:
+                    inner = cfg[CONF_MACHINE_DATA_SENSOR]
+                    if isinstance(inner, dict):
+                        return await sensor.new_sensor(inner), True
+                    return await cg.get_variable(inner), True
+                if CONF_MACHINE_DATA_TEXT_SENSOR in cfg:
+                    inner = cfg[CONF_MACHINE_DATA_TEXT_SENSOR]
+                    if isinstance(inner, dict):
+                        return await text_sensor.new_text_sensor(inner), False
+                    return await cg.get_variable(inner), False
+                try:
+                    return await text_sensor.new_text_sensor(cfg), False
+                except cv.Invalid:
+                    return await sensor.new_sensor(cfg), True
+            return await cg.get_variable(cfg), False
 
         machine_data_sensor_cfg = None
         if isinstance(machine_data_cfg, dict):
@@ -313,43 +346,46 @@ async def to_code(config):
             key in machine_data_cfg for key in MACHINE_DATA_SECTION_KEYS
         ):
             if CONF_MACHINE_DATA_STATISTICS in machine_data_cfg:
-                sensor = await _resolve_machine_data_sensor(
+                sensor = await _resolve_machine_data_text_sensor(
                     machine_data_cfg[CONF_MACHINE_DATA_STATISTICS]
                 )
                 cg.add(var.set_machine_data_statistic_sensor(sensor))
             if CONF_MACHINE_DATA_ERRORS in machine_data_cfg:
-                sensor = await _resolve_machine_data_sensor(
+                sensor = await _resolve_machine_data_text_sensor(
                     machine_data_cfg[CONF_MACHINE_DATA_ERRORS]
                 )
                 cg.add(var.set_machine_data_errors_sensor(sensor))
             if CONF_MACHINE_DATA_STATUS in machine_data_cfg:
-                sensor = await _resolve_machine_data_sensor(
+                sensor = await _resolve_machine_data_text_sensor(
                     machine_data_cfg[CONF_MACHINE_DATA_STATUS]
                 )
                 cg.add(var.set_machine_data_status_sensor(sensor))
             if CONF_MACHINE_DATA_PROCESSES in machine_data_cfg:
-                sensor = await _resolve_machine_data_sensor(
+                sensor = await _resolve_machine_data_text_sensor(
                     machine_data_cfg[CONF_MACHINE_DATA_PROCESSES]
                 )
                 cg.add(var.set_machine_data_processes_sensor(sensor))
             if CONF_MACHINE_DATA_RAW in machine_data_cfg:
-                sensor = await _resolve_machine_data_sensor(
+                sensor = await _resolve_machine_data_text_sensor(
                     machine_data_cfg[CONF_MACHINE_DATA_RAW]
                 )
                 cg.add(var.set_machine_data_sensor(sensor))
         elif not isinstance(machine_data_cfg, dict):
-            sensor = await _resolve_machine_data_sensor(machine_data_cfg)
+            sensor = await _resolve_machine_data_text_sensor(machine_data_cfg)
             cg.add(var.set_machine_data_sensor(sensor))
         elif machine_data_sensor_cfg:
-            sensor = await _resolve_machine_data_sensor(machine_data_sensor_cfg)
+            sensor = await _resolve_machine_data_text_sensor(machine_data_sensor_cfg)
             cg.add(var.set_machine_data_sensor(sensor))
 
         cg.add(var.set_machine_data_auto_fields(auto_fields))
         cg.add(var.set_machine_data_field_prefix(cg.std_string(field_prefix)))
 
         for key, sensor_cfg in field_mappings_cfg.items():
-            sensor = await _resolve_machine_data_sensor(sensor_cfg)
-            cg.add(var.add_machine_data_field_sensor(cg.std_string(key), sensor))
+            sensor_var, is_numeric = await _resolve_machine_data_field_sensor(sensor_cfg)
+            if is_numeric:
+                cg.add(var.add_machine_data_field_sensor(cg.std_string(key), sensor_var))
+            else:
+                cg.add(var.add_machine_data_field_sensor(cg.std_string(key), sensor_var))
 
 
 async def _get_parent(config):
