@@ -121,7 +121,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t machine_data_request_start_{0};
   size_t machine_data_command_index_{0};
   std::vector<std::string> machine_data_responses_;
-  bool machine_data_response_invalid_{false};
 };
 
 class StartBrewAction : public esphome::Action<> {

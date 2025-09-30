@@ -426,27 +426,6 @@ MachineDataFieldList parse_machine_data_fields(const std::string &command, const
   return {};
 }
 
-std::optional<size_t> expected_machine_data_payload_size(const std::string &command) {
-  if (command == std::string("@TR:32")) {
-    return 21;  // 1 header + 10 * u16 (big-endian)
-  }
-  if (command == std::string("@TG:43")) {
-    return 13;  // 1 header + 6 * u16 (big-endian)
-  }
-  if (command == std::string("@TG:C0")) {
-    return 13;  // 1 header + 3 * u32 (big-endian)
-  }
-  return std::nullopt;
-}
-
-bool is_machine_data_payload_length_valid(const std::string &command, const std::string &payload) {
-  auto expected = expected_machine_data_payload_size(command);
-  if (!expected.has_value()) {
-    return true;
-  }
-  return payload.size() == expected.value();
-}
-
 std::string to_upper_hex(const std::string &value) {
   if (value.empty()) {
     return "";
@@ -1392,18 +1371,7 @@ void JuraComponent::process_machine_data_query() {
         if (this->machine_data_responses_.size() != MACHINE_DATA_COMMANDS.size()) {
           this->machine_data_responses_.assign(MACHINE_DATA_COMMANDS.size(), std::string{});
         }
-        if (!is_machine_data_payload_length_valid(definition.command, *response)) {
-          auto expected = expected_machine_data_payload_size(definition.command);
-          std::string expected_text = expected.has_value() ? std::to_string(expected.value()) : std::string("unknown");
-          ESP_LOGW(TAG,
-                   "Discarding machine data response for '%s' due to unexpected length (%zu byte%s decoded, expected %s).",
-                   definition.command.c_str(), response->size(), response->size() == 1 ? "" : "s",
-                   expected_text.c_str());
-          this->machine_data_responses_[this->machine_data_command_index_].clear();
-          this->machine_data_response_invalid_ = true;
-        } else {
-          this->machine_data_responses_[this->machine_data_command_index_] = *response;
-        }
+        this->machine_data_responses_[this->machine_data_command_index_] = *response;
         ++this->machine_data_command_index_;
         this->machine_data_request_pending_ = false;
         this->machine_data_request_start_ = 0;
@@ -1419,7 +1387,6 @@ void JuraComponent::process_machine_data_query() {
               !this->machine_data_numeric_field_sensors_.empty()) {
             this->machine_data_field_values_.clear();
           }
-          this->machine_data_response_invalid_ = false;
           this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
         }
         return;
@@ -1435,7 +1402,6 @@ void JuraComponent::process_machine_data_query() {
     if (this->machine_data_responses_.size() != MACHINE_DATA_COMMANDS.size()) {
       this->machine_data_responses_.assign(MACHINE_DATA_COMMANDS.size(), std::string{});
     }
-    this->machine_data_response_invalid_ = false;
   }
 
   while (this->machine_data_command_index_ < MACHINE_DATA_COMMANDS.size()) {
@@ -1454,21 +1420,6 @@ void JuraComponent::process_machine_data_query() {
   }
 
   if (this->machine_data_command_index_ >= MACHINE_DATA_COMMANDS.size()) {
-    if (this->machine_data_response_invalid_) {
-      ESP_LOGW(TAG, "Skipping machine data publish because a response had an unexpected length.");
-      if (this->machine_data_auto_fields_ || !this->machine_data_field_sensors_.empty() ||
-          !this->machine_data_numeric_field_sensors_.empty()) {
-        this->machine_data_field_values_.clear();
-      }
-      this->machine_data_responses_.clear();
-      this->machine_data_request_pending_ = false;
-      this->machine_data_request_start_ = 0;
-      this->machine_data_command_index_ = 0;
-      this->machine_data_response_invalid_ = false;
-      this->machine_data_query_next_ = esphome::millis() + MACHINE_DATA_QUERY_INTERVAL_MS;
-      return;
-    }
-
     bool collect_fields = this->machine_data_auto_fields_ || !this->machine_data_field_sensors_.empty() ||
                           !this->machine_data_numeric_field_sensors_.empty();
     MachineDataFieldMap field_values;
@@ -1479,7 +1430,6 @@ void JuraComponent::process_machine_data_query() {
     }
     this->publish_machine_data_(payload);
     this->machine_data_responses_.clear();
-    this->machine_data_response_invalid_ = false;
     this->machine_data_request_pending_ = false;
     this->machine_data_request_start_ = 0;
     this->machine_data_command_index_ = 0;
