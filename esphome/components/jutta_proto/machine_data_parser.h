@@ -15,6 +15,8 @@ struct MachineDataNode {
   std::vector<MachineDataNode> children;
 
   const MachineDataNode *find_child_case_insensitive(const std::string &name) const;
+  std::optional<std::string> get_attribute_case_insensitive(const std::string &name) const;
+  std::string collect_text_content() const;
 };
 
 class MachineDataParser {

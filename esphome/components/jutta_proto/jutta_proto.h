@@ -121,6 +121,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t machine_data_request_start_{0};
   size_t machine_data_command_index_{0};
   std::vector<std::string> machine_data_responses_;
+  std::vector<std::string> machine_data_payloads_;
+  std::vector<bool> machine_data_payload_ready_;
+  bool machine_data_query_has_error_{false};
   bool machine_data_responses_valid_{true};
 };
 

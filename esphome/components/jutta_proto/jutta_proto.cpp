@@ -25,7 +25,8 @@ static const char *const TAG = "jutta_proto";
 
 constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
-constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
+constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 4500;
+constexpr uint32_t MACHINE_DATA_PRE_REQUEST_GAP_MS = 30;
 
 template<typename Sensor>
 auto try_set_unique_id(Sensor *sensor, const std::string &unique_id)
@@ -51,6 +52,167 @@ std::optional<size_t> expected_machine_data_payload_size(const std::string &comm
   }
   if (command == "@TG:43" || command == "@TG:C0") {
     return 13;
+  }
+  return std::nullopt;
+}
+
+std::string to_upper_ascii(const std::string &value) {
+  std::string result = value;
+  std::transform(result.begin(), result.end(), result.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+  return result;
+}
+
+bool equals_ignore_case(const std::string &lhs, const std::string &rhs) {
+  return to_upper_ascii(lhs) == to_upper_ascii(rhs);
+}
+
+std::string trim_ascii_whitespace(const std::string &value) {
+  size_t start = 0;
+  while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start])) != 0) {
+    ++start;
+  }
+  size_t end = value.size();
+  while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+    --end;
+  }
+  return value.substr(start, end - start);
+}
+
+int hex_digit_value(char c) {
+  if (c >= '0' && c <= '9') {
+    return c - '0';
+  }
+  if (c >= 'a' && c <= 'f') {
+    return 10 + (c - 'a');
+  }
+  if (c >= 'A' && c <= 'F') {
+    return 10 + (c - 'A');
+  }
+  return -1;
+}
+
+bool decode_hex_string(const std::string &input, std::string &output) {
+  output.clear();
+  std::string sanitized;
+  sanitized.reserve(input.size());
+  for (unsigned char c : input) {
+    if (std::isspace(c) != 0) {
+      continue;
+    }
+    sanitized.push_back(static_cast<char>(c));
+  }
+  if (sanitized.size() % 2 != 0) {
+    return false;
+  }
+  output.reserve(sanitized.size() / 2);
+  for (size_t i = 0; i < sanitized.size(); i += 2) {
+    int high = hex_digit_value(sanitized[i]);
+    int low = hex_digit_value(sanitized[i + 1]);
+    if (high < 0 || low < 0) {
+      return false;
+    }
+    output.push_back(static_cast<char>((high << 4) | low));
+  }
+  return true;
+}
+
+const MachineDataNode *find_descendant_case_insensitive(const MachineDataNode &node, const std::string &name) {
+  if (equals_ignore_case(node.name, name)) {
+    return &node;
+  }
+  for (const auto &child : node.children) {
+    if (child.name == "#text") {
+      continue;
+    }
+    if (auto *match = find_descendant_case_insensitive(child, name)) {
+      return match;
+    }
+  }
+  return nullptr;
+}
+
+std::optional<std::string> extract_machine_data_payload(const MachineDataNode &machine_data_root,
+                                                        const MachineDataCommandDefinition &definition,
+                                                        std::string *encoding_out, std::string *error_out) {
+  if (error_out != nullptr) {
+    *error_out = "";
+  }
+
+  const MachineDataNode *section = machine_data_root.find_child_case_insensitive(definition.section);
+  if (section == nullptr) {
+    if (error_out != nullptr) {
+      *error_out = "section missing";
+    }
+    return std::nullopt;
+  }
+
+  const MachineDataNode *element = section->find_child_case_insensitive(definition.element);
+  if (element == nullptr) {
+    if (error_out != nullptr) {
+      *error_out = "element missing";
+    }
+    return std::nullopt;
+  }
+
+  bool command_mismatch = false;
+  if (auto command_attr = element->get_attribute_case_insensitive("command"); command_attr.has_value()) {
+    if (!equals_ignore_case(command_attr.value(), definition.command)) {
+      command_mismatch = true;
+    }
+  }
+
+  const MachineDataNode *payload_node = element;
+  auto encoding_attr = payload_node->get_attribute_case_insensitive("encoding");
+  if (!encoding_attr.has_value()) {
+    for (const auto &child : element->children) {
+      if (child.name == "#text") {
+        continue;
+      }
+      auto child_encoding = child.get_attribute_case_insensitive("encoding");
+      if (child_encoding.has_value()) {
+        payload_node = &child;
+        encoding_attr = child_encoding;
+        break;
+      }
+    }
+  }
+
+  if (!encoding_attr.has_value()) {
+    if (error_out != nullptr) {
+      *error_out = "encoding attribute missing";
+    }
+    return std::nullopt;
+  }
+
+  std::string encoding = encoding_attr.value();
+  if (encoding_out != nullptr) {
+    *encoding_out = encoding;
+  }
+
+  std::string text = trim_ascii_whitespace(payload_node->collect_text_content());
+  if (equals_ignore_case(encoding, "hex")) {
+    std::string decoded;
+    if (!decode_hex_string(text, decoded)) {
+      if (error_out != nullptr) {
+        *error_out = "invalid hex payload";
+      }
+      return std::nullopt;
+    }
+    if (command_mismatch && error_out != nullptr) {
+      *error_out = "command attribute mismatch";
+    }
+    return decoded;
+  }
+  if (equals_ignore_case(encoding, "text")) {
+    if (command_mismatch && error_out != nullptr) {
+      *error_out = "command attribute mismatch";
+    }
+    return text;
+  }
+
+  if (error_out != nullptr) {
+    *error_out = "unsupported encoding";
   }
   return std::nullopt;
 }
@@ -1352,10 +1514,21 @@ void JuraComponent::process_machine_data_query() {
   if (!this->has_machine_data_subscribers_()) {
     return;
   }
+  bool has_field_subscribers = this->machine_data_auto_fields_ || !this->machine_data_field_sensors_.empty() ||
+                               !this->machine_data_numeric_field_sensors_.empty();
   if (!this->is_ready()) {
     this->machine_data_request_pending_ = false;
     this->machine_data_request_start_ = 0;
     this->machine_data_command_index_ = 0;
+    this->machine_data_responses_valid_ = false;
+    this->machine_data_query_has_error_ = false;
+    this->machine_data_responses_.clear();
+    this->machine_data_payloads_.clear();
+    this->machine_data_payload_ready_.clear();
+    if (has_field_subscribers) {
+      this->machine_data_field_values_.clear();
+      this->publish_machine_data_fields_(this->machine_data_field_values_);
+    }
     return;
   }
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
@@ -1368,19 +1541,84 @@ void JuraComponent::process_machine_data_query() {
     return;
   }
 
-  auto fail_current_query = [&]() {
+  auto reset_query_state = [&]() {
     this->machine_data_request_pending_ = false;
     this->machine_data_request_start_ = 0;
     this->machine_data_command_index_ = 0;
     this->machine_data_responses_.clear();
-    this->machine_data_responses_valid_ = false;
+    this->machine_data_payloads_.clear();
+    this->machine_data_payload_ready_.clear();
     this->machine_data_query_next_ = esphome::millis() + MACHINE_DATA_QUERY_INTERVAL_MS;
+  };
+
+  auto fail_current_query = [&]() {
+    this->machine_data_query_has_error_ = true;
+    this->machine_data_responses_valid_ = false;
+    reset_query_state();
+  };
+
+  auto handle_machine_data_response = [&](size_t index, const std::string &xml) -> bool {
+    const auto &definition = MACHINE_DATA_COMMANDS[index];
+    auto parsed = MachineDataParser::parse(xml);
+    if (!parsed.has_value()) {
+      ESP_LOGW(TAG, "Failed to parse XML response for command '%s'.", definition.command);
+      return false;
+    }
+    const MachineDataNode *machine_data_node =
+        find_descendant_case_insensitive(parsed.value(), "MACHINE_DATA");
+    if (machine_data_node == nullptr) {
+      ESP_LOGW(TAG, "Response for command '%s' does not contain <MACHINE_DATA> element.", definition.command);
+      return false;
+    }
+
+    std::string encoding;
+    std::string error;
+    auto payload = extract_machine_data_payload(*machine_data_node, definition, &encoding, &error);
+    if (!payload.has_value()) {
+      ESP_LOGW(TAG, "Failed to extract payload for command '%s': %s.", definition.command, error.c_str());
+      return false;
+    }
+    if (!error.empty()) {
+      ESP_LOGW(TAG, "Machine data response for command '%s': %s.", definition.command, error.c_str());
+    }
+
+    if (this->machine_data_payloads_.size() != MACHINE_DATA_COMMANDS.size()) {
+      this->machine_data_payloads_.assign(MACHINE_DATA_COMMANDS.size(), std::string{});
+    }
+    if (this->machine_data_payload_ready_.size() != MACHINE_DATA_COMMANDS.size()) {
+      this->machine_data_payload_ready_.assign(MACHINE_DATA_COMMANDS.size(), false);
+    }
+
+    this->machine_data_payloads_[index] = *payload;
+    this->machine_data_payload_ready_[index] = true;
+
+    auto expected_length = expected_machine_data_payload_size(definition.command);
+    if (expected_length.has_value() && this->machine_data_payloads_[index].size() != expected_length.value()) {
+      ESP_LOGW(TAG,
+               "Machine data payload for command '%s' has unexpected length (expected %zu byte%s, got %zu).",
+               definition.command, expected_length.value(), expected_length.value() == 1 ? "" : "s",
+               this->machine_data_payloads_[index].size());
+    }
+
+    ESP_LOGD(TAG, "Parsed machine data command '%s' (encoding=%s, payload=%zu byte%s).",
+             definition.command, encoding.c_str(), this->machine_data_payloads_[index].size(),
+             this->machine_data_payloads_[index].size() == 1 ? "" : "s");
+    return true;
   };
 
   uint32_t now = esphome::millis();
 
   if (!this->machine_data_request_pending_ && this->machine_data_command_index_ == 0) {
-    this->machine_data_responses_valid_ = true;
+    if (this->machine_data_query_next_ != 0 && !time_reached(now, this->machine_data_query_next_)) {
+      return;
+    }
+    this->machine_data_responses_.assign(MACHINE_DATA_COMMANDS.size(), std::string{});
+    this->machine_data_payloads_.assign(MACHINE_DATA_COMMANDS.size(), std::string{});
+    this->machine_data_payload_ready_.assign(MACHINE_DATA_COMMANDS.size(), false);
+    this->machine_data_query_has_error_ = false;
+    this->machine_data_responses_valid_ = false;
+    this->coffee_maker_->connection->flush_serial_input();
+    esphome::delay(MACHINE_DATA_PRE_REQUEST_GAP_MS);
   }
 
   if (this->machine_data_request_pending_) {
@@ -1391,19 +1629,15 @@ void JuraComponent::process_machine_data_query() {
       auto response = this->coffee_maker_->connection->write_xml_with_response(
           definition.command, std::chrono::milliseconds{MACHINE_DATA_REQUEST_TIMEOUT_MS});
       if (response != nullptr) {
-        if (this->machine_data_responses_.size() != MACHINE_DATA_COMMANDS.size()) {
-          this->machine_data_responses_.assign(MACHINE_DATA_COMMANDS.size(), std::string{});
-        }
-        auto expected_length = expected_machine_data_payload_size(definition.command);
-        if (expected_length.has_value() && response->size() != expected_length.value()) {
-          ESP_LOGW(TAG,
-                   "Discarding machine data response for command '%s' due to unexpected length (expected %zu byte%s, got %zu).",
-                   definition.command, expected_length.value(), expected_length.value() == 1 ? "" : "s",
-                   response->size());
+        this->machine_data_responses_[this->machine_data_command_index_] = *response;
+        if (!handle_machine_data_response(this->machine_data_command_index_, *response)) {
           fail_current_query();
+          if (has_field_subscribers) {
+            this->machine_data_field_values_.clear();
+            this->publish_machine_data_fields_(this->machine_data_field_values_);
+          }
           return;
         }
-        this->machine_data_responses_[this->machine_data_command_index_] = *response;
         ++this->machine_data_command_index_;
         this->machine_data_request_pending_ = false;
         this->machine_data_request_start_ = 0;
@@ -1411,23 +1645,13 @@ void JuraComponent::process_machine_data_query() {
         if (time_reached(now, this->machine_data_request_start_ + MACHINE_DATA_REQUEST_TIMEOUT_MS)) {
           ESP_LOGW(TAG, "Timeout while waiting for machine data response to command '%s'.", definition.command);
           fail_current_query();
-          if (this->machine_data_auto_fields_ || !this->machine_data_field_sensors_.empty() ||
-              !this->machine_data_numeric_field_sensors_.empty()) {
+          if (has_field_subscribers) {
             this->machine_data_field_values_.clear();
+            this->publish_machine_data_fields_(this->machine_data_field_values_);
           }
         }
         return;
       }
-    }
-  }
-
-  if (this->machine_data_command_index_ == 0) {
-    if (this->machine_data_query_next_ != 0 &&
-        !time_reached(now, this->machine_data_query_next_)) {
-      return;
-    }
-    if (this->machine_data_responses_.size() != MACHINE_DATA_COMMANDS.size()) {
-      this->machine_data_responses_.assign(MACHINE_DATA_COMMANDS.size(), std::string{});
     }
   }
 
@@ -1442,47 +1666,43 @@ void JuraComponent::process_machine_data_query() {
       this->machine_data_request_pending_ = true;
       return;
     }
-    auto expected_length = expected_machine_data_payload_size(definition.command);
-    if (expected_length.has_value() && response->size() != expected_length.value()) {
-      ESP_LOGW(TAG,
-               "Discarding machine data response for command '%s' due to unexpected length (expected %zu byte%s, got %zu).",
-               definition.command, expected_length.value(), expected_length.value() == 1 ? "" : "s",
-               response->size());
+    this->machine_data_responses_[this->machine_data_command_index_] = *response;
+    if (!handle_machine_data_response(this->machine_data_command_index_, *response)) {
       fail_current_query();
-      if (this->machine_data_auto_fields_ || !this->machine_data_field_sensors_.empty() ||
-          !this->machine_data_numeric_field_sensors_.empty()) {
+      if (has_field_subscribers) {
         this->machine_data_field_values_.clear();
+        this->publish_machine_data_fields_(this->machine_data_field_values_);
       }
       return;
     }
-    this->machine_data_responses_[this->machine_data_command_index_] = *response;
     ++this->machine_data_command_index_;
   }
 
   if (this->machine_data_command_index_ >= MACHINE_DATA_COMMANDS.size()) {
-    if (!this->machine_data_responses_valid_) {
-      ESP_LOGW(TAG, "Skipping machine data publish due to invalid responses.");
-      this->machine_data_responses_.clear();
-      this->machine_data_request_pending_ = false;
-      this->machine_data_request_start_ = 0;
-      this->machine_data_command_index_ = 0;
-      this->machine_data_query_next_ = esphome::millis() + MACHINE_DATA_QUERY_INTERVAL_MS;
+    bool all_ready = !this->machine_data_payload_ready_.empty() &&
+                     std::all_of(this->machine_data_payload_ready_.begin(),
+                                 this->machine_data_payload_ready_.end(), [](bool ready) { return ready; });
+    if (!all_ready || this->machine_data_query_has_error_) {
+      ESP_LOGW(TAG, "Skipping machine data publish due to incomplete responses.");
+      if (has_field_subscribers) {
+        this->machine_data_field_values_.clear();
+        this->publish_machine_data_fields_(this->machine_data_field_values_);
+      }
+      fail_current_query();
       return;
     }
     bool collect_fields = this->machine_data_auto_fields_ || !this->machine_data_field_sensors_.empty() ||
                           !this->machine_data_numeric_field_sensors_.empty();
     MachineDataFieldMap field_values;
-    std::string payload = build_machine_data_payload(this->machine_data_responses_,
+    std::string payload = build_machine_data_payload(this->machine_data_payloads_,
                                                      collect_fields ? &field_values : nullptr);
     if (collect_fields) {
       this->machine_data_field_values_ = std::move(field_values);
     }
+    this->machine_data_responses_valid_ = true;
     this->publish_machine_data_(payload);
-    this->machine_data_responses_.clear();
-    this->machine_data_request_pending_ = false;
-    this->machine_data_request_start_ = 0;
-    this->machine_data_command_index_ = 0;
-    this->machine_data_query_next_ = esphome::millis() + MACHINE_DATA_QUERY_INTERVAL_MS;
+    this->machine_data_query_has_error_ = false;
+    reset_query_state();
   }
 }
 
