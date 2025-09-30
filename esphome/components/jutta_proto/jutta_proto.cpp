@@ -188,8 +188,18 @@ constexpr std::array<const char *, 6> MAINTENANCE_COUNTER_NAMES = {{"Cleaning", 
 constexpr std::array<const char *, 3> MAINTENANCE_PERCENT_NAMES = {{"Cleaning", "FilterChange", "Decalc"}};
 
 float decode_percent_fixed_point(uint32_t raw_value) {
-  constexpr float SCALE = 65536.0f;  // Q16.16 fixed-point scaling factor.
-  return raw_value / SCALE;
+  // Percentages in the maintenance payload are encoded in the upper 16 bits
+  // using a Q8.8 fixed-point representation. The remaining 16 bits contain an
+  // auxiliary counter that we expose separately as the "Raw" value. The
+  // firmware dump in jura_joe_xml_bundle_final shows values that exceed 0xFFFF,
+  // therefore we cannot treat the 32-bit word as a full Q16.16 number.
+  uint16_t encoded_percent = static_cast<uint16_t>(raw_value >> 16);
+  constexpr float SCALE = 256.0f;  // Q8.8 scaling factor for the encoded part.
+  return static_cast<float>(encoded_percent) / SCALE;
+}
+
+uint16_t decode_percent_auxiliary(uint32_t raw_value) {
+  return static_cast<uint16_t>(raw_value & 0xFFFF);
 }
 
 std::string format_percent_value(float value) {
@@ -318,18 +328,23 @@ MachineDataFieldList parse_maintenance_counter_fields(const std::string &payload
 }
 
 std::optional<std::string> format_maintenance_percent_payload(const std::string &payload) {
-  if (payload.size() != 13 && payload.size() != 14) {
+  if (payload.empty()) {
     return std::nullopt;
   }
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
-  size_t header_size = payload.size() == 14 ? 2 : 1;
+
+  size_t header_size = 1;
+  if (payload.size() >= 2 && (payload.size() % 4) == 2) {
+    header_size = 2;
+  }
+  if (payload.size() < header_size) {
+    return std::nullopt;
+  }
+
   uint16_t header = header_size == 2 ? read_u16_be(data) : static_cast<uint16_t>(data[0]);
   size_t value_offset = header_size;
   size_t values_bytes = payload.size() - value_offset;
-  if (values_bytes % 4 != 0) {
-    return std::nullopt;
-  }
   size_t value_count = values_bytes / 4;
 
   std::ostringstream stream;
@@ -338,15 +353,25 @@ std::optional<std::string> format_maintenance_percent_payload(const std::string 
 
   for (size_t i = 0; i < value_count; ++i) {
     uint32_t raw_value = read_u32_be(&data[value_offset + i * 4]);
+    uint16_t encoded_percent = static_cast<uint16_t>(raw_value >> 16);
+    uint16_t auxiliary_value = decode_percent_auxiliary(raw_value);
     float percent = decode_percent_fixed_point(raw_value);
     const char *name = i < MAINTENANCE_PERCENT_NAMES.size() ? MAINTENANCE_PERCENT_NAMES[i] : nullptr;
     stream << "; ";
     if (name != nullptr) {
       stream << name << " Percent=" << std::fixed << std::setprecision(1) << percent;
-      stream << " (Raw=" << raw_value << ")";
+      stream << " (Encoded=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(4)
+             << encoded_percent << std::dec << "=" << encoded_percent;
+      stream << "; Raw=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(4)
+             << auxiliary_value << std::dec << "=" << auxiliary_value << ")";
+      stream << std::setfill(' ');
     } else {
       stream << "Value" << (i + 1) << " Percent=" << std::fixed << std::setprecision(1) << percent;
-      stream << " (Raw=" << raw_value << ")";
+      stream << " (Encoded=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(4)
+             << encoded_percent << std::dec << "=" << encoded_percent;
+      stream << "; Raw=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(4)
+             << auxiliary_value << std::dec << "=" << auxiliary_value << ")";
+      stream << std::setfill(' ');
     }
   }
 
@@ -355,12 +380,19 @@ std::optional<std::string> format_maintenance_percent_payload(const std::string 
 
 MachineDataFieldList parse_maintenance_percent_fields(const std::string &payload) {
   MachineDataFieldList fields;
-  if (payload.size() != 13 && payload.size() != 14) {
+  if (payload.empty()) {
     return fields;
   }
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
-  size_t header_size = payload.size() == 14 ? 2 : 1;
+  size_t header_size = 1;
+  if (payload.size() >= 2 && (payload.size() % 4) == 2) {
+    header_size = 2;
+  }
+  if (payload.size() < header_size) {
+    return fields;
+  }
+
   uint16_t header = header_size == 2 ? read_u16_be(data) : static_cast<uint16_t>(data[0]);
   size_t value_offset = header_size;
 
@@ -370,10 +402,6 @@ MachineDataFieldList parse_maintenance_percent_fields(const std::string &payload
   fields.push_back({"Header", header_stream.str(), std::nullopt, ""});
 
   size_t values_bytes = payload.size() - value_offset;
-  if (values_bytes % 4 != 0) {
-    return fields;
-  }
-
   size_t value_count = values_bytes / 4;
   for (size_t i = 0; i < value_count; ++i) {
     size_t index = value_offset + i * 4;
@@ -381,10 +409,9 @@ MachineDataFieldList parse_maintenance_percent_fields(const std::string &payload
       break;
     }
     uint32_t raw_value = read_u32_be(&data[index]);
+    uint16_t auxiliary_value = decode_percent_auxiliary(raw_value);
     float percent = decode_percent_fixed_point(raw_value);
     std::string percent_text = format_percent_value(percent);
-    std::ostringstream raw_stream;
-    raw_stream << raw_value;
     const char *name = i < MAINTENANCE_PERCENT_NAMES.size() ? MAINTENANCE_PERCENT_NAMES[i] : nullptr;
     std::string field_name;
     if (name != nullptr) {
@@ -396,6 +423,8 @@ MachineDataFieldList parse_maintenance_percent_fields(const std::string &payload
     }
     fields.push_back({field_name, percent_text, percent, "%"});
 
+    std::ostringstream raw_stream;
+    raw_stream << auxiliary_value;
     std::string raw_field_name;
     if (name != nullptr) {
       raw_field_name = std::string(name) + " Raw";
@@ -404,7 +433,7 @@ MachineDataFieldList parse_maintenance_percent_fields(const std::string &payload
       fallback_name << "Value" << (i + 1) << " Raw";
       raw_field_name = fallback_name.str();
     }
-    fields.push_back({raw_field_name, raw_stream.str(), static_cast<float>(raw_value), ""});
+    fields.push_back({raw_field_name, raw_stream.str(), static_cast<float>(auxiliary_value), ""});
   }
 
   return fields;
