@@ -138,48 +138,58 @@ inline void wait_for_jutta_gap() {
     }
 }
 
-bool needs_db_escape(uint8_t byte) {
-    switch (byte) {
-        case 0xDB:
-        case 0xDF:
-        case 0xFB:
-        case 0xFF:
-            return true;
-        default:
-            return false;
-    }
-}
-
 void db_escape(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
     output.clear();
-    output.reserve(input.size() * 2);
+    output.reserve(input.size() * 4);
+
     for (uint8_t byte : input) {
-        if (needs_db_escape(byte)) {
-            output.push_back(0xDB);
-            output.push_back(static_cast<uint8_t>(byte ^ 0x20));
-        } else {
-            output.push_back(byte);
+        for (int pair = 0; pair < 4; ++pair) {
+            uint8_t symbol = 0xDB;
+            // The firmware emits 2-bit groups starting with the least significant pair.
+            int shift = 2 * pair;
+            uint8_t two_bits = static_cast<uint8_t>((byte >> shift) & 0x03);
+
+            if ((two_bits & 0x01) != 0) {
+                symbol |= 0x04;
+            }
+            if ((two_bits & 0x02) != 0) {
+                symbol |= 0x20;
+            }
+
+            output.push_back(symbol);
         }
     }
 }
 
 bool db_unescape(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
     output.clear();
-    output.reserve(input.size());
-    bool escape = false;
+    output.reserve(input.size() / 4 + (input.empty() ? 0 : 1));
+
+    uint8_t accumulator = 0;
+    int pair_count = 0;
+
     for (uint8_t byte : input) {
-        if (escape) {
-            output.push_back(static_cast<uint8_t>(byte ^ 0x20));
-            escape = false;
+        if ((byte & 0xDB) != 0xDB) {
             continue;
         }
-        if (byte == 0xDB) {
-            escape = true;
-            continue;
+
+        accumulator = static_cast<uint8_t>(accumulator >> 2);
+        if ((byte & 0x04) != 0) {
+            accumulator = static_cast<uint8_t>(accumulator | 0x40);
         }
-        output.push_back(byte);
+        if ((byte & 0x20) != 0) {
+            accumulator = static_cast<uint8_t>(accumulator | 0x80);
+        }
+
+        ++pair_count;
+        if (pair_count == 4) {
+            output.push_back(accumulator);
+            accumulator = 0;
+            pair_count = 0;
+        }
     }
-    return !escape;
+
+    return pair_count == 0;
 }
 
 bool try_extract_db_frame(std::vector<uint8_t>& buffer, std::vector<uint8_t>& frame) {
