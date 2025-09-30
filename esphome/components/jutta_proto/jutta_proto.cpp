@@ -655,7 +655,6 @@ void JuraComponent::register_machine_data_field_sensor_(const std::string &key,
   auto *existing = this->find_machine_data_field_sensor_(key);
   std::string name = this->make_machine_data_field_name_(labels);
   if (existing != nullptr) {
-    existing->set_parent(this);
     existing->set_name(name.c_str());
     existing->publish_state("");
     return;
@@ -664,7 +663,6 @@ void JuraComponent::register_machine_data_field_sensor_(const std::string &key,
   auto *sensor = new text_sensor::TextSensor();
   sensor->set_name(name.c_str());
   sensor->set_internal(false);
-  sensor->set_parent(this);
   App.register_text_sensor(sensor);
   sensor->publish_state("");
   this->machine_data_field_sensors_[key] = sensor;
