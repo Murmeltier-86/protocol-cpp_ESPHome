@@ -183,14 +183,18 @@ bool db_unescape(const std::vector<uint8_t>& input, std::vector<uint8_t>& output
 }
 
 bool try_extract_db_frame(std::vector<uint8_t>& buffer, std::vector<uint8_t>& frame) {
-    auto terminator_it =
-        std::search(buffer.begin(), buffer.end(), JUTTA_XML_TERMINATOR.begin(), JUTTA_XML_TERMINATOR.end());
-    if (terminator_it == buffer.end()) {
+    if (buffer.size() < JUTTA_XML_TERMINATOR.size()) {
         return false;
     }
 
-    frame.assign(buffer.begin(), terminator_it);
-    buffer.erase(buffer.begin(), terminator_it + JUTTA_XML_TERMINATOR.size());
+    auto frame_end = buffer.end();
+    auto frame_start = frame_end - static_cast<std::ptrdiff_t>(JUTTA_XML_TERMINATOR.size());
+    if (!std::equal(JUTTA_XML_TERMINATOR.begin(), JUTTA_XML_TERMINATOR.end(), frame_start)) {
+        return false;
+    }
+
+    frame.assign(buffer.begin(), frame_start);
+    buffer.clear();
     return true;
 }
 
