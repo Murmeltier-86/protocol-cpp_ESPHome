@@ -2,6 +2,7 @@
 
 #include "esphome/core/log.h"
 #include <array>
+#include <vector>
 
 //---------------------------------------------------------------------------
 namespace serial {
@@ -43,12 +44,27 @@ size_t SerialConnection::read_serial(std::array<uint8_t, 4>& buffer) const {
 }
 
 bool SerialConnection::write_serial(const std::array<uint8_t, 4>& data) const {
+    return this->write_serial(data.data(), data.size());
+}
+
+bool SerialConnection::write_serial(const std::vector<uint8_t>& data) const {
+    if (data.empty()) {
+        return true;
+    }
+    return this->write_serial(data.data(), data.size());
+}
+
+bool SerialConnection::write_serial(const uint8_t* data, size_t length) const {
     if (this->parent_ == nullptr) {
         ESP_LOGE(TAG, "UART component not configured for serial connection.");
         return false;
     }
+    if (data == nullptr || length == 0) {
+        return true;
+    }
+
     auto* self = const_cast<SerialConnection*>(this);
-    self->write_array(data.data(), data.size());
+    self->write_array(data, length);
     return true;
 }
 
