@@ -115,6 +115,47 @@ std::string prettify_identifier(const std::string &identifier) {
   return result;
 }
 
+bool contains_alnum(const std::string &value) {
+  for (unsigned char c : value) {
+    if (std::isalnum(c) != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string normalize_machine_data_field_key(const std::string &key) {
+  if (key.empty()) {
+    return "";
+  }
+
+  std::string normalized;
+  size_t start = 0;
+  while (start <= key.size()) {
+    size_t end = key.find('.', start);
+    std::string segment = key.substr(start, end - start);
+    if (contains_alnum(segment)) {
+      std::string slug = slugify(segment);
+      if (!slug.empty()) {
+        if (!normalized.empty()) {
+          normalized.push_back('.');
+        }
+        normalized.append(slug);
+      }
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    start = end + 1;
+  }
+
+  if (normalized.empty() && contains_alnum(key)) {
+    normalized = slugify(key);
+  }
+
+  return normalized;
+}
+
 using MachineDataFieldList = std::vector<std::pair<std::string, std::string>>;
 using MachineDataFieldMap = std::map<std::string, std::pair<std::vector<std::string>, std::string>>;
 
@@ -654,6 +695,20 @@ text_sensor::TextSensor *JuraComponent::find_machine_data_field_sensor_(const st
   return it->second;
 }
 
+void JuraComponent::add_machine_data_field_sensor(const std::string &key,
+                                                  text_sensor::TextSensor *sensor) {
+  if (sensor == nullptr) {
+    return;
+  }
+  std::string normalized = normalize_machine_data_field_key(key);
+  if (normalized.empty()) {
+    ESP_LOGW(TAG, "Ignoring machine data field mapping with empty key '%s'.", key.c_str());
+    return;
+  }
+  this->machine_data_field_sensors_[normalized] = sensor;
+  this->machine_data_field_user_keys_.insert(normalized);
+}
+
 void JuraComponent::register_machine_data_field_sensor_(const std::string &key,
                                                         const std::vector<std::string> &labels) {
   if (!this->machine_data_auto_fields_ || key.empty()) {
@@ -663,12 +718,14 @@ void JuraComponent::register_machine_data_field_sensor_(const std::string &key,
   auto *existing = this->find_machine_data_field_sensor_(key);
   std::string name = this->make_machine_data_field_name_(labels);
   if (existing != nullptr) {
-    existing->set_name(name.c_str());
-    std::string unique_id = this->make_machine_data_field_unique_id_(key);
-    if (!unique_id.empty()) {
+    if (this->machine_data_field_user_keys_.count(key) == 0) {
+      existing->set_name(name.c_str());
+      std::string unique_id = this->make_machine_data_field_unique_id_(key);
+      if (!unique_id.empty()) {
 
-      try_set_unique_id(existing, unique_id);
+        try_set_unique_id(existing, unique_id);
 
+      }
     }
     existing->publish_state("");
     return;

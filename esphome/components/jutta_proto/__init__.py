@@ -26,6 +26,7 @@ CONF_MACHINE_DATA_PROCESSES = "processes"
 CONF_MACHINE_DATA_RAW = "raw"
 CONF_MACHINE_DATA_AUTO_FIELDS = "auto_fields"
 CONF_MACHINE_DATA_FIELD_PREFIX = "field_prefix"
+CONF_MACHINE_DATA_FIELDS = "fields"
 
 MACHINE_DATA_SECTION_KEYS = [
     CONF_MACHINE_DATA_STATISTICS,
@@ -41,6 +42,8 @@ MACHINE_DATA_SENSOR_SCHEMA = cv.Any(
     text_sensor.text_sensor_schema(),
     cv.use_id(text_sensor.TextSensor),
 )
+
+MACHINE_DATA_FIELD_MAP_SCHEMA = cv.Schema({cv.string: MACHINE_DATA_SENSOR_SCHEMA})
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -121,6 +124,7 @@ MACHINE_DATA_CONFIG_SCHEMA = cv.Any(
             cv.Optional(
                 CONF_MACHINE_DATA_FIELD_PREFIX, default=DEFAULT_MACHINE_DATA_FIELD_PREFIX
             ): cv.string,
+            cv.Optional(CONF_MACHINE_DATA_FIELDS, default={}): MACHINE_DATA_FIELD_MAP_SCHEMA,
         }
     ),
 )
@@ -283,6 +287,9 @@ async def to_code(config):
             field_prefix = machine_data_cfg.get(
                 CONF_MACHINE_DATA_FIELD_PREFIX, DEFAULT_MACHINE_DATA_FIELD_PREFIX
             )
+            field_mappings_cfg = machine_data_cfg.get(CONF_MACHINE_DATA_FIELDS, {})
+        else:
+            field_mappings_cfg = {}
 
         async def _resolve_machine_data_sensor(cfg):
             if isinstance(cfg, dict):
@@ -294,6 +301,7 @@ async def to_code(config):
             excluded_sensor_keys = set(MACHINE_DATA_SECTION_KEYS) | {
                 CONF_MACHINE_DATA_AUTO_FIELDS,
                 CONF_MACHINE_DATA_FIELD_PREFIX,
+                CONF_MACHINE_DATA_FIELDS,
             }
             machine_data_sensor_cfg = {
                 key: value
@@ -338,6 +346,10 @@ async def to_code(config):
 
         cg.add(var.set_machine_data_auto_fields(auto_fields))
         cg.add(var.set_machine_data_field_prefix(cg.std_string(field_prefix)))
+
+        for key, sensor_cfg in field_mappings_cfg.items():
+            sensor = await _resolve_machine_data_sensor(sensor_cfg)
+            cg.add(var.add_machine_data_field_sensor(cg.std_string(key), sensor))
 
 
 async def _get_parent(config):
