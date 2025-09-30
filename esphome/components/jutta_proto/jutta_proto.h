@@ -60,6 +60,16 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void add_machine_data_field_sensor(const std::string &key, text_sensor::TextSensor *sensor);
   void add_machine_data_field_sensor(const std::string &key, sensor::Sensor *sensor);
 
+
+  struct MachineDataFieldValue {
+    std::vector<std::string> labels;
+    std::string text_value;
+    std::optional<float> numeric_value;
+    std::string unit;
+  };
+  using MachineDataFieldMap = std::map<std::string, MachineDataFieldValue>;
+
+
  protected:
   enum class HandshakeStage { IDLE, HELLO, SEND_T1, WAIT_T2, SEND_T2, WAIT_T3, SEND_T3, DONE, FAILED };
 
@@ -72,13 +82,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void process_machine_data_query();
   bool has_machine_data_subscribers_() const;
   void publish_machine_data_(const std::string &response);
-  struct MachineDataFieldValue {
-    std::vector<std::string> labels;
-    std::string text_value;
-    std::optional<float> numeric_value;
-    std::string unit;
-  };
-  using MachineDataFieldMap = std::map<std::string, MachineDataFieldValue>;
 
   void publish_machine_data_fields_(const MachineDataFieldMap &fields);
   text_sensor::TextSensor *find_machine_data_field_sensor_(const std::string &key);
