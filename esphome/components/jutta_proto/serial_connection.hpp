@@ -29,8 +29,6 @@ class SerialConnection : public esphome::uart::UARTDevice {
      * Returns true on success.
      **/
     [[nodiscard]] bool write_serial(const std::array<uint8_t, 4>& data) const;
-    [[nodiscard]] bool write_serial(const std::vector<uint8_t>& data) const;
-    [[nodiscard]] bool write_serial(const uint8_t* data, size_t length) const;
     /**
      * Writes a single byte to the serial connection.
      * Returns true on success.
