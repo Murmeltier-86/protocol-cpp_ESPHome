@@ -115,8 +115,9 @@ Use `raw` instead of `command` when you need to send a custom UART command strin
 ## Machine Data Sensors
 
 The Jura firmware exposes several machine data blocks (statistics, errors, status, and running processes). The component can
-publish them as individual `text_sensor` entities so the values can easily be displayed in Home Assistant dashboards or used in
-automations.
+publish them as individual sensors so the values can easily be displayed in Home Assistant dashboards or used in automations.
+Text sensors are still supported for the raw XML payload and the formatted section summaries, while all numeric fields can be
+exposed as regular `sensor` entities.
 
 !!! tip
     Each entry inside the `machine_data` block must point to a text sensor that already exists. When referencing a sensor by ID
@@ -124,10 +125,10 @@ automations.
     raise an error such as `Couldn't find ID 'jura_machine_raw'` during compilation. You can either create the sensor ahead of
     time under the `text_sensor:` key or define it inline inside `machine_data` as shown below.
 
-Add a `machine_data` section to the component configuration and register one or multiple text sensors. When a single
-`text_sensor` entry is provided the raw XML payload is published. Alternatively, the individual sections can be configured to
-receive pre-formatted text output parsed from the XML response. All sensors are optional and can be combined as needed. Each
-entry can either declare a new sensor inline or reference an existing `text_sensor` via its `id`.
+Add a `machine_data` section to the component configuration and register one or multiple sensors. When a single `text_sensor`
+entry is provided the raw XML payload is published. Alternatively, the individual sections can be configured to receive
+pre-formatted text output parsed from the XML response. All sensors are optional and can be combined as needed. Each entry can
+either declare a new sensor inline or reference an existing `text_sensor` via its `id`.
 
 ```yaml
 text_sensor:
@@ -157,10 +158,11 @@ jutta_proto:
     processes: jura_processes
     raw: jura_machine_raw
 
-To publish the built-in set of machine data field sensors, enable `auto_fields`.
-All known statistics, maintenance counters, maintenance percentages, and helper fields are
-pre-registered up front and reuse the same entity names on every boot. Each sensor name starts with
-`field_prefix` (if provided) followed by a human-readable description of the section and field. Omit
+To publish the built-in set of machine data field sensors, enable `auto_fields`. All known statistics, maintenance counters,
+maintenance percentages, and helper fields are pre-registered up front and reuse the same entity names on every boot. Numeric
+values (for example drink counters and percentage indicators) are exposed as regular sensors with the proper unit of
+measurement, while helper fields such as the header, decoded text, and raw hexadecimal payload remain text sensors. Each
+sensor name starts with `field_prefix` (if provided) followed by a human-readable description of the section and field. Omit
 `field_prefix` to keep the built-in names without an additional prefix:
 
 ```yaml
@@ -179,84 +181,37 @@ jutta_proto:
 
 ```
 
-To reuse existing template sensors instead of the auto-generated entities, map specific machine data
-fields to sensor IDs with the `fields` option. The keys are dot-separated paths that use the slugified
-section, element, and field names (for example `statistic.maintenancecounter.cappuclean`). Each
-segment is case-insensitive and ignores whitespace, so you can enter either the original uppercase
-identifiers from the JURA XML or the lowercase slug equivalents. Only the mapped fields are redirected
-to the provided sensors—any remaining fields continue to use the automatically created entities.
+To reuse existing template sensors instead of the auto-generated entities, map specific machine data fields to sensor IDs with
+the `fields` option. The keys are dot-separated paths that use the slugified section, element, and field names (for example
+`statistic.maintenancecounter.cappuclean`). Each segment is case-insensitive and ignores whitespace, so you can enter either the
+original uppercase identifiers from the JURA XML or the lowercase slug equivalents. Only the mapped fields are redirected to the
+provided sensors—any remaining fields continue to use the automatically created entities. Use the nested `sensor:` key to map a
+numeric field to a regular sensor and `text_sensor:` for text values.
 
 ```yaml
-text_sensor:
+sensor:
   - platform: template
-    name: "${devicename} CappuClean"
-    id: stat_counter_cappuclean
-  - platform: template
-    name: "${devicename} CappuRinse"
-    id: stat_counter_cappurinse
-  - platform: template
-    name: "${devicename} Cleaning"
+    name: "${devicename} Cleaning Cycles"
     id: stat_counter_cleaning
+    state_class: total_increasing
   - platform: template
-    name: "${devicename} CoffeeRinse"
-    id: stat_counter_coffeerinse
-  - platform: template
-    name: "${devicename} Decalc"
-    id: stat_counter_decalc
-  - platform: template
-    name: "${devicename} FilterChange"
-    id: stat_counter_filterchange
-  - platform: template
-    name: "${devicename} Header"
-    id: stat_counter_header
-  - platform: template
-    name: "${devicename} Raw Hex"
-    id: stat_counter_rawhex
-  - platform: template
-    name: "${devicename} Text"
-    id: stat_counter_text
-  - platform: template
-    name: "${devicename} CappuClean Percent"
-    id: stat_percent_cappuclean_percent
-  - platform: template
-    name: "${devicename} CappuClean Raw"
-    id: stat_percent_cappuclean_raw
-  - platform: template
-    name: "${devicename} CappuRinse Percent"
-    id: stat_percent_cappurinse_percent
-  - platform: template
-    name: "${devicename} CappuRinse Raw"
-    id: stat_percent_cappurinse_raw
-  - platform: template
-    name: "${devicename} Cleaning Percent"
-    id: stat_percent_cleaning_percent
+    name: "${devicename} Cleaning %"
+    id: stat_percent_cleaning
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    state_class: measurement
   - platform: template
     name: "${devicename} Cleaning Raw"
     id: stat_percent_cleaning_raw
+    state_class: measurement
+
+text_sensor:
   - platform: template
-    name: "${devicename} CoffeeRinse Percent"
-    id: stat_percent_coffeerinse_percent
+    name: "${devicename} Maintenance Header"
+    id: stat_counter_header
   - platform: template
-    name: "${devicename} CoffeeRinse Raw"
-    id: stat_percent_coffeerinse_raw
-  - platform: template
-    name: "${devicename} Decalc Percent"
-    id: stat_percent_decalc_percent
-  - platform: template
-    name: "${devicename} Decalc Raw"
-    id: stat_percent_decalc_raw
-  - platform: template
-    name: "${devicename} FilterChange Percent"
-    id: stat_percent_filterchange_percent
-  - platform: template
-    name: "${devicename} FilterChange Raw"
-    id: stat_percent_filterchange_raw
-  - platform: template
-    name: "${devicename} Header Percent"
-    id: stat_percent_header
-  - platform: template
-    name: "${devicename} Raw Hex Percent"
-    id: stat_percent_rawhex
+    name: "${devicename} Maintenance Text"
+    id: stat_counter_text
 
 jutta_proto:
   id: jura
@@ -264,29 +219,16 @@ jutta_proto:
   machine_data:
     auto_fields: true
     fields:
-      statistic.maintenancecounter.cappuclean: stat_counter_cappuclean
-      statistic.maintenancecounter.cappurinse: stat_counter_cappurinse
-      statistic.maintenancecounter.cleaning: stat_counter_cleaning
-      statistic.maintenancecounter.coffeerinse: stat_counter_coffeerinse
-      statistic.maintenancecounter.decalc: stat_counter_decalc
-      statistic.maintenancecounter.filterchange: stat_counter_filterchange
-      statistic.maintenancecounter.header: stat_counter_header
-      statistic.maintenancecounter.raw_hex: stat_counter_rawhex
-      statistic.maintenancecounter.text: stat_counter_text
-      statistic.maintenancepercent.cappuclean_percent: stat_percent_cappuclean_percent
-      statistic.maintenancepercent.cappuclean_raw: stat_percent_cappuclean_raw
-      statistic.maintenancepercent.cappurinse_percent: stat_percent_cappurinse_percent
-      statistic.maintenancepercent.cappurinse_raw: stat_percent_cappurinse_raw
-      statistic.maintenancepercent.cleaning_percent: stat_percent_cleaning_percent
-      statistic.maintenancepercent.cleaning_raw: stat_percent_cleaning_raw
-      statistic.maintenancepercent.coffeerinse_percent: stat_percent_coffeerinse_percent
-      statistic.maintenancepercent.coffeerinse_raw: stat_percent_coffeerinse_raw
-      statistic.maintenancepercent.decalc_percent: stat_percent_decalc_percent
-      statistic.maintenancepercent.decalc_raw: stat_percent_decalc_raw
-      statistic.maintenancepercent.filterchange_percent: stat_percent_filterchange_percent
-      statistic.maintenancepercent.filterchange_raw: stat_percent_filterchange_raw
-      statistic.maintenancepercent.header: stat_percent_header
-      statistic.maintenancepercent.raw_hex: stat_percent_rawhex
+      statistic.maintenancecounter.cleaning:
+        sensor: stat_counter_cleaning
+      statistic.maintenancecounter.header:
+        text_sensor: stat_counter_header
+      statistic.maintenancecounter.text:
+        text_sensor: stat_counter_text
+      statistic.maintenancepercent.cleaning_percent:
+        sensor: stat_percent_cleaning
+      statistic.maintenancepercent.cleaning_raw:
+        sensor: stat_percent_cleaning_raw
 ```
 
 Inline definition example:
