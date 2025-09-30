@@ -179,6 +179,116 @@ jutta_proto:
 
 ```
 
+To reuse existing template sensors instead of the auto-generated entities, map specific machine data
+fields to sensor IDs with the `fields` option. The keys are dot-separated paths that use the slugified
+section, element, and field names (for example `statistic.maintenancecounter.cappuclean`). Each
+segment is case-insensitive and ignores whitespace, so you can enter either the original uppercase
+identifiers from the JURA XML or the lowercase slug equivalents. Only the mapped fields are redirected
+to the provided sensors—any remaining fields continue to use the automatically created entities.
+
+```yaml
+text_sensor:
+  - platform: template
+    name: "${devicename} CappuClean"
+    id: stat_counter_cappuclean
+  - platform: template
+    name: "${devicename} CappuRinse"
+    id: stat_counter_cappurinse
+  - platform: template
+    name: "${devicename} Cleaning"
+    id: stat_counter_cleaning
+  - platform: template
+    name: "${devicename} CoffeeRinse"
+    id: stat_counter_coffeerinse
+  - platform: template
+    name: "${devicename} Decalc"
+    id: stat_counter_decalc
+  - platform: template
+    name: "${devicename} FilterChange"
+    id: stat_counter_filterchange
+  - platform: template
+    name: "${devicename} Header"
+    id: stat_counter_header
+  - platform: template
+    name: "${devicename} Raw Hex"
+    id: stat_counter_rawhex
+  - platform: template
+    name: "${devicename} Text"
+    id: stat_counter_text
+  - platform: template
+    name: "${devicename} CappuClean Percent"
+    id: stat_percent_cappuclean_percent
+  - platform: template
+    name: "${devicename} CappuClean Raw"
+    id: stat_percent_cappuclean_raw
+  - platform: template
+    name: "${devicename} CappuRinse Percent"
+    id: stat_percent_cappurinse_percent
+  - platform: template
+    name: "${devicename} CappuRinse Raw"
+    id: stat_percent_cappurinse_raw
+  - platform: template
+    name: "${devicename} Cleaning Percent"
+    id: stat_percent_cleaning_percent
+  - platform: template
+    name: "${devicename} Cleaning Raw"
+    id: stat_percent_cleaning_raw
+  - platform: template
+    name: "${devicename} CoffeeRinse Percent"
+    id: stat_percent_coffeerinse_percent
+  - platform: template
+    name: "${devicename} CoffeeRinse Raw"
+    id: stat_percent_coffeerinse_raw
+  - platform: template
+    name: "${devicename} Decalc Percent"
+    id: stat_percent_decalc_percent
+  - platform: template
+    name: "${devicename} Decalc Raw"
+    id: stat_percent_decalc_raw
+  - platform: template
+    name: "${devicename} FilterChange Percent"
+    id: stat_percent_filterchange_percent
+  - platform: template
+    name: "${devicename} FilterChange Raw"
+    id: stat_percent_filterchange_raw
+  - platform: template
+    name: "${devicename} Header Percent"
+    id: stat_percent_header
+  - platform: template
+    name: "${devicename} Raw Hex Percent"
+    id: stat_percent_rawhex
+
+jutta_proto:
+  id: jura
+  uart_id: jura_uart
+  machine_data:
+    auto_fields: true
+    fields:
+      statistic.maintenancecounter.cappuclean: stat_counter_cappuclean
+      statistic.maintenancecounter.cappurinse: stat_counter_cappurinse
+      statistic.maintenancecounter.cleaning: stat_counter_cleaning
+      statistic.maintenancecounter.coffeerinse: stat_counter_coffeerinse
+      statistic.maintenancecounter.decalc: stat_counter_decalc
+      statistic.maintenancecounter.filterchange: stat_counter_filterchange
+      statistic.maintenancecounter.header: stat_counter_header
+      statistic.maintenancecounter.raw_hex: stat_counter_rawhex
+      statistic.maintenancecounter.text: stat_counter_text
+      statistic.maintenancepercent.cappuclean_percent: stat_percent_cappuclean_percent
+      statistic.maintenancepercent.cappuclean_raw: stat_percent_cappuclean_raw
+      statistic.maintenancepercent.cappurinse_percent: stat_percent_cappurinse_percent
+      statistic.maintenancepercent.cappurinse_raw: stat_percent_cappurinse_raw
+      statistic.maintenancepercent.cleaning_percent: stat_percent_cleaning_percent
+      statistic.maintenancepercent.cleaning_raw: stat_percent_cleaning_raw
+      statistic.maintenancepercent.coffeerinse_percent: stat_percent_coffeerinse_percent
+      statistic.maintenancepercent.coffeerinse_raw: stat_percent_coffeerinse_raw
+      statistic.maintenancepercent.decalc_percent: stat_percent_decalc_percent
+      statistic.maintenancepercent.decalc_raw: stat_percent_decalc_raw
+      statistic.maintenancepercent.filterchange_percent: stat_percent_filterchange_percent
+      statistic.maintenancepercent.filterchange_raw: stat_percent_filterchange_raw
+      statistic.maintenancepercent.header: stat_percent_header
+      statistic.maintenancepercent.raw_hex: stat_percent_rawhex
+```
+
 Inline definition example:
 
 ```yaml
