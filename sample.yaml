@@ -22,6 +22,15 @@ uart:
 jutta_proto:
   id: jura
   uart_id: jura_uart
+  machine_data:
+    raw: jura_machine_raw
+    auto_fields: true
+    field_prefix: "JURA Machine"
+
+text_sensor:
+  - platform: template
+    id: jura_machine_raw
+    name: "JURA Machine Data Raw"
 
 # Convenience switches to remotely power the machine on/off
 switch:

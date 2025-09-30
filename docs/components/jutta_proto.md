@@ -118,6 +118,12 @@ The Jura firmware exposes several machine data blocks (statistics, errors, statu
 publish them as individual `text_sensor` entities so the values can easily be displayed in Home Assistant dashboards or used in
 automations.
 
+!!! tip
+    Each entry inside the `machine_data` block must point to a text sensor that already exists. When referencing a sensor by ID
+    (for example `raw: jura_machine_raw`) make sure to declare that sensor elsewhere in the YAML file. Otherwise ESPHome will
+    raise an error such as `Couldn't find ID 'jura_machine_raw'` during compilation. You can either create the sensor ahead of
+    time under the `text_sensor:` key or define it inline inside `machine_data` as shown below.
+
 Add a `machine_data` section to the component configuration and register one or multiple text sensors. When a single
 `text_sensor` entry is provided the raw XML payload is published. Alternatively, the individual sections can be configured to
 receive pre-formatted text output parsed from the XML response. All sensors are optional and can be combined as needed. Each
@@ -168,6 +174,21 @@ jutta_proto:
   uart_id: jura_uart
   machine_data:
     raw: jura_machine_raw
+    auto_fields: true
+    field_prefix: "JURA Machine"
+
+```
+
+Inline definition example:
+
+```yaml
+jutta_proto:
+  id: jura
+  uart_id: jura_uart
+  machine_data:
+    raw:
+      id: jura_machine_raw
+      name: "JURA Machine Data Raw"
     auto_fields: true
     field_prefix: "JURA Machine"
 ```
