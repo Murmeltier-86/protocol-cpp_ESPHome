@@ -1083,8 +1083,15 @@ bool JuraComponent::time_reached(uint32_t now, uint32_t target) {
   return static_cast<int32_t>(now - target) >= 0;
 }
 
+bool JuraComponent::has_machine_data_subscribers_() const {
+  return this->machine_data_sensor_ != nullptr || this->machine_data_statistic_sensor_ != nullptr ||
+         this->machine_data_errors_sensor_ != nullptr ||
+         this->machine_data_status_sensor_ != nullptr ||
+         this->machine_data_processes_sensor_ != nullptr || this->machine_data_auto_fields_;
+}
+
 void JuraComponent::process_machine_data_query() {
-  if (this->machine_data_sensor_ == nullptr) {
+  if (!this->has_machine_data_subscribers_()) {
     return;
   }
   if (!this->is_ready()) {
