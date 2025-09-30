@@ -67,8 +67,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void process_machine_data_query();
   void publish_machine_data_(const std::string &response);
   void publish_machine_data_fields_(const std::map<std::string, std::pair<std::vector<std::string>, std::string>> &fields);
-  text_sensor::TextSensor *get_or_create_machine_data_field_sensor_(
-      const std::string &key, const std::vector<std::string> &labels);
+  text_sensor::TextSensor *find_machine_data_field_sensor_(const std::string &key);
+  void register_machine_data_field_sensor_(const std::string &key, const std::vector<std::string> &labels);
   std::string make_machine_data_field_name_(const std::vector<std::string> &labels) const;
   void initialize_machine_data_field_sensors_();
 
@@ -89,7 +89,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   text_sensor::TextSensor *machine_data_status_sensor_{nullptr};
   text_sensor::TextSensor *machine_data_processes_sensor_{nullptr};
   bool machine_data_auto_fields_{false};
-  std::string machine_data_field_prefix_{"JURA Machine Data"};
+  std::string machine_data_field_prefix_{""};
   std::map<std::string, text_sensor::TextSensor *> machine_data_field_sensors_;
   std::map<std::string, std::pair<std::vector<std::string>, std::string>> machine_data_field_values_;
   uint32_t machine_data_query_next_{0};

@@ -621,7 +621,7 @@ void JuraComponent::publish_machine_data_fields_(const MachineDataFieldMap &fiel
 
   std::set<std::string> seen;
   for (const auto &entry : fields) {
-    auto *sensor = this->get_or_create_machine_data_field_sensor_(entry.first, entry.second.first);
+    auto *sensor = this->find_machine_data_field_sensor_(entry.first);
     if (sensor == nullptr) {
       continue;
     }
@@ -638,23 +638,34 @@ void JuraComponent::publish_machine_data_fields_(const MachineDataFieldMap &fiel
   }
 }
 
-text_sensor::TextSensor *JuraComponent::get_or_create_machine_data_field_sensor_(
-    const std::string &key, const std::vector<std::string> &labels) {
+text_sensor::TextSensor *JuraComponent::find_machine_data_field_sensor_(const std::string &key) {
   auto it = this->machine_data_field_sensors_.find(key);
-  if (it != this->machine_data_field_sensors_.end()) {
-    return it->second;
-  }
-  if (!this->machine_data_auto_fields_) {
+  if (it == this->machine_data_field_sensors_.end()) {
     return nullptr;
+  }
+  return it->second;
+}
+
+void JuraComponent::register_machine_data_field_sensor_(const std::string &key,
+                                                        const std::vector<std::string> &labels) {
+  if (!this->machine_data_auto_fields_ || key.empty()) {
+    return;
+  }
+
+  auto *existing = this->find_machine_data_field_sensor_(key);
+  std::string name = this->make_machine_data_field_name_(labels);
+  if (existing != nullptr) {
+    existing->set_name(name.c_str());
+    existing->publish_state("");
+    return;
   }
 
   auto *sensor = new text_sensor::TextSensor();
-  std::string name = this->make_machine_data_field_name_(labels);
   sensor->set_name(name.c_str());
   sensor->set_internal(false);
   App.register_text_sensor(sensor);
+  sensor->publish_state("");
   this->machine_data_field_sensors_[key] = sensor;
-  return sensor;
 }
 
 void JuraComponent::initialize_machine_data_field_sensors_() {
@@ -688,10 +699,7 @@ void JuraComponent::initialize_machine_data_field_sensors_() {
       } else {
         field_key = key_prefix + '.' + slug;
       }
-      auto *sensor = this->get_or_create_machine_data_field_sensor_(field_key, labels);
-      if (sensor != nullptr) {
-        sensor->publish_state("");
-      }
+      this->register_machine_data_field_sensor_(field_key, labels);
     };
 
     auto register_fields_from_list = [&](const std::vector<std::string> &names) {
