@@ -188,8 +188,6 @@ class JuttaConnection {
      * https://github.com/Jutta-Proto/protocol-cpp#deobfuscating
      **/
     static uint8_t decode(const std::array<uint8_t, 4>& encData);
-    static std::array<uint8_t, 4> encode_xml_byte(const uint8_t& decData);
-    static uint8_t decode_xml_byte(const std::array<uint8_t, 4>& encData);
     /**
      * Writes four bytes of encoded data to the coffee maker and then waits 8ms.
      **/
@@ -300,7 +298,7 @@ class JuttaConnection {
         bool active{false};
         std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
         uint32_t start_time{0};
-        std::vector<uint8_t> encoded_buffer{};
+        std::vector<uint8_t> raw_buffer{};
     };
 
     XmlWaitContext xml_wait_context_{};

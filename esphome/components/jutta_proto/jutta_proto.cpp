@@ -8,7 +8,6 @@
 #include <iomanip>
 #include <map>
 #include <optional>
-#include <set>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -219,26 +218,17 @@ uint32_t read_u32_be(const uint8_t *ptr) {
 }
 
 std::optional<std::string> format_product_counter_payload(const std::string &payload) {
-  if (payload.size() != 20 && payload.size() != 21) {
+  if (payload.size() != 21) {
     return std::nullopt;
   }
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
-  bool has_header = payload.size() == 21;
-  size_t value_offset = has_header ? 1 : 0;
-  if (payload.size() - value_offset < PRODUCT_COUNTER_DEFINITIONS.size() * 2) {
-    return std::nullopt;
-  }
-
-  uint8_t header = has_header ? data[0] : 0;
+  uint8_t header = data[0];
+  size_t value_offset = 1;
 
   std::ostringstream stream;
-  if (has_header) {
-    stream << "header=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
-           << static_cast<int>(header) << std::dec;
-  } else {
-    stream << "header=(absent)";
-  }
+  stream << "header=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+         << static_cast<int>(header) << std::dec;
 
   for (size_t i = 0; i < PRODUCT_COUNTER_DEFINITIONS.size(); ++i) {
     uint16_t value = read_u16_be(&data[value_offset + i * 2]);
@@ -254,29 +244,18 @@ std::optional<std::string> format_product_counter_payload(const std::string &pay
 
 MachineDataFieldList parse_product_counter_fields(const std::string &payload) {
   MachineDataFieldList fields;
-  if (payload.size() != 20 && payload.size() != 21) {
+  if (payload.size() != 21) {
     return fields;
   }
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
-  bool has_header = payload.size() == 21;
-  size_t value_offset = has_header ? 1 : 0;
-  if (payload.size() - value_offset < PRODUCT_COUNTER_DEFINITIONS.size() * 2) {
-    return fields;
-  }
-
-  if (has_header) {
-    uint8_t header = data[0];
-    std::ostringstream header_stream;
-    header_stream << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
-                  << static_cast<int>(header);
-    fields.push_back({"Header", header_stream.str(), std::nullopt, ""});
-  } else {
-    fields.push_back({"Header", "(absent)", std::nullopt, ""});
-  }
+  std::ostringstream header_stream;
+  header_stream << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+                << static_cast<int>(data[0]);
+  fields.push_back({"Header", header_stream.str(), std::nullopt, ""});
 
   for (size_t i = 0; i < PRODUCT_COUNTER_DEFINITIONS.size(); ++i) {
-    uint16_t value = read_u16_be(&data[value_offset + i * 2]);
+    uint16_t value = read_u16_be(&data[1 + i * 2]);
     fields.push_back({PRODUCT_COUNTER_DEFINITIONS[i].name, std::to_string(value),
                       static_cast<float>(value), ""});
   }
@@ -328,31 +307,24 @@ MachineDataFieldList parse_maintenance_counter_fields(const std::string &payload
 }
 
 std::optional<std::string> format_maintenance_percent_payload(const std::string &payload) {
-  if (payload.empty()) {
+  if (payload.size() != 13) {
     return std::nullopt;
   }
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
-
-  size_t header_size = 1;
-  if (payload.size() >= 2 && (payload.size() % 4) == 2) {
-    header_size = 2;
-  }
-  if (payload.size() < header_size) {
-    return std::nullopt;
-  }
-
-  uint16_t header = header_size == 2 ? read_u16_be(data) : static_cast<uint16_t>(data[0]);
-  size_t value_offset = header_size;
-  size_t values_bytes = payload.size() - value_offset;
-  size_t value_count = values_bytes / 4;
+  uint8_t header = data[0];
 
   std::ostringstream stream;
-  stream << "header=0x" << std::uppercase << std::hex << std::setfill('0')
-         << std::setw(static_cast<int>(header_size * 2)) << header << std::dec;
+  stream << "header=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+         << static_cast<int>(header) << std::dec;
 
+  size_t value_count = (payload.size() - 1) / 4;
   for (size_t i = 0; i < value_count; ++i) {
-    uint32_t raw_value = read_u32_be(&data[value_offset + i * 4]);
+    size_t index = 1 + i * 4;
+    if (index + 3 >= payload.size()) {
+      break;
+    }
+    uint32_t raw_value = read_u32_be(&data[index]);
     uint16_t encoded_percent = static_cast<uint16_t>(raw_value >> 16);
     uint16_t auxiliary_value = decode_percent_auxiliary(raw_value);
     float percent = decode_percent_fixed_point(raw_value);
@@ -380,31 +352,20 @@ std::optional<std::string> format_maintenance_percent_payload(const std::string 
 
 MachineDataFieldList parse_maintenance_percent_fields(const std::string &payload) {
   MachineDataFieldList fields;
-  if (payload.empty()) {
+  if (payload.size() != 13) {
     return fields;
   }
 
   const auto *data = reinterpret_cast<const uint8_t *>(payload.data());
-  size_t header_size = 1;
-  if (payload.size() >= 2 && (payload.size() % 4) == 2) {
-    header_size = 2;
-  }
-  if (payload.size() < header_size) {
-    return fields;
-  }
-
-  uint16_t header = header_size == 2 ? read_u16_be(data) : static_cast<uint16_t>(data[0]);
-  size_t value_offset = header_size;
 
   std::ostringstream header_stream;
-  header_stream << "0x" << std::uppercase << std::hex << std::setfill('0')
-                << std::setw(static_cast<int>(header_size * 2)) << header;
+  header_stream << "0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+                << static_cast<int>(data[0]);
   fields.push_back({"Header", header_stream.str(), std::nullopt, ""});
 
-  size_t values_bytes = payload.size() - value_offset;
-  size_t value_count = values_bytes / 4;
+  size_t value_count = (payload.size() - 1) / 4;
   for (size_t i = 0; i < value_count; ++i) {
-    size_t index = value_offset + i * 4;
+    size_t index = 1 + i * 4;
     if (index + 3 >= payload.size()) {
       break;
     }
@@ -768,13 +729,16 @@ std::string sanitize_text_sensor_value(const std::string &value) {
 }  // namespace
 
 void JuraComponent::publish_machine_data_fields_(const MachineDataFieldMap &fields) {
-  if (fields.empty() && this->machine_data_field_sensors_.empty() &&
-      this->machine_data_numeric_field_sensors_.empty()) {
+  if (fields.empty()) {
+    for (const auto &existing : this->machine_data_field_sensors_) {
+      existing.second->publish_state("");
+    }
+    for (const auto &existing : this->machine_data_numeric_field_sensors_) {
+      existing.second->publish_state(NAN);
+    }
     return;
   }
 
-  std::set<std::string> seen_text;
-  std::set<std::string> seen_numeric;
   for (const auto &entry : fields) {
     const auto &value = entry.second;
     auto *text_sensor = this->find_machine_data_field_sensor_(entry.first);
@@ -784,7 +748,6 @@ void JuraComponent::publish_machine_data_fields_(const MachineDataFieldMap &fiel
         text_sensor->set_name(name.c_str());
       }
       text_sensor->publish_state(sanitize_text_sensor_value(value.text_value));
-      seen_text.insert(entry.first);
     }
 
     auto *numeric_sensor = this->find_machine_data_numeric_sensor_(entry.first);
@@ -801,22 +764,7 @@ void JuraComponent::publish_machine_data_fields_(const MachineDataFieldMap &fiel
       }
       if (value.numeric_value.has_value()) {
         numeric_sensor->publish_state(*value.numeric_value);
-      } else {
-        numeric_sensor->publish_state(NAN);
       }
-      seen_numeric.insert(entry.first);
-    }
-  }
-
-  for (const auto &existing : this->machine_data_field_sensors_) {
-    if (seen_text.count(existing.first) == 0) {
-      existing.second->publish_state("");
-    }
-  }
-
-  for (const auto &existing : this->machine_data_numeric_field_sensors_) {
-    if (seen_numeric.count(existing.first) == 0) {
-      existing.second->publish_state(NAN);
     }
   }
 }
