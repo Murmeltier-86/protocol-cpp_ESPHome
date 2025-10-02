@@ -1290,69 +1290,67 @@ void JuraComponent::dump_config() {
 
 void JuraComponent::process_handshake() {
   using ::jutta_proto::JuttaConnection;
-  using ::jutta_proto::JUTTA_GET_TYPE;
 
   switch (this->handshake_stage_) {
     case HandshakeStage::IDLE:
       break;
     case HandshakeStage::HELLO: {
       if (!this->handshake_hello_request_sent_) {
-        ESP_LOGD(TAG, "HELLO: requesting device type with payload '%s' (hex %s).",
-                 format_printable_string(JUTTA_GET_TYPE).c_str(),
-                 format_hex_string(JUTTA_GET_TYPE).c_str());
-        if (this->connection_->write_decoded(JUTTA_GET_TYPE)) {
-          this->connection_->reset_response_line_buffer();
-          this->handshake_buffer_.clear();
-          this->handshake_deadline_ = esphome::millis() + 2000;
-          this->handshake_hello_request_sent_ = true;
-          ESP_LOGD(TAG, "HELLO: device type request sent, waiting for response (deadline in 2000 ms).");
-        } else {
-          this->restart_handshake("failed to request device type");
-          break;
-        }
+        ESP_LOGD(TAG, "HELLO: draining UART before requesting device type.");
+        this->connection_->drain_plain_serial(35);
+        this->handshake_buffer_.clear();
+        this->handshake_deadline_ = 0;
+        this->connection_->send_plain_line("ty:");
+        this->handshake_hello_request_sent_ = true;
       }
 
-      if (this->read_handshake_bytes()) {
-        bool handled = false;
-        while (!handled) {
-          auto newline = this->handshake_buffer_.find("\r\n");
-          if (newline == std::string::npos) {
-            break;
-          }
-
-          std::string line = this->handshake_buffer_.substr(0, newline);
-          this->handshake_buffer_.erase(0, newline + 2);
-
-          std::string lowercase_line = line;
-          std::transform(lowercase_line.begin(), lowercase_line.end(), lowercase_line.begin(),
-                         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
-          if (lowercase_line.rfind("ty:", 0) == 0) {
-            if (line.size() <= 3) {
-              ESP_LOGW(TAG,
-                       "HELLO: device type response line '%s' has no payload, proceeding with unknown type.",
-                       format_printable_string(line).c_str());
-              this->device_type_ = "TY:unknown";
-            } else {
-              this->device_type_ = line;
-              ESP_LOGI(TAG, "Detected coffee maker response: %s", this->device_type_.c_str());
-            }
-            this->handshake_buffer_.clear();
-            this->handshake_deadline_ = 0;
-            this->handshake_stage_ = HandshakeStage::SEND_T1;
-            this->handshake_hello_request_sent_ = false;
-            handled = true;
-          } else {
-            ESP_LOGD(TAG, "HELLO: ignoring unexpected response line: '%s'",
-                     format_printable_string(line).c_str());
-          }
-        }
+      std::string line;
+      if (!this->connection_->read_line_until(line, 1500)) {
+        this->restart_handshake("timeout waiting for device type line");
+        break;
       }
 
-      if (this->handshake_stage_ == HandshakeStage::HELLO && this->handshake_deadline_ != 0 &&
-          time_reached(esphome::millis(), this->handshake_deadline_)) {
-        this->restart_handshake("timeout waiting for device type");
+      std::string preview = line.substr(0, std::min<size_t>(60, line.size()));
+      ESP_LOGD(TAG, "RX_LINE \"%s\"", format_printable_string(preview).c_str());
+
+      std::string lowercase_line = line;
+      std::transform(lowercase_line.begin(), lowercase_line.end(), lowercase_line.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      if (lowercase_line.rfind("ty:", 0) != 0) {
+        ESP_LOGW(TAG, "HELLO: unexpected response line '%s'",
+                 format_printable_string(line).c_str());
+        this->restart_handshake("unexpected device type response");
+        break;
       }
+
+      std::string ok_line;
+      bool ok_received = this->connection_->read_line_until(ok_line, 800);
+      if (!ok_received) {
+        ESP_LOGD(TAG, "RX_OK 0");
+        this->restart_handshake("timeout waiting for ok acknowledgment");
+        break;
+      }
+
+      bool ok_match = ok_line == "ok:";
+      ESP_LOGD(TAG, "RX_OK %d", ok_match ? 1 : 0);
+      if (!ok_match) {
+        this->restart_handshake("unexpected acknowledgment line");
+        break;
+      }
+
+      if (line.size() <= 3) {
+        ESP_LOGW(TAG, "HELLO: device type response line '%s' has no payload, proceeding with unknown type.",
+                 format_printable_string(line).c_str());
+        this->device_type_ = "ty:unknown";
+      } else {
+        this->device_type_ = line;
+        ESP_LOGI(TAG, "Detected coffee maker response: %s", this->device_type_.c_str());
+      }
+
+      this->handshake_buffer_.clear();
+      this->handshake_deadline_ = 0;
+      this->handshake_stage_ = HandshakeStage::SEND_T1;
+      this->handshake_hello_request_sent_ = false;
       break;
     }
     case HandshakeStage::SEND_T1: {

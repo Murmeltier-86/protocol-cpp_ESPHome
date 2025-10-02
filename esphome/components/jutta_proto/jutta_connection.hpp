@@ -34,6 +34,12 @@ class JuttaConnection {
 
   void flush_serial_input();
 
+  void drain_plain_serial(uint32_t duration_ms);
+
+  void send_plain_line(const std::string &line);
+
+  bool read_line_until(std::string &out, uint32_t timeout_ms);
+
  private:
   serial::SerialConnection serial_;
 
@@ -71,8 +77,6 @@ class JuttaConnection {
 
   void send_line_cmd(const std::string &line);
   void send_db_cmd(const std::string &command);
-
-  bool read_line_until(std::string &out, uint32_t timeout_ms);
   bool read_db_frame(std::vector<uint8_t> &decoded, uint32_t timeout_ms);
 
   void poll_serial_lines(uint32_t timeout_ms);
@@ -80,6 +84,8 @@ class JuttaConnection {
 
   std::shared_ptr<std::string> transact_db_internal(const std::string &command,
                                                     const std::chrono::milliseconds &timeout, bool *ok);
+
+  std::string line_read_buffer_;
 };
 
 }  // namespace jutta_proto
