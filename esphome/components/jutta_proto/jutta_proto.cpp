@@ -902,12 +902,7 @@ std::string sanitize_text_sensor_value(const std::string &value) {
 
 void JuraComponent::publish_machine_data_fields_(const MachineDataFieldMap &fields) {
   if (fields.empty()) {
-    for (const auto &existing : this->machine_data_field_sensors_) {
-      existing.second->publish_state("");
-    }
-    for (const auto &existing : this->machine_data_numeric_field_sensors_) {
-      existing.second->publish_state(NAN);
-    }
+    ESP_LOGV(TAG, "No machine data field updates to publish.");
     return;
   }
 
@@ -1002,7 +997,6 @@ void JuraComponent::register_machine_data_text_sensor_(const std::string &key,
 
       }
     }
-    existing->publish_state("");
     return;
   }
 
@@ -1016,7 +1010,6 @@ void JuraComponent::register_machine_data_text_sensor_(const std::string &key,
   }
   sensor->set_internal(false);
   App.register_text_sensor(sensor);
-  sensor->publish_state("");
   this->machine_data_field_sensors_[key] = sensor;
 }
 
@@ -1042,7 +1035,6 @@ void JuraComponent::register_machine_data_numeric_sensor_(const std::string &key
         try_set_unique_id(existing, unique_id);
       }
     }
-    existing->publish_state(NAN);
     return;
   }
 
@@ -1057,7 +1049,6 @@ void JuraComponent::register_machine_data_numeric_sensor_(const std::string &key
   }
   sensor->set_internal(false);
   App.register_sensor(sensor);
-  sensor->publish_state(NAN);
   this->machine_data_numeric_field_sensors_[key] = sensor;
 }
 
@@ -1525,7 +1516,6 @@ void JuraComponent::process_machine_data_query() {
     this->machine_data_payload_ready_.clear();
     if (has_field_subscribers) {
       this->machine_data_field_values_.clear();
-      this->publish_machine_data_fields_(this->machine_data_field_values_);
     }
     return;
   }
@@ -1586,14 +1576,21 @@ void JuraComponent::process_machine_data_query() {
     }
 
     this->machine_data_payloads_[index] = *payload;
-    this->machine_data_payload_ready_[index] = true;
-
     auto expected_length = expected_machine_data_payload_size(definition.command);
-    if (expected_length.has_value() && this->machine_data_payloads_[index].size() != expected_length.value()) {
-      ESP_LOGW(TAG,
-               "Machine data payload for command '%s' has unexpected length (expected %zu byte%s, got %zu).",
-               definition.command, expected_length.value(), expected_length.value() == 1 ? "" : "s",
-               this->machine_data_payloads_[index].size());
+    bool length_valid = true;
+    if (expected_length.has_value()) {
+      if (this->machine_data_payloads_[index].size() != expected_length.value()) {
+        ESP_LOGW(TAG,
+                 "Machine data payload for command '%s' has unexpected length (expected %zu byte%s, got %zu).",
+                 definition.command, expected_length.value(), expected_length.value() == 1 ? "" : "s",
+                 this->machine_data_payloads_[index].size());
+        length_valid = false;
+      }
+    }
+
+    this->machine_data_payload_ready_[index] = length_valid;
+    if (!length_valid) {
+      return false;
     }
 
     ESP_LOGD(TAG, "Parsed machine data command '%s' (encoding=%s, payload=%zu byte%s).",
@@ -1628,7 +1625,6 @@ void JuraComponent::process_machine_data_query() {
       fail_current_query();
       if (has_field_subscribers) {
         this->machine_data_field_values_.clear();
-        this->publish_machine_data_fields_(this->machine_data_field_values_);
       }
       return;
     }
@@ -1637,7 +1633,6 @@ void JuraComponent::process_machine_data_query() {
       fail_current_query();
       if (has_field_subscribers) {
         this->machine_data_field_values_.clear();
-        this->publish_machine_data_fields_(this->machine_data_field_values_);
       }
       return;
     }
@@ -1652,7 +1647,6 @@ void JuraComponent::process_machine_data_query() {
       ESP_LOGW(TAG, "Skipping machine data publish due to incomplete responses.");
       if (has_field_subscribers) {
         this->machine_data_field_values_.clear();
-        this->publish_machine_data_fields_(this->machine_data_field_values_);
       }
       fail_current_query();
       return;
@@ -1679,51 +1673,31 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
   auto parsed = MachineDataParser::parse(response);
   if (!parsed.has_value()) {
     ESP_LOGW(TAG, "Failed to parse machine data XML response.");
-    if (has_field_subscribers) {
-      this->machine_data_field_values_.clear();
-    }
+    return;
   }
 
-  if (parsed.has_value()) {
-    const auto &root = parsed.value();
-    if (this->machine_data_statistic_sensor_ != nullptr) {
-      auto formatted =
-          format_machine_data_section(root.find_child_case_insensitive("STATISTIC"));
-      this->machine_data_statistic_sensor_->publish_state(sanitize_text_sensor_value(formatted));
-    }
-    if (this->machine_data_errors_sensor_ != nullptr) {
-      auto formatted =
-          format_machine_data_section(root.find_child_case_insensitive("ALERTS"));
-      this->machine_data_errors_sensor_->publish_state(sanitize_text_sensor_value(formatted));
-    }
-    if (this->machine_data_status_sensor_ != nullptr) {
-      auto formatted = format_machine_data_section(
-          root.find_child_case_insensitive("PROGRESS_STATE_INTAKE"));
-      this->machine_data_status_sensor_->publish_state(sanitize_text_sensor_value(formatted));
-    }
-    if (this->machine_data_processes_sensor_ != nullptr) {
-      auto formatted =
-          format_machine_data_section(root.find_child_case_insensitive("PROCESSES"));
-      this->machine_data_processes_sensor_->publish_state(sanitize_text_sensor_value(formatted));
-    }
-  } else {
-    if (this->machine_data_statistic_sensor_ != nullptr) {
-      this->machine_data_statistic_sensor_->publish_state("");
-    }
-    if (this->machine_data_errors_sensor_ != nullptr) {
-      this->machine_data_errors_sensor_->publish_state("");
-    }
-    if (this->machine_data_status_sensor_ != nullptr) {
-      this->machine_data_status_sensor_->publish_state("");
-    }
-    if (this->machine_data_processes_sensor_ != nullptr) {
-      this->machine_data_processes_sensor_->publish_state("");
-    }
+  const auto &root = parsed.value();
+  if (this->machine_data_statistic_sensor_ != nullptr) {
+    auto formatted = format_machine_data_section(root.find_child_case_insensitive("STATISTIC"));
+    this->machine_data_statistic_sensor_->publish_state(sanitize_text_sensor_value(formatted));
+  }
+  if (this->machine_data_errors_sensor_ != nullptr) {
+    auto formatted = format_machine_data_section(root.find_child_case_insensitive("ALERTS"));
+    this->machine_data_errors_sensor_->publish_state(sanitize_text_sensor_value(formatted));
+  }
+  if (this->machine_data_status_sensor_ != nullptr) {
+    auto formatted =
+        format_machine_data_section(root.find_child_case_insensitive("PROGRESS_STATE_INTAKE"));
+    this->machine_data_status_sensor_->publish_state(sanitize_text_sensor_value(formatted));
+  }
+  if (this->machine_data_processes_sensor_ != nullptr) {
+    auto formatted = format_machine_data_section(root.find_child_case_insensitive("PROCESSES"));
+    this->machine_data_processes_sensor_->publish_state(sanitize_text_sensor_value(formatted));
   }
 
   std::string sanitized = sanitize_text_sensor_value(response);
   ESP_LOGD(TAG, "Machine data response: %s", sanitized.c_str());
-  if (has_field_subscribers) {
+  if (has_field_subscribers && !this->machine_data_field_values_.empty()) {
     this->publish_machine_data_fields_(this->machine_data_field_values_);
   }
   if (this->machine_data_sensor_ != nullptr) {
