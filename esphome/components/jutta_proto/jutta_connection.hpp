@@ -1,325 +1,68 @@
 #pragma once
 
-#include <array>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
-#include <deque>
+
+#include "esphome/components/uart/uart.h"
 
 #include "serial_connection.hpp"
 
-//---------------------------------------------------------------------------
 namespace jutta_proto {
-//---------------------------------------------------------------------------
+
 class JuttaConnection {
  public:
-    enum class WaitResult { Pending, Success, Timeout, Error };
+  enum class WaitResult { Success, Timeout, Error };
+
+  explicit JuttaConnection(esphome::uart::UARTComponent *parent);
+
+  void init();
+
+  bool write_decoded(const std::string &command);
+
+  WaitResult wait_for_ok(const std::chrono::milliseconds &timeout);
+
+  WaitResult write_decoded_wait_for(const std::string &command, const std::string &expected_response,
+                                    const std::chrono::milliseconds &timeout);
+
+  std::shared_ptr<std::string> write_xml_with_response(const std::string &command,
+                                                       const std::chrono::milliseconds &timeout);
+
+  bool poll_response_line(std::string &line);
+
+  void reset_response_line_buffer();
+
+  void flush_serial_input();
 
  private:
-    serial::SerialConnection serial;
+  bool send_line_cmd(const std::string &command);
+  bool send_db_cmd(const std::string &command);
 
- public:
-    /**
-     * Initializes a new Jutta (UART) connection.
-     * ESPHome provides the configured UART component.
-     **/
-    explicit JuttaConnection(esphome::uart::UARTComponent* parent);
+  bool read_line_until(std::string &line, uint32_t timeout_ms);
+  bool read_db_frame(std::vector<uint8_t> &decoded, uint32_t timeout_ms);
+  bool extract_line_from_buffer(std::string &line);
 
-    /**
-     * Tries to initializes the Jutta serial (UART) connection.
-     * Throws a exception in case something goes wrong.
-     * [Thread Safe]
-     **/
-    void init();
+  bool transact_line(const std::string &command, std::string *response_line, bool need_ok,
+                     uint32_t timeout_ms);
+  bool transact_db(const std::string &command, std::vector<uint8_t> *decoded, uint32_t timeout_ms);
 
-    /**
-     * Tries to read a single decoded byte.
-     * This requires reading 4 JUTTA bytes and converting them to a single actual data byte.
-     * The result will be stored in the given "byte" pointer.
-     * Returns true on success.
-     * [Thread Safe]
-     **/
-    bool read_decoded(uint8_t* byte);
-    /**
-     * Reads as many data bytes, as there are availabel.
-     * Each data byte consists of 4 JUTTA bytes which will be decoded into a single data byte.
-     * [Thread Safe]
-     **/
-    bool read_decoded(std::vector<uint8_t>& data);
-    /**
-     * Waits until the coffee maker responded with a "ok:\r\n".
-     * The default timeout for this operation is 5 seconds.
-     * To disable the timeout, set the timeout to 0 seconds.
-     * Returns the current wait status.
-     **/
-    WaitResult wait_for_ok(const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
-    /**
-     * Writes the given data to the coffee maker and then waits for the given response with an optional timeout.
-     * The response has to include the "\r\n" at the end of a message.
-     * The default timeout for this operation is 5 seconds.
-     * To disable the timeout, set the timeout to 0 seconds.
-     * Returns true on success.
-     * Returns false when a timeout occurred or writing failed.
-     * [Thread Safe]
-     **/
-    WaitResult write_decoded_wait_for(const std::vector<uint8_t>& data, const std::string& response,
-                                      const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
-    /**
-     * Writes the given data to the coffee maker and then waits for the given response with an optional timeout.
-     * The response has to include the "\r\n" at the end of a message.
-     * The default timeout for this operation is 5 seconds.
-     * To disable the timeout, set the timeout to 0 seconds.
-     * Returns true on success.
-     * Returns false when a timeout occurred or writing failed.
-     * [Thread Safe]
-     **/
-    WaitResult write_decoded_wait_for(const std::string& data, const std::string& response,
-                                      const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
+  void flush_and_gap();
+  void drain_uart();
 
-    /**
-     * Writes the given data to the coffee maker and then waits for any response with an optional timeout.
-     * The default timeout for this operation is 5 seconds.
-     * To disable the timeout, set the timeout to 0 seconds.
-     * Returns true on success.
-     * Returns false when a timeout occurred or writing failed.
-     * [Thread Safe]
-     **/
-    std::shared_ptr<std::string> write_decoded_with_response(const std::vector<uint8_t>& data,
-                                                             const std::chrono::milliseconds& timeout =
-                                                                 std::chrono::milliseconds{5000});
-    /**
-     * Writes the given data to the coffee maker and then waits for any response with an optional timeout.
-     * The default timeout for this operation is 5 seconds.
-     * To disable the timeout, set the timeout to 0 seconds.
-     * Returns true on success.
-     * Returns false when a timeout occurred or writing failed.
-     * [Thread Safe]
-     **/
-    std::shared_ptr<std::string> write_decoded_with_response(const std::string& data,
-                                                             const std::chrono::milliseconds& timeout =
-                                                                 std::chrono::milliseconds{5000});
+  bool write_bytes(const uint8_t *data, size_t length);
+  size_t available() const;
+  bool read_byte(uint8_t *byte);
 
-    /**
-     * Sends an XML command that returns a DB-encoded XML document and waits
-     * for the response terminated by the DB terminator sequence.
-     */
-    std::shared_ptr<std::string> write_xml_with_response(
-        const std::string& data, const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
+  static std::string sanitize_line_for_log(const std::string &line);
 
-    /**
-     * Polls for the next CRLF-terminated response line.
-     * Returns true if a complete line became available and stores it in "line" without the trailing CRLF.
-     * Returns false when no complete line has been received yet.
-     */
-    bool poll_response_line(std::string& line);
+  serial::SerialConnection serial_;
+  std::string line_buffer_;
 
-    /**
-     * Clears buffered fragments collected while polling for response lines.
-     */
-    void reset_response_line_buffer();
-
-    /**
-     * Discards any pending UART input data and buffered decoded bytes.
-     */
-    void flush_serial_input() const;
-
-    /**
-     * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
-     * [Thread Safe]
-     **/
-    bool write_decoded(const uint8_t& byte);
-    /**
-     * Encodes each byte of the given bytes into 4 JUTTA bytes and writes them to the coffee maker.
-     * [Thread Safe]
-     **/
-    bool write_decoded(const std::vector<uint8_t>& data);
-    /**
-     * Encodes each character into 4 JUTTA bytes and writes them to the coffee maker.
-     *
-     * An example call could look like: write_decoded("TY:\r\n");
-     * This would request the device type from the coffee maker.
-     * [Thread Safe]
-     **/
-    bool write_decoded(const std::string& data);
-
-    /**
-     * Helper function used for debugging.
-     * Prints the given byte in binary, hex and as a char.
-     * Does not append a new line at the end!
-     *
-     * Example output:
-     * 0 1 0 1 0 1 0 0 -> 84    54      T
-     **/
-    static void print_byte(const uint8_t& byte);
-    /**
-     * Prints each byte in the given vector in binary, hex and as a char
-     *
-     * Example output:
-     * 0 1 0 1 0 1 0 0 -> 84    54      T
-     * 0 1 0 1 1 0 0 1 -> 89    59      Y
-     * 0 0 1 1 1 0 1 0 -> 58    3a      :
-     * 0 0 0 0 1 1 0 1 -> 13    0d
-     * 0 0 0 0 1 0 1 0 -> 10    0a
-     **/
-    static void print_bytes(const std::vector<uint8_t>& data);
-
-    /**
-     * Runs the encode and decode test.
-     * Ensures encoding and decoding is reversable.
-     * Should be run at least once per session to ensure proper functionality.
-     **/
-    static void run_encode_decode_test();
-
-    /**
-     * Converts the given binary vector to a string and returns it.
-     **/
-    static std::string vec_to_string(const std::vector<uint8_t>& data);
-
- private:
-    /**
-     * Encodes the given byte into four bytes that the coffee maker understands.
-     * Based on: http://protocoljura.wiki-site.com/index.php/Protocol_to_coffeemaker
-     *
-     * A full documentation of the process can be found here:
-     * https://github.com/Jutta-Proto/protocol-cpp#deobfuscating
-     **/
-    static std::array<uint8_t, 4> encode(const uint8_t& decData);
-    /**
-     * Decodes the given four bytes read from the coffee maker into on byte.
-     * Based on: http://protocoljura.wiki-site.com/index.php/Protocol_to_coffeemaker
-     *
-     * A full documentation of the process can be found here:
-     * https://github.com/Jutta-Proto/protocol-cpp#deobfuscating
-     **/
-    static uint8_t decode(const std::array<uint8_t, 4>& encData);
-    /**
-     * Writes four bytes of encoded data to the coffee maker and then waits 8ms.
-     **/
-    [[nodiscard]] bool write_encoded_unsafe(const std::array<uint8_t, 4>& encData) const;
-    /**
-     * Reads four bytes of encoded data which represent one byte of actual data.
-     * Returns true on success.
-     * Not thread safe!
-     **/
-    [[nodiscard]] bool read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const;
-    /**
-     * Reads multiples of four bytes. Every four bytes represent one actual byte.
-     * Returns the number of 4 byte tuples read.
-     * Not thread safe!
-     **/
-    [[nodiscard]] size_t read_encoded_unsafe(std::vector<std::array<uint8_t, 4>>& data) const;
-    /**
-     * Tries to read a single decoded byte.
-     * This requires reading 4 JUTTA bytes and converting them to a single actual data byte.
-     * The result will be stored in the given "byte" pointer.
-     * Returns true on success.
-     * Not thread safe!
-     **/
-    [[nodiscard]] bool read_decoded_unsafe(uint8_t* byte) const;
-    /**
-     * Reads as many data bytes, as there are availabel.
-     * Each data byte consists of 4 JUTTA bytes which will be decoded into a single data byte.
-     * Not thread safe!
-     **/
-    [[nodiscard]] bool read_decoded_unsafe(std::vector<uint8_t>& data) const;
-
-    /**
-     * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
-     * Not thread safe!
-     **/
-    [[nodiscard]] bool write_decoded_unsafe(const uint8_t& byte) const;
-    /**
-     * Encodes each byte of the given bytes into 4 JUTTA bytes and writes them to the coffee maker.
-     * Not thread safe!
-     **/
-    [[nodiscard]] bool write_decoded_unsafe(const std::vector<uint8_t>& data) const;
-    /**
-     * Encodes each character into 4 JUTTA bytes and writes them to the coffee maker.
-     *
-     * An example call could look like: write_decoded("TY:\r\n");
-     * This would request the device type from the coffee maker.
-     * Not thread safe!
-     **/
-    [[nodiscard]] bool write_decoded_unsafe(const std::string& data) const;
-
-    [[nodiscard]] bool write_xml_unsafe(const std::vector<uint8_t>& data) const;
-
-    [[nodiscard]] bool write_plain_unsafe(const std::string& data) const;
-
-    std::shared_ptr<std::string> write_plain_with_response(
-        const std::string& data, const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
-
-    /**
-     * Waits until the coffee maker responded with the given response.
-     * The response has to include the "\r\n" at the end of a message.
-     * The default timeout for this operation is 5 seconds.
-     * To disable the timeout, set the timeout to 0 seconds.
-     * Returns true on success.
-     * Returns false when a timeout occurred.
-     * Not thread safe!
-     **/
-    [[nodiscard]] WaitResult wait_for_response_unsafe(const std::string& response,
-                                                      const std::chrono::milliseconds& timeout =
-                                                          std::chrono::milliseconds{5000});
-
-    /**
-     * Waits for any response with an optional timeout.
-     * The default timeout for this operation is 5 seconds.
-     * To disable the timeout, set the timeout to 0 seconds.
-     * Returns the string on success.
-     * Not thread safe!
-     **/
-    [[nodiscard]] std::shared_ptr<std::string> wait_for_str_unsafe(
-        const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
-
-    [[nodiscard]] std::shared_ptr<std::string> wait_for_xml_response_unsafe(
-        const std::chrono::milliseconds& timeout = std::chrono::milliseconds{5000});
-
-    struct WaitContext {
-        bool active{false};
-        std::string expected{};
-        std::string recent{};
-        std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
-        uint32_t start_time{0};
-    };
-
-    WaitContext wait_context_{};
-
-    struct StringWaitContext {
-        bool active{false};
-        std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
-        uint32_t start_time{0};
-        std::string buffer{};
-        bool plain{false};
-        std::vector<uint8_t> encoded_buffer{};
-    };
-
-    StringWaitContext wait_string_context_{};
-
-    struct XmlWaitContext {
-        bool active{false};
-        std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
-        uint32_t start_time{0};
-        std::vector<uint8_t> raw_buffer{};
-    };
-
-    XmlWaitContext xml_wait_context_{};
-
-
-    // Buffer of partially received encoded bytes that haven't formed a full
-    // decoded data byte yet.
-    mutable std::vector<uint8_t> encoded_rx_buffer_{};
-
-    // Buffer for decoded bytes that were read ahead of the consumer.
-    mutable std::deque<uint8_t> decoded_rx_buffer_{};
-
-    // Buffer for decoded bytes collected while looking for complete CRLF-terminated lines.
-    mutable std::string response_line_buffer_{};
-
-    void reinject_decoded_front(const std::string& data) const;
-
+  static constexpr uint32_t LINE_TIMEOUT_MS = 700;
+  static constexpr uint32_t DB_TIMEOUT_MS = 900;
+  static constexpr uint32_t PRE_SEND_GAP_MS = 35;
 };
-//---------------------------------------------------------------------------
+
 }  // namespace jutta_proto
-//---------------------------------------------------------------------------
