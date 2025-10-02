@@ -98,6 +98,7 @@ void JuttaConnection::init() {
   pending_xml_frames_.clear();
   ok_wait_context_ = {};
   active_pipeline_ = ActivePipeline::Idle;
+  line_read_buffer_.clear();
 }
 
 void JuttaConnection::flush_serial_input() {
@@ -107,6 +108,7 @@ void JuttaConnection::flush_serial_input() {
   pending_xml_frames_.clear();
   ok_wait_context_ = {};
   active_pipeline_ = ActivePipeline::Idle;
+  line_read_buffer_.clear();
 
   auto *self = const_cast<serial::SerialConnection *>(&serial_);
   while (self->available() > 0) {
@@ -115,6 +117,42 @@ void JuttaConnection::flush_serial_input() {
       break;
     }
   }
+}
+
+void JuttaConnection::drain_plain_serial(uint32_t duration_ms) {
+  encoded_rx_buffer_.clear();
+  plain_rx_buffer_.clear();
+  pending_lines_.clear();
+  pending_xml_frames_.clear();
+  line_read_buffer_.clear();
+  ok_wait_context_ = {};
+  active_pipeline_ = ActivePipeline::Idle;
+
+  auto *self = const_cast<serial::SerialConnection *>(&serial_);
+  if (duration_ms == 0) {
+    while (self->available() > 0) {
+      uint8_t byte;
+      if (!self->read_serial_byte(&byte)) {
+        break;
+      }
+    }
+    return;
+  }
+
+  uint32_t start = esphome::millis();
+  while (!time_reached(esphome::millis(), start + duration_ms)) {
+    while (self->available() > 0) {
+      uint8_t byte;
+      if (!self->read_serial_byte(&byte)) {
+        break;
+      }
+    }
+    esphome::delay(1);
+  }
+}
+
+void JuttaConnection::send_plain_line(const std::string &line) {
+  send_line_cmd(line);
 }
 
 void JuttaConnection::flush_and_gap() {
@@ -368,13 +406,27 @@ void JuttaConnection::poll_serial_lines(uint32_t timeout_ms) {
 }
 
 bool JuttaConnection::read_line_until(std::string &out, uint32_t timeout_ms) {
-  poll_serial_lines(timeout_ms);
-  if (pending_lines_.empty()) {
-    return false;
+  out.clear();
+  uint32_t start = esphome::millis();
+  auto *self = const_cast<serial::SerialConnection *>(&serial_);
+  while (!time_reached(esphome::millis(), start + timeout_ms)) {
+    while (self->available() > 0) {
+      uint8_t byte;
+      if (!self->read_serial_byte(&byte)) {
+        break;
+      }
+      char c = static_cast<char>(byte);
+      line_read_buffer_.push_back(c);
+      if (line_read_buffer_.size() >= 2 && line_read_buffer_[line_read_buffer_.size() - 2] == '\r' &&
+          line_read_buffer_.back() == '\n') {
+        out.assign(line_read_buffer_.begin(), line_read_buffer_.end() - 2);
+        line_read_buffer_.clear();
+        return true;
+      }
+    }
+    esphome::delay(1);
   }
-  out = pending_lines_.front();
-  pending_lines_.pop_front();
-  return true;
+  return false;
 }
 
 bool JuttaConnection::read_db_frame(std::vector<uint8_t> &decoded, uint32_t timeout_ms) {
