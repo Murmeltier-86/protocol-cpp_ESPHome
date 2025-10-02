@@ -37,9 +37,18 @@ class JuttaConnection {
  private:
   serial::SerialConnection serial_;
 
-  std::string line_rx_buffer_;
+  struct XmlFrame {
+    std::vector<uint8_t> payload;
+    size_t encoded_size{0};
+  };
+
+  enum class ActivePipeline { Idle, Plain, Xml };
+
+  std::vector<uint8_t> encoded_rx_buffer_;
+  std::string plain_rx_buffer_;
   std::deque<std::string> pending_lines_;
-  std::vector<uint8_t> db_rx_buffer_;
+  std::deque<XmlFrame> pending_xml_frames_;
+  ActivePipeline active_pipeline_{ActivePipeline::Idle};
 
   struct OkWaitContext {
     bool active{false};
@@ -48,6 +57,14 @@ class JuttaConnection {
   } ok_wait_context_;
 
   void flush_and_gap();
+  void drain_encoded(const std::chrono::milliseconds &duration);
+  bool pump_serial(uint32_t timeout_ms);
+  bool process_encoded_frames();
+  bool decode_encoded_frame(const std::vector<uint8_t> &encoded, std::vector<uint8_t> &decoded) const;
+  bool is_plain_text_frame(const std::vector<uint8_t> &decoded) const;
+  void route_decoded_frame(std::vector<uint8_t> decoded, size_t encoded_length);
+  static std::string format_hex(const std::vector<uint8_t> &buffer, size_t max_bytes = 64);
+  void set_active_pipeline(ActivePipeline pipeline);
 
   static std::string trim_command(const std::string &command);
   static bool command_requires_ok(const std::string &command);

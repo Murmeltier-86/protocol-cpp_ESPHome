@@ -27,6 +27,7 @@ constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
 constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 4500;
 constexpr uint32_t MACHINE_DATA_PRE_REQUEST_GAP_MS = 30;
+constexpr float MAINTENANCE_RAW_PERCENT_DIVISOR = 655.35f;
 
 template<typename Sensor>
 auto try_set_unique_id(Sensor *sensor, const std::string &unique_id)
@@ -500,6 +501,7 @@ std::optional<std::string> format_maintenance_percent_payload(const std::string 
     uint16_t encoded_percent = static_cast<uint16_t>(raw_value >> 16);
     uint16_t auxiliary_value = decode_percent_auxiliary(raw_value);
     float percent = decode_percent_fixed_point(raw_value);
+    float raw_percent = static_cast<float>(auxiliary_value) / MAINTENANCE_RAW_PERCENT_DIVISOR;
     const char *name = i < MAINTENANCE_PERCENT_NAMES.size() ? MAINTENANCE_PERCENT_NAMES[i] : nullptr;
     stream << "; ";
     if (name != nullptr) {
@@ -507,14 +509,18 @@ std::optional<std::string> format_maintenance_percent_payload(const std::string 
       stream << " (Encoded=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(4)
              << encoded_percent << std::dec << "=" << encoded_percent;
       stream << "; Raw=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(4)
-             << auxiliary_value << std::dec << "=" << auxiliary_value << ")";
+             << auxiliary_value << std::dec << "=" << auxiliary_value << "; RawPercent="
+             << std::fixed << std::setprecision(1) << raw_percent << '%'
+             << ')';
       stream << std::setfill(' ');
     } else {
       stream << "Value" << (i + 1) << " Percent=" << std::fixed << std::setprecision(1) << percent;
       stream << " (Encoded=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(4)
              << encoded_percent << std::dec << "=" << encoded_percent;
       stream << "; Raw=0x" << std::uppercase << std::hex << std::setfill('0') << std::setw(4)
-             << auxiliary_value << std::dec << "=" << auxiliary_value << ")";
+             << auxiliary_value << std::dec << "=" << auxiliary_value << "; RawPercent="
+             << std::fixed << std::setprecision(1) << raw_percent << '%'
+             << ')';
       stream << std::setfill(' ');
     }
   }
@@ -543,7 +549,7 @@ MachineDataFieldList parse_maintenance_percent_fields(const std::string &payload
     }
     uint32_t raw_value = read_u32_be(&data[index]);
     uint16_t auxiliary_value = decode_percent_auxiliary(raw_value);
-    float percent = decode_percent_fixed_point(raw_value);
+    float percent = static_cast<float>(auxiliary_value) / MAINTENANCE_RAW_PERCENT_DIVISOR;
     std::string percent_text = format_percent_value(percent);
     const char *name = i < MAINTENANCE_PERCENT_NAMES.size() ? MAINTENANCE_PERCENT_NAMES[i] : nullptr;
     std::string field_name;
@@ -557,7 +563,7 @@ MachineDataFieldList parse_maintenance_percent_fields(const std::string &payload
     fields.push_back({field_name, percent_text, percent, "%"});
 
     std::ostringstream raw_stream;
-    raw_stream << auxiliary_value;
+    raw_stream << auxiliary_value << " (" << percent_text << "%)";
     std::string raw_field_name;
     if (name != nullptr) {
       raw_field_name = std::string(name) + " Raw";
@@ -566,7 +572,7 @@ MachineDataFieldList parse_maintenance_percent_fields(const std::string &payload
       fallback_name << "Value" << (i + 1) << " Raw";
       raw_field_name = fallback_name.str();
     }
-    fields.push_back({raw_field_name, raw_stream.str(), static_cast<float>(auxiliary_value), ""});
+    fields.push_back({raw_field_name, raw_stream.str(), std::nullopt, ""});
   }
 
   return fields;
