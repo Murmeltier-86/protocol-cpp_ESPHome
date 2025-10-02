@@ -145,6 +145,7 @@ class CoffeeMaker {
         uint32_t delay_ms{0};
         uint32_t delay_target{0};
         bool sent{false};
+        bool response_received{false};
         std::chrono::milliseconds timeout{std::chrono::milliseconds{5000}};
 
         void reset();
