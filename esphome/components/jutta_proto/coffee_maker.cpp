@@ -21,7 +21,6 @@ void CoffeeMaker::CommandState::reset() {
     this->delay_ms = 0;
     this->delay_target = 0;
     this->sent = false;
-    this->response_received = false;
     this->timeout = std::chrono::milliseconds{5000};
 }
 
@@ -176,41 +175,40 @@ CoffeeMaker::CommandResult CoffeeMaker::run_command(const std::string& command, 
         this->command_state_.delay_ms = delay_ms;
         this->command_state_.delay_target = 0;
         this->command_state_.sent = false;
-        this->command_state_.response_received = false;
         this->command_state_.timeout = timeout;
     }
 
     if (!this->command_state_.sent) {
         if (!this->connection->write_decoded(this->command_state_.command)) {
-            this->command_state_.reset();
-            return CommandResult::Error;
+            return CommandResult::InProgress;
         }
         this->command_state_.sent = true;
     }
 
-    if (!this->command_state_.response_received) {
-        auto wait_result = this->connection->wait_for_ok(this->command_state_.timeout);
-        if (wait_result == JuttaConnection::WaitResult::Success) {
-            this->command_state_.response_received = true;
-        } else {
-            this->command_state_.reset();
-            return wait_result == JuttaConnection::WaitResult::Timeout ? CommandResult::Timeout
-                                                                      : CommandResult::Error;
-        }
+    auto wait_result = this->connection->wait_for_ok(this->command_state_.timeout);
+    if (wait_result == JuttaConnection::WaitResult::Pending) {
+        return CommandResult::InProgress;
     }
 
-    if (this->command_state_.delay_ms > 0) {
-        uint32_t now = esphome::millis();
-        if (this->command_state_.delay_target == 0) {
-            this->command_state_.delay_target = now + this->command_state_.delay_ms;
+    if (wait_result == JuttaConnection::WaitResult::Success) {
+        if (this->command_state_.delay_ms > 0) {
+            uint32_t now = esphome::millis();
+            if (this->command_state_.delay_target == 0) {
+                this->command_state_.delay_target = now + this->command_state_.delay_ms;
+            }
+            if (!time_reached(now, this->command_state_.delay_target)) {
+                return CommandResult::InProgress;
+            }
         }
-        if (!time_reached(now, this->command_state_.delay_target)) {
-            return CommandResult::InProgress;
-        }
+        this->command_state_.reset();
+        return CommandResult::Success;
     }
 
     this->command_state_.reset();
-    return CommandResult::Success;
+    if (wait_result == JuttaConnection::WaitResult::Timeout) {
+        return CommandResult::Timeout;
+    }
+    return CommandResult::Error;
 }
 
 CoffeeMaker::CommandResult CoffeeMaker::run_press_button(jutta_button_t button) {
