@@ -338,7 +338,9 @@ void JuttaConnection::send_line_cmd(const std::string &line) {
   std::vector<uint8_t> buffer(line.begin(), line.end());
   buffer.push_back('\r');
   buffer.push_back('\n');
-  serial_.write_serial_buffer(buffer);
+  if (!serial_.write_serial_buffer(buffer)) {
+    ESP_LOGW(TAG, "Failed to send line command over serial");
+  }
   serial_.flush();
 }
 
@@ -355,7 +357,9 @@ void JuttaConnection::send_db_cmd(const std::string &command) {
   }
   encoded.insert(encoded.end(), DB_TRAILER.begin(), DB_TRAILER.end());
   ESP_LOGD(TAG, "TX_DB len=%zu", encoded.size());
-  serial_.write_serial_buffer(encoded);
+  if (!serial_.write_serial_buffer(encoded)) {
+    ESP_LOGW(TAG, "Failed to send DB command over serial (len=%zu)", encoded.size());
+  }
   serial_.flush();
 }
 
