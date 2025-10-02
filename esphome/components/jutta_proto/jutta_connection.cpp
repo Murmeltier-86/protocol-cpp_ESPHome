@@ -5,6 +5,8 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -68,23 +70,43 @@ bool equals_ignore_case(const std::string &lhs, const std::string &rhs) {
   return true;
 }
 
+uint8_t unswap_nibbles(uint8_t value) {
+  return static_cast<uint8_t>(((value & 0x0F) << 4) | ((value & 0xF0) >> 4));
+}
+
+uint8_t decode_quartet(const std::array<uint8_t, 4> &group) {
+  uint8_t result = 0;
+  for (size_t index = 0; index < group.size(); ++index) {
+    uint8_t byte = group[index];
+    uint8_t low_bit = static_cast<uint8_t>((byte >> 2) & 0x01);
+    uint8_t high_bit = static_cast<uint8_t>((byte >> 5) & 0x01);
+    result |= static_cast<uint8_t>(low_bit << (index * 2));
+    result |= static_cast<uint8_t>(high_bit << (index * 2 + 1));
+  }
+  return result;
+}
+
 }  // namespace
 
 JuttaConnection::JuttaConnection(esphome::uart::UARTComponent *parent) : serial_(parent) {}
 
 void JuttaConnection::init() {
   serial_.init();
-  line_rx_buffer_.clear();
+  encoded_rx_buffer_.clear();
+  plain_rx_buffer_.clear();
   pending_lines_.clear();
-  db_rx_buffer_.clear();
+  pending_xml_frames_.clear();
   ok_wait_context_ = {};
+  active_pipeline_ = ActivePipeline::Idle;
 }
 
 void JuttaConnection::flush_serial_input() {
-  line_rx_buffer_.clear();
+  encoded_rx_buffer_.clear();
+  plain_rx_buffer_.clear();
   pending_lines_.clear();
-  db_rx_buffer_.clear();
+  pending_xml_frames_.clear();
   ok_wait_context_ = {};
+  active_pipeline_ = ActivePipeline::Idle;
 
   auto *self = const_cast<serial::SerialConnection *>(&serial_);
   while (self->available() > 0) {
@@ -100,6 +122,199 @@ void JuttaConnection::flush_and_gap() {
   if (JUTTA_SERIAL_GAP_MS > 0) {
     esphome::delay(JUTTA_SERIAL_GAP_MS);
   }
+}
+
+void JuttaConnection::drain_encoded(const std::chrono::milliseconds &duration) {
+  uint32_t wait_ms = static_cast<uint32_t>(std::max<long long>(0, duration.count()));
+  if (wait_ms == 0) {
+    pump_serial(0);
+    return;
+  }
+  uint32_t start = esphome::millis();
+  while (!time_reached(esphome::millis(), start + wait_ms)) {
+    pump_serial(5);
+    esphome::delay(1);
+  }
+}
+
+bool JuttaConnection::pump_serial(uint32_t timeout_ms) {
+  uint32_t start = esphome::millis();
+  bool changed = false;
+  while (true) {
+    auto *self = const_cast<serial::SerialConnection *>(&serial_);
+    bool read_any = false;
+    while (self->available() > 0) {
+      uint8_t byte;
+      if (!self->read_serial_byte(&byte)) {
+        break;
+      }
+      encoded_rx_buffer_.push_back(byte);
+      read_any = true;
+    }
+    if (read_any) {
+      changed = true;
+    }
+
+    if (process_encoded_frames()) {
+      changed = true;
+    }
+
+    if (!pending_lines_.empty() || !pending_xml_frames_.empty()) {
+      break;
+    }
+
+    if (timeout_ms == 0) {
+      break;
+    }
+    uint32_t now = esphome::millis();
+    if (time_reached(now, start + timeout_ms)) {
+      break;
+    }
+    esphome::delay(1);
+  }
+  return changed;
+}
+
+bool JuttaConnection::process_encoded_frames() {
+  bool any = false;
+  while (encoded_rx_buffer_.size() >= DB_TRAILER.size()) {
+    auto it = std::search(encoded_rx_buffer_.begin(), encoded_rx_buffer_.end(), DB_TRAILER.begin(), DB_TRAILER.end());
+    if (it == encoded_rx_buffer_.end()) {
+      break;
+    }
+
+    std::vector<uint8_t> encoded(encoded_rx_buffer_.begin(), it);
+    encoded_rx_buffer_.erase(encoded_rx_buffer_.begin(), it + DB_TRAILER.size());
+
+    std::string encoded_hex = format_hex(encoded);
+    std::string trailer_hex = format_hex(std::vector<uint8_t>(DB_TRAILER.begin(), DB_TRAILER.end()), DB_TRAILER.size());
+    ESP_LOGV(TAG, "RX_ENC len=%zu hex=%s terminator=%s", encoded.size(), encoded_hex.c_str(),
+             trailer_hex.c_str());
+
+    std::vector<uint8_t> decoded;
+    if (!decode_encoded_frame(encoded, decoded)) {
+      any = true;
+      continue;
+    }
+
+    route_decoded_frame(std::move(decoded), encoded.size());
+    any = true;
+  }
+  return any;
+}
+
+bool JuttaConnection::decode_encoded_frame(const std::vector<uint8_t> &encoded,
+                                           std::vector<uint8_t> &decoded) const {
+  std::vector<uint8_t> unescaped;
+  unescaped.reserve(encoded.size());
+  for (size_t i = 0; i < encoded.size(); ++i) {
+    uint8_t value = encoded[i];
+    if (value == DB_ESC) {
+      if (i + 1 >= encoded.size()) {
+        ESP_LOGW(TAG, "Discarding encoded frame with dangling escape (encoded_len=%zu, hex=%s).",
+                 encoded.size(), format_hex(encoded).c_str());
+        return false;
+      }
+      ++i;
+      unescaped.push_back(static_cast<uint8_t>(encoded[i] ^ 0x20));
+    } else {
+      unescaped.push_back(value);
+    }
+  }
+
+  if (unescaped.empty()) {
+    ESP_LOGW(TAG, "Discarding empty encoded frame (encoded_hex=%s).", format_hex(encoded).c_str());
+    return false;
+  }
+
+  if (unescaped.size() % 4 != 0) {
+    ESP_LOGW(TAG,
+             "Discarding encoded frame with unexpected length (encoded_len=%zu, unescaped_len=%zu, hex=%s).",
+             encoded.size(), unescaped.size(), format_hex(encoded).c_str());
+    return false;
+  }
+
+  decoded.clear();
+  decoded.reserve(unescaped.size() / 4);
+  for (size_t i = 0; i < unescaped.size(); i += 4) {
+    std::array<uint8_t, 4> quartet = {unescaped[i], unescaped[i + 1], unescaped[i + 2], unescaped[i + 3]};
+    for (auto &byte : quartet) {
+      byte = unswap_nibbles(byte);
+    }
+    uint8_t decoded_byte = decode_quartet(quartet);
+    decoded.push_back(decoded_byte);
+  }
+
+  return true;
+}
+
+bool JuttaConnection::is_plain_text_frame(const std::vector<uint8_t> &decoded) const {
+  if (decoded.empty()) {
+    return false;
+  }
+
+  bool has_line_ending = false;
+  for (size_t i = 0; i < decoded.size(); ++i) {
+    uint8_t byte = decoded[i];
+    if (byte == '\r') {
+      if (i + 1 < decoded.size() && decoded[i + 1] == '\n') {
+        has_line_ending = true;
+      }
+      continue;
+    }
+    if (byte == '\n') {
+      continue;
+    }
+    if (byte == '\t') {
+      continue;
+    }
+    if (byte >= 0x20 && byte <= 0x7E) {
+      continue;
+    }
+    return false;
+  }
+
+  return has_line_ending;
+}
+
+void JuttaConnection::route_decoded_frame(std::vector<uint8_t> decoded, size_t encoded_length) {
+  if (is_plain_text_frame(decoded)) {
+    plain_rx_buffer_.append(reinterpret_cast<const char *>(decoded.data()), decoded.size());
+    size_t terminator_pos = 0;
+    while ((terminator_pos = plain_rx_buffer_.find("\r\n")) != std::string::npos) {
+      std::string line = plain_rx_buffer_.substr(0, terminator_pos);
+      plain_rx_buffer_.erase(0, terminator_pos + 2);
+      ESP_LOGD(TAG, "RX_LINE \"%s\"", printable_snippet(line).c_str());
+      pending_lines_.push_back(std::move(line));
+    }
+    return;
+  }
+
+  XmlFrame frame;
+  frame.payload = std::move(decoded);
+  frame.encoded_size = encoded_length;
+  ESP_LOGD(TAG, "RX_XML encoded_len=%zu decoded_len=%zu", frame.encoded_size, frame.payload.size());
+  pending_xml_frames_.push_back(std::move(frame));
+}
+
+std::string JuttaConnection::format_hex(const std::vector<uint8_t> &buffer, size_t max_bytes) {
+  std::ostringstream stream;
+  size_t limit = std::min(buffer.size(), max_bytes);
+  stream << std::uppercase << std::hex << std::setfill('0');
+  for (size_t i = 0; i < limit; ++i) {
+    if (i > 0) {
+      stream << ' ';
+    }
+    stream << std::setw(2) << static_cast<int>(buffer[i]);
+  }
+  if (buffer.size() > limit) {
+    stream << " …";
+  }
+  return stream.str();
+}
+
+void JuttaConnection::set_active_pipeline(ActivePipeline pipeline) {
+  active_pipeline_ = pipeline;
 }
 
 std::string JuttaConnection::trim_command(const std::string &command) {
@@ -145,45 +360,7 @@ void JuttaConnection::send_db_cmd(const std::string &command) {
 }
 
 void JuttaConnection::poll_serial_lines(uint32_t timeout_ms) {
-  uint32_t start = esphome::millis();
-  while (true) {
-    auto *self = const_cast<serial::SerialConnection *>(&serial_);
-    while (self->available() > 0) {
-      uint8_t byte;
-      if (!self->read_serial_byte(&byte)) {
-        break;
-      }
-      line_rx_buffer_.push_back(static_cast<char>(byte));
-      if (line_rx_buffer_.size() > 512) {
-        line_rx_buffer_.erase(0, line_rx_buffer_.size() - 512);
-      }
-      while (true) {
-        auto terminator = line_rx_buffer_.find("\r\n");
-        if (terminator == std::string::npos) {
-          break;
-        }
-        std::string line = line_rx_buffer_.substr(0, terminator);
-        line_rx_buffer_.erase(0, terminator + 2);
-        ESP_LOGD(TAG, "RX_LINE \"%s\"", printable_snippet(line).c_str());
-        pending_lines_.push_back(line);
-      }
-    }
-
-    if (!pending_lines_.empty()) {
-      return;
-    }
-
-    if (timeout_ms == 0) {
-      return;
-    }
-
-    uint32_t now = esphome::millis();
-    if (time_reached(now, start + timeout_ms)) {
-      return;
-    }
-
-    esphome::delay(1);
-  }
+  pump_serial(timeout_ms);
 }
 
 bool JuttaConnection::read_line_until(std::string &out, uint32_t timeout_ms) {
@@ -198,51 +375,29 @@ bool JuttaConnection::read_line_until(std::string &out, uint32_t timeout_ms) {
 
 bool JuttaConnection::read_db_frame(std::vector<uint8_t> &decoded, uint32_t timeout_ms) {
   uint32_t start = esphome::millis();
-  std::vector<uint8_t> raw;
   while (true) {
-    auto *self = const_cast<serial::SerialConnection *>(&serial_);
-    while (self->available() > 0) {
-      uint8_t byte;
-      if (!self->read_serial_byte(&byte)) {
-        break;
-      }
-      db_rx_buffer_.push_back(byte);
-      if (db_rx_buffer_.size() >= DB_TRAILER.size()) {
-        auto frame_start = db_rx_buffer_.end() - DB_TRAILER.size();
-        if (std::equal(DB_TRAILER.begin(), DB_TRAILER.end(), frame_start)) {
-          raw.assign(db_rx_buffer_.begin(), db_rx_buffer_.end() - DB_TRAILER.size());
-          db_rx_buffer_.clear();
+    pump_serial(5);
 
-          decoded.clear();
-          decoded.reserve(raw.size());
-          for (size_t i = 0; i < raw.size(); ++i) {
-            uint8_t byte_raw = raw[i];
-            if (byte_raw == DB_ESC) {
-              if (i + 1 >= raw.size()) {
-                ESP_LOGW(TAG, "Discarding DB frame with dangling escape (raw_len=%zu).", raw.size());
-                decoded.clear();
-                return false;
-              }
-              ++i;
-              decoded.push_back(static_cast<uint8_t>(raw[i] ^ 0x20));
-            } else {
-              decoded.push_back(byte_raw);
-            }
-          }
-          ESP_LOGD(TAG, "RX_DB raw_len=%zu decoded_len=%zu trailer_ok=1", raw.size(), decoded.size());
-          return true;
-        }
-      }
+    if (!pending_xml_frames_.empty()) {
+      XmlFrame frame = std::move(pending_xml_frames_.front());
+      pending_xml_frames_.pop_front();
+      decoded = std::move(frame.payload);
+      ESP_LOGD(TAG, "XML frame ready encoded_len=%zu decoded_len=%zu", frame.encoded_size, decoded.size());
+      return true;
     }
 
     if (timeout_ms == 0) {
       return false;
     }
+
     uint32_t now = esphome::millis();
     if (time_reached(now, start + timeout_ms)) {
+      if (!encoded_rx_buffer_.empty()) {
+        ESP_LOGW(TAG, "Timeout waiting for XML frame. buffered_hex=%s",
+                 format_hex(encoded_rx_buffer_).c_str());
+      }
       return false;
     }
-    esphome::delay(1);
   }
 }
 
@@ -269,18 +424,22 @@ bool JuttaConnection::wait_for_line(const std::string &expected, const std::chro
 
 std::shared_ptr<std::string> JuttaConnection::transact_db_internal(const std::string &command,
                                                                    const std::chrono::milliseconds &timeout, bool *ok) {
-  flush_and_gap();
+  drain_encoded(std::chrono::milliseconds{40});
+  pending_xml_frames_.clear();
+  set_active_pipeline(ActivePipeline::Xml);
   send_db_cmd(command);
   std::vector<uint8_t> decoded;
   if (!read_db_frame(decoded, static_cast<uint32_t>(timeout.count()))) {
     if (ok != nullptr) {
       *ok = false;
     }
+    set_active_pipeline(ActivePipeline::Idle);
     return nullptr;
   }
   if (ok != nullptr) {
     *ok = true;
   }
+  set_active_pipeline(ActivePipeline::Idle);
   return std::make_shared<std::string>(decoded.begin(), decoded.end());
 }
 
@@ -291,7 +450,8 @@ bool JuttaConnection::write_decoded(const std::string &command) {
   }
   bool had_newline = command.find('\n') != std::string::npos || command.find('\r') != std::string::npos;
   if (trimmed.front() == '@' && !had_newline) {
-    flush_and_gap();
+    drain_encoded(std::chrono::milliseconds{40});
+    pending_xml_frames_.clear();
     send_db_cmd(trimmed);
     return true;
   }
@@ -327,13 +487,17 @@ JuttaConnection::WaitResult JuttaConnection::write_decoded_wait_for(
   }
 
   flush_and_gap();
+  set_active_pipeline(ActivePipeline::Plain);
   send_line_cmd(trimmed_command);
   if (trimmed_expected.empty()) {
+    set_active_pipeline(ActivePipeline::Idle);
     return WaitResult::Success;
   }
   if (wait_for_line(trimmed_expected, timeout)) {
+    set_active_pipeline(ActivePipeline::Idle);
     return WaitResult::Success;
   }
+  set_active_pipeline(ActivePipeline::Idle);
   return WaitResult::Timeout;
 }
 
@@ -352,6 +516,7 @@ JuttaConnection::WaitResult JuttaConnection::wait_for_ok(const std::chrono::mill
     ok_wait_context_.active = true;
     ok_wait_context_.timeout = timeout;
     ok_wait_context_.start_time = esphome::millis();
+    set_active_pipeline(ActivePipeline::Plain);
   }
 
   poll_serial_lines(0);
@@ -359,6 +524,7 @@ JuttaConnection::WaitResult JuttaConnection::wait_for_ok(const std::chrono::mill
     if (equals_ignore_case(*it, "ok:")) {
       pending_lines_.erase(it);
       ok_wait_context_.active = false;
+      set_active_pipeline(ActivePipeline::Idle);
       ESP_LOGD(TAG, "OK=1");
       return WaitResult::Success;
     }
@@ -370,6 +536,7 @@ JuttaConnection::WaitResult JuttaConnection::wait_for_ok(const std::chrono::mill
   uint32_t now = esphome::millis();
   if (time_reached(now, ok_wait_context_.start_time + static_cast<uint32_t>(timeout.count()))) {
     ok_wait_context_.active = false;
+    set_active_pipeline(ActivePipeline::Idle);
     ESP_LOGD(TAG, "OK=0");
     return WaitResult::Timeout;
   }
@@ -387,7 +554,7 @@ bool JuttaConnection::poll_response_line(std::string &line) {
 }
 
 void JuttaConnection::reset_response_line_buffer() {
-  line_rx_buffer_.clear();
+  plain_rx_buffer_.clear();
   pending_lines_.clear();
 }
 
