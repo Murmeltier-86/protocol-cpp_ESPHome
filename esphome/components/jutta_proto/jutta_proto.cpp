@@ -1517,8 +1517,6 @@ void JuraComponent::process_machine_data_query() {
   bool has_field_subscribers = this->machine_data_auto_fields_ || !this->machine_data_field_sensors_.empty() ||
                                !this->machine_data_numeric_field_sensors_.empty();
   if (!this->is_ready()) {
-    this->machine_data_request_pending_ = false;
-    this->machine_data_request_start_ = 0;
     this->machine_data_command_index_ = 0;
     this->machine_data_responses_valid_ = false;
     this->machine_data_query_has_error_ = false;
@@ -1542,8 +1540,6 @@ void JuraComponent::process_machine_data_query() {
   }
 
   auto reset_query_state = [&]() {
-    this->machine_data_request_pending_ = false;
-    this->machine_data_request_start_ = 0;
     this->machine_data_command_index_ = 0;
     this->machine_data_responses_.clear();
     this->machine_data_payloads_.clear();
@@ -1608,7 +1604,7 @@ void JuraComponent::process_machine_data_query() {
 
   uint32_t now = esphome::millis();
 
-  if (!this->machine_data_request_pending_ && this->machine_data_command_index_ == 0) {
+  if (this->machine_data_command_index_ == 0) {
     if (this->machine_data_query_next_ != 0 && !time_reached(now, this->machine_data_query_next_)) {
       return;
     }
@@ -1621,49 +1617,19 @@ void JuraComponent::process_machine_data_query() {
     esphome::delay(MACHINE_DATA_PRE_REQUEST_GAP_MS);
   }
 
-  if (this->machine_data_request_pending_) {
-    if (this->machine_data_command_index_ >= MACHINE_DATA_COMMANDS.size()) {
-      this->machine_data_request_pending_ = false;
-    } else {
-      const auto &definition = MACHINE_DATA_COMMANDS[this->machine_data_command_index_];
-      auto response = this->coffee_maker_->connection->write_xml_with_response(
-          definition.command, std::chrono::milliseconds{MACHINE_DATA_REQUEST_TIMEOUT_MS});
-      if (response != nullptr) {
-        this->machine_data_responses_[this->machine_data_command_index_] = *response;
-        if (!handle_machine_data_response(this->machine_data_command_index_, *response)) {
-          fail_current_query();
-          if (has_field_subscribers) {
-            this->machine_data_field_values_.clear();
-            this->publish_machine_data_fields_(this->machine_data_field_values_);
-          }
-          return;
-        }
-        ++this->machine_data_command_index_;
-        this->machine_data_request_pending_ = false;
-        this->machine_data_request_start_ = 0;
-      } else {
-        if (time_reached(now, this->machine_data_request_start_ + MACHINE_DATA_REQUEST_TIMEOUT_MS)) {
-          ESP_LOGW(TAG, "Timeout while waiting for machine data response to command '%s'.", definition.command);
-          fail_current_query();
-          if (has_field_subscribers) {
-            this->machine_data_field_values_.clear();
-            this->publish_machine_data_fields_(this->machine_data_field_values_);
-          }
-        }
-        return;
-      }
-    }
-  }
-
   while (this->machine_data_command_index_ < MACHINE_DATA_COMMANDS.size()) {
     const auto &definition = MACHINE_DATA_COMMANDS[this->machine_data_command_index_];
     ESP_LOGV(TAG, "Requesting machine data command '%s' (%s/%s).", definition.command,
              definition.section, definition.element);
-    this->machine_data_request_start_ = esphome::millis();
-    auto response = this->coffee_maker_->connection->write_xml_with_response(
+    auto response = this->coffee_maker_->connection->transact_db(
         definition.command, std::chrono::milliseconds{MACHINE_DATA_REQUEST_TIMEOUT_MS});
     if (response == nullptr) {
-      this->machine_data_request_pending_ = true;
+      ESP_LOGW(TAG, "Timeout while waiting for machine data response to command '%s'.", definition.command);
+      fail_current_query();
+      if (has_field_subscribers) {
+        this->machine_data_field_values_.clear();
+        this->publish_machine_data_fields_(this->machine_data_field_values_);
+      }
       return;
     }
     this->machine_data_responses_[this->machine_data_command_index_] = *response;

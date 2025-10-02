@@ -117,8 +117,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::set<std::string> machine_data_numeric_field_user_keys_;
   MachineDataFieldMap machine_data_field_values_;
   uint32_t machine_data_query_next_{0};
-  bool machine_data_request_pending_{false};
-  uint32_t machine_data_request_start_{0};
   size_t machine_data_command_index_{0};
   std::vector<std::string> machine_data_responses_;
   std::vector<std::string> machine_data_payloads_;

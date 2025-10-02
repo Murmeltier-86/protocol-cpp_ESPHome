@@ -24,6 +24,22 @@ class SerialConnection : public esphome::uart::UARTDevice {
      * Returns how many bytes have been actually read.
      **/
     [[nodiscard]] size_t read_serial(std::array<uint8_t, 4>& buffer) const;
+
+    /**
+     * Reads up to "length" bytes into the provided buffer without blocking.
+     * Returns how many bytes have been read.
+     */
+    [[nodiscard]] size_t read_serial_buffer(uint8_t* data, size_t length) const;
+
+    [[nodiscard]] size_t read_serial_buffer(std::vector<uint8_t>& data) const {
+        return read_serial_buffer(data.data(), data.size());
+    }
+
+    /**
+     * Reads a single byte from the UART if available.
+     * Returns true when a byte has been read.
+     */
+    [[nodiscard]] bool read_serial_byte(uint8_t* byte) const;
     /**
      * Writes the given data buffer to the serial connection.
      * Returns true on success.
