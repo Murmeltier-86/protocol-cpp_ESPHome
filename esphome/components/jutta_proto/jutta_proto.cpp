@@ -1295,56 +1295,23 @@ void JuraComponent::process_handshake() {
     case HandshakeStage::IDLE:
       break;
     case HandshakeStage::HELLO: {
-      if (!this->handshake_hello_request_sent_) {
-        ESP_LOGD(TAG, "HELLO: draining UART before requesting device type.");
-        this->connection_->drain_plain_serial(35);
-        this->handshake_buffer_.clear();
-        this->handshake_deadline_ = 0;
-        this->connection_->send_plain_line("ty:");
-        this->handshake_hello_request_sent_ = true;
-      }
-
-      std::string line;
-      if (!this->connection_->read_line_until(line, 1500)) {
-        this->restart_handshake("timeout waiting for device type line");
+      std::string device_line;
+      if (!this->connection_->await_device_type(device_line)) {
+        this->restart_handshake("failed to read device type");
         break;
       }
 
-      std::string preview = line.substr(0, std::min<size_t>(60, line.size()));
-      ESP_LOGD(TAG, "RX_LINE \"%s\"", format_printable_string(preview).c_str());
-
-      std::string lowercase_line = line;
-      std::transform(lowercase_line.begin(), lowercase_line.end(), lowercase_line.begin(),
-                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-      if (lowercase_line.rfind("ty:", 0) != 0) {
-        ESP_LOGW(TAG, "HELLO: unexpected response line '%s'",
-                 format_printable_string(line).c_str());
-        this->restart_handshake("unexpected device type response");
-        break;
-      }
-
-      std::string ok_line;
-      bool ok_received = this->connection_->read_line_until(ok_line, 800);
-      if (!ok_received) {
-        ESP_LOGD(TAG, "RX_OK 0");
-        this->restart_handshake("timeout waiting for ok acknowledgment");
-        break;
-      }
-
-      bool ok_match = ok_line == "ok:";
-      ESP_LOGD(TAG, "RX_OK %d", ok_match ? 1 : 0);
-      if (!ok_match) {
-        this->restart_handshake("unexpected acknowledgment line");
-        break;
-      }
-
-      if (line.size() <= 3) {
+      if (device_line.size() <= 3) {
         ESP_LOGW(TAG, "HELLO: device type response line '%s' has no payload, proceeding with unknown type.",
-                 format_printable_string(line).c_str());
+                 format_printable_string(device_line).c_str());
         this->device_type_ = "ty:unknown";
       } else {
-        this->device_type_ = line;
+        this->device_type_ = device_line;
         ESP_LOGI(TAG, "Detected coffee maker response: %s", this->device_type_.c_str());
+      }
+
+      if (!this->connection_->prime_initial_db()) {
+        ESP_LOGW(TAG, "HELLO: initial DB warm-up failed");
       }
 
       this->handshake_buffer_.clear();
@@ -1507,6 +1474,9 @@ bool JuraComponent::has_machine_data_subscribers_() const {
 
 void JuraComponent::process_machine_data_query() {
   if (!this->has_machine_data_subscribers_()) {
+    return;
+  }
+  if (::jutta_proto::uart_busy.load()) {
     return;
   }
   bool has_field_subscribers = this->machine_data_auto_fields_ || !this->machine_data_field_sensors_.empty() ||

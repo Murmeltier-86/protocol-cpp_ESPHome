@@ -1,14 +1,28 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <deque>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "esphome/core/hal.h"
 #include "serial_connection.hpp"
 
 namespace jutta_proto {
+
+extern std::atomic<bool> uart_busy;
+
+struct UartGuard {
+  std::atomic<bool> &flag;
+  explicit UartGuard(std::atomic<bool> &f) : flag(f) {
+    while (flag.exchange(true)) {
+      esphome::delay(1);
+    }
+  }
+  ~UartGuard() { flag.store(false); }
+};
 
 class JuttaConnection {
  public:
@@ -34,11 +48,15 @@ class JuttaConnection {
 
   void flush_serial_input();
 
-  void drain_plain_serial(uint32_t duration_ms);
+  void drain_uart_for_ms(uint32_t duration_ms);
 
   void send_plain_line(const std::string &line);
 
-  bool read_line_until(std::string &out, uint32_t timeout_ms);
+  bool read_line_until(std::string &out, uint32_t timeout_ms, uint32_t *bytes_seen = nullptr);
+
+  bool await_device_type(std::string &out_ty);
+
+  bool prime_initial_db();
 
  private:
   serial::SerialConnection serial_;
@@ -74,6 +92,7 @@ class JuttaConnection {
 
   static std::string trim_command(const std::string &command);
   static bool command_requires_ok(const std::string &command);
+  static bool starts_with_lower(const std::string &s, const char *prefix);
 
   void send_line_cmd(const std::string &line);
   void send_db_cmd(const std::string &command);
@@ -86,6 +105,7 @@ class JuttaConnection {
                                                     const std::chrono::milliseconds &timeout, bool *ok);
 
   std::string line_read_buffer_;
+  std::string line_buffer_;
 };
 
 }  // namespace jutta_proto
