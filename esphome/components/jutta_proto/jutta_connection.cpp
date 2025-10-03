@@ -90,6 +90,38 @@ uint8_t decode_quartet(const std::array<uint8_t, 4> &group) {
   return result;
 }
 
+std::array<uint8_t, 4> encode_quartet(uint8_t value) {
+  std::array<uint8_t, 4> quartet{};
+  for (size_t index = 0; index < quartet.size(); ++index) {
+    bool low_bit = (value >> (index * 2)) & 0x01;
+    bool high_bit = (value >> (index * 2 + 1)) & 0x01;
+    uint8_t byte = 0xFF;
+    if (!low_bit) {
+      byte = static_cast<uint8_t>(byte & ~(1U << 2));
+    }
+    if (!high_bit) {
+      byte = static_cast<uint8_t>(byte & ~(1U << 5));
+    }
+    quartet[index] = unswap_nibbles(byte);
+  }
+  return quartet;
+}
+
+void append_encoded_bytes(const std::string &data, std::vector<uint8_t> &encoded) {
+  encoded.reserve(encoded.size() + data.size() * 4);
+  for (uint8_t ch : data) {
+    auto quartet = encode_quartet(ch);
+    for (uint8_t byte : quartet) {
+      if (byte == DB_ESC || byte == 0xDF || byte == 0xFB || byte == 0xFF) {
+        encoded.push_back(DB_ESC);
+        encoded.push_back(static_cast<uint8_t>(byte ^ 0x20));
+      } else {
+        encoded.push_back(byte);
+      }
+    }
+  }
+}
+
 }  // namespace
 
 JuttaConnection::JuttaConnection(esphome::uart::UARTComponent *parent) : serial_(parent) {}
@@ -400,25 +432,20 @@ bool JuttaConnection::starts_with_lower(const std::string &s, const char *prefix
 
 void JuttaConnection::send_line_cmd(const std::string &line) {
   ESP_LOGD(TAG, "TX_LINE \"%s\"", printable_snippet(line).c_str());
-  std::vector<uint8_t> buffer(line.begin(), line.end());
-  buffer.push_back('\r');
-  buffer.push_back('\n');
-  if (!serial_.write_serial_buffer(buffer)) {
+  std::string payload = line;
+  payload.push_back('\r');
+  payload.push_back('\n');
+  std::vector<uint8_t> encoded;
+  append_encoded_bytes(payload, encoded);
+  encoded.insert(encoded.end(), DB_TRAILER.begin(), DB_TRAILER.end());
+  if (!serial_.write_serial_buffer(encoded)) {
     ESP_LOGW(TAG, "Failed to send line command over serial");
   }
 }
 
 void JuttaConnection::send_db_cmd(const std::string &command) {
   std::vector<uint8_t> encoded;
-  encoded.reserve(command.size() * 2 + DB_TRAILER.size());
-  for (uint8_t byte : command) {
-    if (byte == DB_ESC || byte == 0xDF || byte == 0xFB || byte == 0xFF) {
-      encoded.push_back(DB_ESC);
-      encoded.push_back(static_cast<uint8_t>(byte ^ 0x20));
-    } else {
-      encoded.push_back(byte);
-    }
-  }
+  append_encoded_bytes(command, encoded);
   encoded.insert(encoded.end(), DB_TRAILER.begin(), DB_TRAILER.end());
   if (!uart_busy.load()) {
     ESP_LOGD(TAG, "TX_DB len=%zu", encoded.size());
