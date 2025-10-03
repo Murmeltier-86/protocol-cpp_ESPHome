@@ -75,7 +75,7 @@ namespace jutta_component {
 
 class JuraComponent : public esphome::Component, public esphome::uart::UARTDevice {
  public:
-  ~JuraComponent() override;
+  ~JuraComponent();
   void setup() override;
   void loop() override;
   void dump_config() override;
