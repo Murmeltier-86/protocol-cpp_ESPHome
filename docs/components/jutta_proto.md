@@ -30,26 +30,6 @@ During initialization it scans the mapping file (default `/data/jura_machine.xml
 J.O.E. export) to discover the exact command strings and optional labels for the exposed statistics blocks. If the file is
 missing or malformed the defaults `@TR:32`, `@TG:43`, and `@TG:C0` are used and the sensors keep their generic names.
 
-### Ablage der XML-Mapping-Datei
-
-Damit das Mapping geladen werden kann, muss sich die Datei auf dem Dateisystem des Geräts befinden. Am einfachsten wird
-die XML-Datei über `littlefs:` in die Firmware eingebunden und anschließend mit `esphome upload --device <IP> --substitution
-littlefs` (bzw. über das Dashboard) auf den Flash kopiert. Der Standardpfad `/data/jura_machine.xml` kann mit
-`xml_path` überschrieben werden.
-
-Der Loader versucht mehrere Varianten des angegebenen Pfads, um typische Unterschiede zwischen Entwicklungsrechner und
-Gerät abzufangen:
-
-* den angegebenen Pfad unverändert (z. B. `/config/esphome/e6.xml`)
-* dieselbe Zeichenkette ohne führenden `/`
-* Pfade mit entferntem `/config/`-Präfix
-* nur den Dateinamen (z. B. `e6.xml`)
-
-Sobald eine dieser Varianten auf dem Dateisystem gefunden wird, wird sie geladen. Falls keine Variante verfügbar ist, gibt
-das Log einen Warnhinweis mit dem ursprünglich angeforderten Pfad aus. In diesem Fall sollte geprüft werden, ob die Datei
-auf dem Gerät vorhanden ist (z. B. `esphome upload --device <IP> --substitution littlefs`, `esp8266-ufs` oder `LittleFS
-Data Upload`) und ob der konfigurierte Pfad zum abgelegten Speicherort passt.
-
 ### XML statistics sensors
 
 Enabling XML polling registers fixed pools of numeric sensors that Home Assistant can consume directly. Every value is
