@@ -29,12 +29,6 @@ constexpr size_t XML_TGC0_COUNT = 3;
 constexpr uint32_t XML_RX_DRAIN_MS = 40;
 
 template<typename AppT>
-auto try_register_sensor(AppT &app, sensor::Sensor *sensor, int)
-    -> decltype(app.register_component(sensor), void()) {
-  app.register_component(sensor);
-}
-
-template<typename AppT>
 auto try_register_sensor(AppT &app, sensor::Sensor *sensor, long)
     -> decltype(app.register_sensor(sensor), void()) {
   app.register_sensor(sensor);
@@ -50,7 +44,13 @@ template<typename AppT>
 void try_register_sensor(AppT &, sensor::Sensor *, ...) {}
 
 inline void register_sensor_with_app(sensor::Sensor *sensor) {
-  try_register_sensor(App, sensor, 0);
+  if (sensor == nullptr) {
+    return;
+  }
+  if (auto *component = dynamic_cast<Component *>(sensor)) {
+    App.register_component(component);
+  }
+  try_register_sensor(App, sensor, 0L);
 }
 
 template<typename SensorT>
