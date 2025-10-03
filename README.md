@@ -296,8 +296,9 @@ registriert und bleiben dauerhaft sichtbar.
 **Beschreibung:** Der Jura-Dongle sendet auf DB-Kommandos wie `@TR:32` oft zuerst ein Echo-Frame mit dem ASCII des Befehls
 und danach das Daten-Frame. Der Reader erkennt den encoded Trailer `DF FF DB DB FB FB DB DB`, entfernt ihn, unescaped
 `0xDB xx → xx^0x20`, verwirft Echo-Frames und liest weiter, bis ein Daten-Frame mit der erwarteten Decoded-Länge vorliegt:
-TR32=21, TG43=13, TGC0=13. Sensoren werden beim Start registriert, Werte nur bei vollständigem Erfolg publiziert. Keine
-Textsensoren, keine HA-Templates erforderlich.
+TR32=21, TG43=13, TGC0=13. Eine Echo-Unterdrückung bleibt bis zu 200 ms aktiv und verlängert sich bei jedem passenden Byte,
+damit auch späte Antworten der Legacy-Bridge nicht fälschlich ausgewertet werden. Sensoren werden beim Start registriert,
+Werte nur bei vollständigem Erfolg publiziert. Keine Textsensoren, keine HA-Templates erforderlich.
 
 **Troubleshooting:**
 

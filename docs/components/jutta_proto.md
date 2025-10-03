@@ -59,7 +59,8 @@ die nicht zur erwarteten Nutzlastlänge passten und regelmäßig in `frame decod
 **Lösung.** Ein Echo-Suppressor verwirft jetzt die encodierten TX-Bytes zeitlich begrenzt, bevor sie den Framer erreichen.
 Der Framer schneidet Frames am Terminator, de-stufft nur den einzelnen Block und prüft anschließend die Soll-Länge. Die
 Timeout-Logik startet erst bei den ersten echten RX-Bytes, wodurch robuste Antworten ohne zusätzliche Verzögerung
-ausgewertet werden können.
+ausgewertet werden können. Die Unterdrückung der Echo-Frames bleibt bis zu 200 ms aktiv und verlängert sich mit jedem
+erkannten Byte, sodass auch träge Legacy-Bridges keine halben Kommandos mehr in den Puffer drücken können.
 
 ## Automation Actions
 

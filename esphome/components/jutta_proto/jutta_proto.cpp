@@ -976,7 +976,10 @@ void JuraComponent::discard_stale_pending_frames_() {
 }
 
 bool JuraComponent::consume_pending_db_frame_(const std::string &command, uint8_t command_id, size_t expected_len,
-                                              std::vector<uint8_t> &decoded) {
+                                              std::vector<uint8_t> &decoded, bool *dropped_echo) {
+  if (dropped_echo != nullptr) {
+    *dropped_echo = false;
+  }
   for (auto it = this->db_pending_frames_.begin(); it != this->db_pending_frames_.end();) {
     PendingDbFrame &pending = *it;
     if (!pending.decode_attempted) {
@@ -996,6 +999,9 @@ bool JuraComponent::consume_pending_db_frame_(const std::string &command, uint8_
     auto &payload = pending.decoded;
     if (is_ascii_echo(payload, command)) {
       ESP_LOGD(TAG, "RX_DB echo ignored: \"%s\"", command.c_str());
+      if (dropped_echo != nullptr) {
+        *dropped_echo = true;
+      }
       it = this->db_pending_frames_.erase(it);
       continue;
     }
@@ -1035,8 +1041,13 @@ bool JuraComponent::await_db_response_(const std::string &command, uint8_t comma
   uint32_t rx_start = 0;
 
   while (true) {
-    if (this->consume_pending_db_frame_(command, command_id, expected_len, decoded)) {
+    bool dropped_echo = false;
+    if (this->consume_pending_db_frame_(command, command_id, expected_len, decoded, &dropped_echo)) {
       return true;
+    }
+    if (dropped_echo) {
+      rx_started = false;
+      rx_start = 0;
     }
 
     std::array<uint8_t, 4> chunk{};

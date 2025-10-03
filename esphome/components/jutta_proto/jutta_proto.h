@@ -134,7 +134,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool await_db_response_(const std::string &command, uint8_t command_id, size_t expected_len,
                           std::vector<uint8_t> &decoded);
   bool consume_pending_db_frame_(const std::string &command, uint8_t command_id, size_t expected_len,
-                                 std::vector<uint8_t> &decoded);
+                                 std::vector<uint8_t> &decoded, bool *dropped_echo = nullptr);
   void discard_stale_pending_frames_();
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
