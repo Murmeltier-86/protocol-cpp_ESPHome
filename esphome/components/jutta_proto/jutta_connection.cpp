@@ -21,43 +21,6 @@ std::atomic<bool> uart_busy{false};
 namespace {
 static const char *const TAG = "jutta_connection";
 
-bool jutta_raw_hello_probe(esphome::uart::UARTComponent &uart) {
-  uint32_t t0 = esphome::millis();
-  while (esphome::millis() - t0 < 40) {
-    while (uart.available()) {
-      uint8_t discard;
-      if (!uart.read_byte(&discard)) {
-        break;
-      }
-    }
-    esphome::delay(1);
-  }
-
-  const char *cmd = "ty:\r\n";
-  uart.write_array(reinterpret_cast<const uint8_t *>(cmd), 4);
-
-  std::string hex;
-  hex.reserve(512);
-  uint32_t seen = 0;
-  t0 = esphome::millis();
-  while (esphome::millis() - t0 < 3000) {
-    while (uart.available()) {
-      uint8_t b;
-      if (!uart.read_byte(&b)) {
-        break;
-      }
-      seen++;
-      static const char *H = "0123456789ABCDEF";
-      hex.push_back(H[b >> 4]);
-      hex.push_back(H[b & 0x0F]);
-      hex.push_back(' ');
-    }
-    esphome::delay(1);
-  }
-  ESP_LOGD("jutta_probe", "RAW HELLO bytes_seen=%u hex=[%s]", seen, hex.c_str());
-  return seen > 0;
-}
-
 constexpr uint32_t JUTTA_SERIAL_GAP_MS = 35;
 constexpr std::array<uint8_t, 8> DB_TRAILER = {0xDF, 0xFF, 0xDB, 0xDB, 0xFB, 0xFB, 0xDB, 0xDB};
 constexpr uint8_t DB_ESC = 0xDB;
@@ -140,6 +103,7 @@ void JuttaConnection::init() {
   ok_wait_context_ = {};
   active_pipeline_ = ActivePipeline::Idle;
   line_read_buffer_.clear();
+  device_probe_ = {};
 }
 
 void JuttaConnection::flush_serial_input() {
@@ -150,6 +114,7 @@ void JuttaConnection::flush_serial_input() {
   ok_wait_context_ = {};
   active_pipeline_ = ActivePipeline::Idle;
   line_read_buffer_.clear();
+  device_probe_ = {};
 
   auto *self = const_cast<serial::SerialConnection *>(&serial_);
   while (self->available() > 0) {
@@ -168,6 +133,7 @@ void JuttaConnection::drain_uart_for_ms(uint32_t duration_ms) {
   line_read_buffer_.clear();
   ok_wait_context_ = {};
   active_pipeline_ = ActivePipeline::Idle;
+  device_probe_ = {};
 
   auto *self = const_cast<serial::SerialConnection *>(&serial_);
   if (duration_ms == 0) {
@@ -502,30 +468,74 @@ bool JuttaConnection::read_line_until(std::string &out, uint32_t timeout_ms, uin
   return false;
 }
 
-bool JuttaConnection::await_device_type(std::string &out_ty) {
-  if (auto *parent = serial_.get_parent()) {
-    jutta_raw_hello_probe(*parent);
-  }
-  UartGuard lock(uart_busy);
-  drain_uart_for_ms(40);
-  send_line_cmd("ty:");
+JuttaConnection::WaitResult JuttaConnection::await_device_type(std::string &out_ty) {
+  constexpr uint32_t TY_TIMEOUT_MS = 2500;
+  constexpr uint32_t OK_TIMEOUT_MS = 1200;
 
-  uint32_t bytes_seen = 0;
-  if (!read_line_until(out_ty, 2500, &bytes_seen)) {
-    ESP_LOGW(TAG, "HELLO timeout; bytes_seen=%u", bytes_seen);
-    return false;
+  if (!device_probe_.active) {
+    {
+      UartGuard guard(uart_busy);
+      flush_serial_input();
+      send_line_cmd("ty:");
+    }
+    device_probe_ = {};
+    device_probe_.active = true;
+    device_probe_.command_sent = true;
+    device_probe_.ok_received = false;
+    device_probe_.ty_line.clear();
+    device_probe_.start_time = esphome::millis();
+    set_active_pipeline(ActivePipeline::Plain);
+    ESP_LOGD(TAG, "HELLO: starting asynchronous device probe");
+    return WaitResult::Pending;
   }
 
-  std::string ok_line;
-  uint32_t ok_bytes = 0;
-  if (!read_line_until(ok_line, 1200, &ok_bytes)) {
-    ESP_LOGW(TAG, "HELLO timeout; bytes_seen=%u", ok_bytes);
-    return false;
+  poll_serial_lines(0);
+
+  std::vector<std::string> leftovers;
+  while (!pending_lines_.empty()) {
+    std::string line = std::move(pending_lines_.front());
+    pending_lines_.pop_front();
+    if (starts_with_lower(line, "ty:") && device_probe_.ty_line.empty()) {
+      device_probe_.ty_line = line;
+      ESP_LOGD(TAG, "HELLO: received %s", printable_snippet(line).c_str());
+    } else if (equals_ignore_case(line, "ok:")) {
+      device_probe_.ok_received = true;
+    } else {
+      leftovers.push_back(std::move(line));
+    }
   }
-  if (ok_line != "ok:") {
-    return false;
+
+  for (auto it = leftovers.rbegin(); it != leftovers.rend(); ++it) {
+    pending_lines_.push_front(std::move(*it));
   }
-  return starts_with_lower(out_ty, "ty:");
+
+  uint32_t now = esphome::millis();
+  uint32_t ty_deadline = device_probe_.start_time + TY_TIMEOUT_MS;
+  uint32_t ok_deadline = ty_deadline + OK_TIMEOUT_MS;
+
+  if (!device_probe_.ty_line.empty() && device_probe_.ok_received) {
+    out_ty = device_probe_.ty_line;
+    cancel_device_probe();
+    return WaitResult::Success;
+  }
+
+  if ((device_probe_.ty_line.empty() && time_reached(now, ty_deadline)) ||
+      (!device_probe_.ok_received && time_reached(now, ok_deadline))) {
+    ESP_LOGW(TAG, "HELLO timeout; ty_received=%s ok_received=%s",
+             YESNO(!device_probe_.ty_line.empty()), YESNO(device_probe_.ok_received));
+    cancel_device_probe();
+    return WaitResult::Timeout;
+  }
+
+  return WaitResult::Pending;
+}
+
+void JuttaConnection::cancel_device_probe() {
+  if (!device_probe_.active) {
+    return;
+  }
+  device_probe_ = {};
+  set_active_pipeline(ActivePipeline::Idle);
 }
 
 bool JuttaConnection::prime_initial_db() {
@@ -742,6 +752,7 @@ bool JuttaConnection::poll_response_line(std::string &line) {
 void JuttaConnection::reset_response_line_buffer() {
   plain_rx_buffer_.clear();
   pending_lines_.clear();
+  device_probe_ = {};
 }
 
 }  // namespace jutta_proto
