@@ -113,15 +113,10 @@ bool parse_double(const AttributeMap &attrs, std::initializer_list<const char *>
 }
 
 bool load_file_content(const std::string &path, std::string &content) {
-  if (path.empty()) {
-    return false;
-  }
-
 #ifdef USE_FILESYSTEM
   if (auto *fs = esphome::filesystem::global_filesystem; fs != nullptr) {
     auto file = fs->open(path.c_str(), "r");
     if (file) {
-      ESP_LOGI(TAG, "Lade XML Mapping aus '%s' (Filesystem)", path.c_str());
       std::ostringstream stream;
       while (file.available()) {
         stream << static_cast<char>(file.read());
@@ -131,13 +126,10 @@ bool load_file_content(const std::string &path, std::string &content) {
     }
   }
 #endif
-
   std::ifstream file(path, std::ios::binary);
   if (!file.is_open()) {
     return false;
   }
-
-  ESP_LOGI(TAG, "Lade XML Mapping aus '%s'", path.c_str());
   std::ostringstream stream;
   stream << file.rdbuf();
   content = stream.str();
@@ -199,20 +191,13 @@ bool map_fields(const std::vector<uint8_t> &decoded, const XmlCommandMapping &ma
 
 XmlCommandMapping *mapping_for_id(XmlMapping &mapping, const std::string &id) {
   std::string lowered = to_lower(id);
-  std::string canonical;
-  canonical.reserve(lowered.size());
-  for (char ch : lowered) {
-    if (std::isalnum(static_cast<unsigned char>(ch)) != 0) {
-      canonical.push_back(ch);
-    }
-  }
-  if (canonical == "tr32") {
+  if (lowered == "tr32") {
     return &mapping.tr32_fields;
   }
-  if (canonical == "tg43") {
+  if (lowered == "tg43") {
     return &mapping.tg43_fields;
   }
-  if (canonical == "tgc0") {
+  if (lowered == "tgc0") {
     return &mapping.tgc0_fields;
   }
   return nullptr;
@@ -340,18 +325,6 @@ bool parse_xml_mapping_content(const std::string &content, XmlMapping &mapping) 
 
 }  // namespace
 
-bool load_xml_mapping_from_content(const std::string &source_label, const std::string &content,
-                                   XmlMapping &mapping) {
-  mapping = XmlMapping{};
-  mapping.source_path = source_label;
-  if (!parse_xml_mapping_content(content, mapping)) {
-    ESP_LOGW(TAG, "XML Mapping %s enthält keine bekannten Felder", source_label.c_str());
-    mapping.valid = false;
-    return false;
-  }
-  return true;
-}
-
 bool load_xml_mapping(const std::string &path, XmlMapping &mapping) {
   std::string content;
   if (!load_file_content(path, content)) {
@@ -359,24 +332,19 @@ bool load_xml_mapping(const std::string &path, XmlMapping &mapping) {
     mapping.valid = false;
     return false;
   }
-  return load_xml_mapping_from_content(path, content, mapping);
+  mapping = XmlMapping{};
+  mapping.source_path = path;
+  if (!parse_xml_mapping_content(content, mapping)) {
+    ESP_LOGW(TAG, "XML Mapping %s enthält keine bekannten Felder", path.c_str());
+    mapping.valid = false;
+    return false;
+  }
+  return true;
 }
 
 namespace {
 XmlMapping g_current_mapping{};
 bool g_has_mapping = false;
-}
-
-bool load_xml_mapping_from_content(const std::string &source_label, const std::string &content) {
-  XmlMapping mapping;
-  if (!load_xml_mapping_from_content(source_label, content, mapping)) {
-    g_has_mapping = false;
-    g_current_mapping = XmlMapping{};
-    return false;
-  }
-  g_current_mapping = mapping;
-  g_has_mapping = mapping.valid;
-  return g_has_mapping;
 }
 
 bool load_xml_mapping(const std::string &path) {
