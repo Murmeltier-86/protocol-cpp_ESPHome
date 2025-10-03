@@ -102,6 +102,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   }
   void set_xml_poll_interval(uint32_t interval_ms) { this->xml_poll_interval_ms_ = interval_ms; }
   void set_xml_rx_timeout(uint32_t timeout_ms) { this->xml_rx_timeout_ms_ = timeout_ms; }
+  void set_xml_path(const std::string &path) { this->xml_path_ = path; }
 
  protected:
   enum class HandshakeStage { IDLE, HELLO, SEND_T1, WAIT_T2, SEND_T2, WAIT_T3, SEND_T3, DONE, FAILED };
@@ -168,6 +169,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::array<uint32_t, 3> xml_tgc0_values_{};
   bool xml_has_values_{false};
   bool xml_busy_{false};
+  std::string xml_path_{"/data/jura_machine.xml"};
 };
 
 class StartBrewAction : public esphome::Action<> {

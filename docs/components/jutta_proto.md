@@ -20,14 +20,15 @@ jutta_proto:
   jutta_xml_enable: true           # optional, default false
   jutta_xml_poll_ms: 30000         # optional, poll interval in ms
   jutta_xml_rx_timeout_ms: 900     # optional, frame timeout in ms
+  xml_path: "/data/jura_machine.xml"   # optional, override XML mapping path
 ```
 
 The component takes care of the handshake during startup. Once the handshake finishes, all brewing actions become available.
 
 When `jutta_xml_enable` is set to `true`, the component periodically polls the JURA statistics interface using DB framing.
-During initialization it scans `/data/jura_machine.xml` (J.O.E. export) to discover the exact command strings and optional
-labels for the exposed statistics blocks. If the file is missing or malformed the defaults `@TR:32`, `@TG:43`, and
-`@TG:C0` are used and the sensors keep their generic names.
+During initialization it scans the mapping file (default `/data/jura_machine.xml`, configurable via `xml_path`, typically a
+J.O.E. export) to discover the exact command strings and optional labels for the exposed statistics blocks. If the file is
+missing or malformed the defaults `@TR:32`, `@TG:43`, and `@TG:C0` are used and the sensors keep their generic names.
 
 ### XML statistics sensors
 
