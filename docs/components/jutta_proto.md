@@ -48,10 +48,18 @@ with `accuracy_decimals: 0`, so no templating is required on the ESPHome side.
 
 The XML transport uses escaped DB frames. Some legacy Wi-Fi bridges reply with an ASCII echo of the `@TR:32`, `@TG:43`, or
 `@TG:C0` command before the actual data frame arrives. The component drains the UART briefly before the first command in a
-poll cycle, skips such echo frames automatically, and validates the decoded payload length (21/13/13 bytes). Frames that are
-too short or too long are treated as unrelated telemetry and dropped without touching the timeout budget. The per-command
-timeout defaults to 1.5 seconds, which proved sufficient in field tests. Keep the poll interval at or above 25 seconds so the
-telemetry stream does not collide with the XML polling.
+poll cycle, filters those echoed bytes strictly, and validates the decoded payload length (21/13/13 bytes) per block. Frames
+that are too short or too long are treated as unrelated telemetry and dropped without touching the timeout budget. The
+per-command timeout starts once the first non-echo byte was received (otherwise after the TX) and defaults to 1.5 seconds.
+Keep the poll interval at or above 25 seconds so the telemetry stream does not collide with the XML polling.
+
+**Problem.** Encodierte TX-Bytes wurden wieder in den RX-Strom eingespeist. Der Framer erhielt dadurch Mischdaten,
+die nicht zur erwarteten Nutzlastlänge passten und regelmäßig in `frame decode failed` bzw. Timeouts mündeten.
+
+**Lösung.** Ein Echo-Suppressor verwirft jetzt die encodierten TX-Bytes zeitlich begrenzt, bevor sie den Framer erreichen.
+Der Framer schneidet Frames am Terminator, de-stufft nur den einzelnen Block und prüft anschließend die Soll-Länge. Die
+Timeout-Logik startet erst bei den ersten echten RX-Bytes, wodurch robuste Antworten ohne zusätzliche Verzögerung
+ausgewertet werden können.
 
 ## Automation Actions
 
