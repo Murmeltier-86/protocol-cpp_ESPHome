@@ -9,6 +9,6 @@
 #endif
 
 #ifndef JUTTA_XML_RX_TIMEOUT_MS
-#define JUTTA_XML_RX_TIMEOUT_MS 900
+#define JUTTA_XML_RX_TIMEOUT_MS 1500
 #endif
 

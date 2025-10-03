@@ -846,13 +846,7 @@ bool JuraComponent::perform_xml_cycle_() {
       ESP_LOGW(TAG, "Failed to send XML command %s", command.c_str());
       return false;
     }
-    if (!this->read_db_data_frame_(buffer, this->xml_rx_timeout_ms_, command)) {
-      ESP_LOGW(TAG, "RX_DB timeout");
-      return false;
-    }
-    ESP_LOGD(TAG, "RX_DB decoded_len=%zu", buffer.size());
-    if (buffer.size() != expected_length) {
-      ESP_LOGW(TAG, "decoded_len=%zu expected=%zu", buffer.size(), expected_length);
+    if (!this->read_db_with_expected_len_(buffer, this->xml_rx_timeout_ms_, command, expected_length)) {
       return false;
     }
     parser(buffer);
@@ -896,6 +890,35 @@ bool JuraComponent::read_db_data_frame_(std::vector<uint8_t> &decoded, uint32_t 
   }
   return this->coffee_maker_->connection->read_db_data_frame(decoded, std::chrono::milliseconds{timeout_ms},
                                                              last_cmd_ascii);
+}
+
+bool JuraComponent::read_db_with_expected_len_(std::vector<uint8_t> &decoded, uint32_t total_timeout_ms,
+                                               std::string_view cmd, size_t expected_len) {
+  const uint32_t start = esphome::millis();
+  while (true) {
+    uint32_t remaining = 0;
+    if (total_timeout_ms > 0) {
+      uint32_t now = esphome::millis();
+      uint32_t elapsed = now - start;
+      if (elapsed >= total_timeout_ms) {
+        ESP_LOGW(TAG, "RX_DB timeout");
+        return false;
+      }
+      remaining = total_timeout_ms - elapsed;
+    }
+
+    if (!this->read_db_data_frame_(decoded, remaining, cmd)) {
+      ESP_LOGW(TAG, "RX_DB timeout");
+      return false;
+    }
+
+    ESP_LOGD(TAG, "RX_DB decoded_len=%zu", decoded.size());
+    if (decoded.size() == expected_len) {
+      return true;
+    }
+
+    ESP_LOGW(TAG, "RX_DB decoded_len=%zu expected=%zu, continue waiting", decoded.size(), expected_len);
+  }
 }
 
 void JuraComponent::publish_xml_values_() {

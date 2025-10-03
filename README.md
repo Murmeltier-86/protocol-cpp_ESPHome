@@ -271,4 +271,19 @@ registriert und bleiben dauerhaft sichtbar.
   XML-Polls sollten andere Aufgaben den UART nicht nutzen; der Code setzt während eines Polls ein internes Busy-Flag und
   blockiert konkurrierende Leser.
 
+#### Datenrahmen-Handling
+
+**Beschreibung:** Der Jura-Dongle sendet auf DB-Kommandos wie `@TR:32` oft zuerst ein Echo-Frame mit dem ASCII des Befehls
+und danach das Daten-Frame. Der Reader erkennt den encoded Trailer `DF FF DB DB FB FB DB DB`, entfernt ihn, unescaped
+`0xDB xx → xx^0x20`, verwirft Echo-Frames und liest weiter, bis ein Daten-Frame mit der erwarteten Decoded-Länge vorliegt:
+TR32=21, TG43=13, TGC0=13. Sensoren werden beim Start registriert, Werte nur bei vollständigem Erfolg publiziert. Keine
+Textsensoren, keine HA-Templates erforderlich.
+
+**Troubleshooting:**
+
+* `decoded_len ≠ erwartet` → Reader wartet weiter innerhalb des Gesamt-Timeouts.
+* `RX_DB timeout` → `JUTTA_XML_RX_TIMEOUT_MS` erhöhen und sicherstellen, dass während des Polls kein anderer Code
+  `uart.read()` konsumiert.
+* Sensoren fehlen → Pools in `setup()` registrieren, `set_internal(false)`.
+
 `[1]`: https://uk.jura.com/en/homeproducts/accessories/SmartConnect-Main-72167
