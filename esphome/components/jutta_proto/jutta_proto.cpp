@@ -1252,7 +1252,10 @@ void JuraComponent::loop() {
       uint32_t drain_deadline = esphome::millis() + 40;
       while (!JuraComponent::time_reached(esphome::millis(), drain_deadline)) {
         while (uart->available()) {
-          uart->read();
+          uint8_t discarded;
+          if (!uart->read_byte(&discarded)) {
+            break;
+          }
         }
         esphome::delay(1);
       }
