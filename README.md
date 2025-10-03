@@ -246,4 +246,29 @@ esphome run your_config.yaml
 ```
 ESPHome handles dependency management, compilation, and flashing of the firmware for you.
 
+### XML-Zähler automatisch bereitstellen
+
+Die Firmware kann die JURA-internen XML-Zähler zyklisch abfragen und als numerische Sensoren in Home Assistant zur Verfügung
+stellen. Dafür ist keine zusätzliche YAML-Konfiguration nötig – alle Sensorinstanzen werden während `setup()` angelegt,
+registriert und bleiben dauerhaft sichtbar.
+
+1. **Feature aktivieren:** Die Standardwerte werden über `esphome/components/jutta_proto/jutta_config.h` gesteuert. Dort
+   können `JUTTA_XML_ENABLE`, `JUTTA_XML_POLL_MS` und `JUTTA_XML_RX_TIMEOUT_MS` bei Bedarf angepasst werden. Voreinstellung ist
+   `JUTTA_XML_ENABLE 1`, sodass der XML-Pfad ohne weitere Änderungen aktiv ist.
+2. **XML-Mapping bereitstellen:** Exportiere in der J.O.E.-App die Maschinen-XML und kopiere die Datei als
+   `/data/jura_machine.xml` auf das ESPHome-Gerät. Falls die Datei fehlt oder unvollständig ist, werden Standardbefehle und
+   generische Labels verwendet.
+3. **Zyklische Abfrage beobachten:** Nach erfolgreichem Legacy-Handshake erscheinen im Log Einträge wie `XML poll start`,
+   `TX_DB "@TR:32"`, `RX_DB decoded_len=21 expected=21` sowie `publish TR32=[…]`. Bei einem Timeout wird `RX_DB timeout`
+   ausgegeben. Nur wenn alle drei Blöcke korrekt gelesen werden, werden neue Werte veröffentlicht.
+
+#### Fehlersuche
+
+* **Sensoren tauchen nicht auf:** Prüfe, ob das Feature aktiviert ist und ob beim Start Meldungen zur Sensorregistrierung
+  erscheinen. Sensorinstanzen werden vor dem ersten Home-Assistant-Connect erstellt und mit `set_internal(false)` sichtbar
+  gemacht.
+* **Keine Werteaktualisierung:** Achte auf Logzeilen zu `RX_DB timeout` oder `decoded_len=… expected=…`. Bei laufenden
+  XML-Polls sollten andere Aufgaben den UART nicht nutzen; der Code setzt während eines Polls ein internes Busy-Flag und
+  blockiert konkurrierende Leser.
+
 `[1]`: https://uk.jura.com/en/homeproducts/accessories/SmartConnect-Main-72167
