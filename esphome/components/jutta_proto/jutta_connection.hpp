@@ -322,6 +322,16 @@ class JuttaConnection {
                                     const std::chrono::milliseconds& timeout);
     bool unescape_db_frame_(const std::vector<uint8_t>& encoded, std::vector<uint8_t>& decoded) const;
 
+    void activate_tx_echo_suppressor_(const std::vector<uint8_t>& frame);
+    void deactivate_tx_echo_suppressor_();
+    void update_tx_echo_suppressor_();
+    size_t filter_tx_echo_(const uint8_t* data, size_t length, std::vector<uint8_t>& filtered);
+
+    std::deque<uint8_t> db_rx_queue_{};
+    std::vector<uint8_t> last_tx_frame_{};
+    size_t last_tx_echo_progress_{0};
+    uint32_t last_tx_deadline_{0};
+    bool last_tx_echo_active_{false};
 };
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto

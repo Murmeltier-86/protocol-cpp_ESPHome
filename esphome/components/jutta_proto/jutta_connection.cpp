@@ -520,7 +520,12 @@ bool JuttaConnection::write_db_command(const std::string& command) {
         encoded.push_back(static_cast<uint8_t>(c ^ DB_XOR_MASK));
     }
     encoded.insert(encoded.end(), DB_TRAILER_ENCODED.begin(), DB_TRAILER_ENCODED.end());
-    return this->write_db_encoded_(encoded);
+    this->activate_tx_echo_suppressor_(encoded);
+    if (!this->write_db_encoded_(encoded)) {
+        this->deactivate_tx_echo_suppressor_();
+        return false;
+    }
+    return true;
 }
 
 bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout) {
@@ -545,6 +550,7 @@ void JuttaConnection::drain_db_stream(const std::chrono::milliseconds& duration)
     if (duration.count() == 0) {
         return;
     }
+    this->db_rx_queue_.clear();
     uint32_t start = esphome::millis();
     std::array<uint8_t, 4> buffer{};
     while (true) {
@@ -554,12 +560,49 @@ void JuttaConnection::drain_db_stream(const std::chrono::milliseconds& duration)
         size_t read = this->serial.read_serial(buffer);
         if (read == 0) {
             esphome::delay(5);
+            continue;
         }
+        std::vector<uint8_t> filtered;
+        filtered.reserve(read);
+        size_t dropped = this->filter_tx_echo_(buffer.data(), read, filtered);
+        if (dropped > 0) {
+            ESP_LOGD(TAG, "Echo drop: %zu of %zu bytes", dropped, read);
+        }
+        // Drop any remaining bytes by not enqueuing them.
     }
 }
 
 size_t JuttaConnection::read_db_stream_chunk(std::array<uint8_t, 4>& buffer) {
-    return this->serial.read_serial(buffer);
+    size_t produced = 0;
+    while (produced < buffer.size() && !this->db_rx_queue_.empty()) {
+        buffer[produced++] = this->db_rx_queue_.front();
+        this->db_rx_queue_.pop_front();
+    }
+    if (produced > 0) {
+        return produced;
+    }
+
+    std::array<uint8_t, 4> raw{};
+    size_t read = this->serial.read_serial(raw);
+    if (read == 0) {
+        return 0;
+    }
+
+    std::vector<uint8_t> filtered;
+    filtered.reserve(read);
+    size_t dropped = this->filter_tx_echo_(raw.data(), read, filtered);
+    if (dropped > 0) {
+        ESP_LOGD(TAG, "Echo drop: %zu of %zu bytes", dropped, read);
+    }
+    for (uint8_t byte : filtered) {
+        this->db_rx_queue_.push_back(byte);
+    }
+
+    while (produced < buffer.size() && !this->db_rx_queue_.empty()) {
+        buffer[produced++] = this->db_rx_queue_.front();
+        this->db_rx_queue_.pop_front();
+    }
+    return produced;
 }
 
 bool JuttaConnection::write_db_encoded_(const std::vector<uint8_t>& encoded) {
@@ -579,7 +622,7 @@ bool JuttaConnection::read_one_db_frame_encoded_(std::vector<uint8_t>& encoded,
     uint32_t start = esphome::millis();
     std::array<uint8_t, 4> buffer{};
     while (true) {
-        size_t read = this->serial.read_serial(buffer);
+        size_t read = this->read_db_stream_chunk(buffer);
         if (read > 0) {
             encoded.insert(encoded.end(), buffer.begin(), buffer.begin() + read);
             if (encoded.size() >= DB_TRAILER_ENCODED.size()) {
@@ -619,6 +662,66 @@ bool JuttaConnection::unescape_db_frame_(const std::vector<uint8_t>& encoded, st
         }
     }
     return true;
+}
+
+void JuttaConnection::activate_tx_echo_suppressor_(const std::vector<uint8_t>& frame) {
+    this->last_tx_frame_ = frame;
+    this->last_tx_echo_progress_ = 0;
+    this->last_tx_deadline_ = esphome::millis() + 20;
+    this->last_tx_echo_active_ = true;
+}
+
+void JuttaConnection::deactivate_tx_echo_suppressor_() {
+    this->last_tx_frame_.clear();
+    this->last_tx_echo_progress_ = 0;
+    this->last_tx_deadline_ = 0;
+    this->last_tx_echo_active_ = false;
+}
+
+void JuttaConnection::update_tx_echo_suppressor_() {
+    if (!this->last_tx_echo_active_) {
+        return;
+    }
+    if (this->last_tx_echo_progress_ >= this->last_tx_frame_.size()) {
+        this->deactivate_tx_echo_suppressor_();
+        return;
+    }
+    if (static_cast<int32_t>(esphome::millis() - this->last_tx_deadline_) >= 0) {
+        this->deactivate_tx_echo_suppressor_();
+    }
+}
+
+size_t JuttaConnection::filter_tx_echo_(const uint8_t* data, size_t length, std::vector<uint8_t>& filtered) {
+    filtered.clear();
+    if (length == 0) {
+        return 0;
+    }
+    filtered.reserve(length);
+    size_t dropped = 0;
+    size_t index = 0;
+    while (index < length) {
+        this->update_tx_echo_suppressor_();
+        bool drop_candidate = this->last_tx_echo_active_ &&
+                              this->last_tx_echo_progress_ < this->last_tx_frame_.size();
+        if (drop_candidate) {
+            uint8_t expected = this->last_tx_frame_[this->last_tx_echo_progress_];
+            if (data[index] == expected) {
+                ++dropped;
+                ++this->last_tx_echo_progress_;
+                ++index;
+                if (this->last_tx_echo_progress_ >= this->last_tx_frame_.size()) {
+                    this->deactivate_tx_echo_suppressor_();
+                }
+                continue;
+            }
+        }
+        if (this->last_tx_echo_active_) {
+            this->deactivate_tx_echo_suppressor_();
+        }
+        filtered.insert(filtered.end(), data + index, data + length);
+        break;
+    }
+    return dropped;
 }
 
 

@@ -1005,6 +1005,8 @@ bool JuraComponent::consume_pending_db_frame_(const std::string &command, uint8_
       continue;
     }
     if (payload[0] == command_id) {
+      ESP_LOGD(TAG, "RX_DB encoded_len=%zu decoded_len=%zu (expected=%zu)",
+               pending.encoded.size(), payload.size(), expected_len);
       if (payload.size() != expected_len) {
         ESP_LOGD(TAG, "RX_DB len=%u != %u → drop", static_cast<unsigned>(payload.size()),
                  static_cast<unsigned>(expected_len));
@@ -1029,6 +1031,8 @@ bool JuraComponent::await_db_response_(const std::string &command, uint8_t comma
   }
   uint32_t start = esphome::millis();
   const uint32_t timeout_ms = this->xml_rx_timeout_ms_;
+  bool rx_started = false;
+  uint32_t rx_start = 0;
 
   while (true) {
     if (this->consume_pending_db_frame_(command, command_id, expected_len, decoded)) {
@@ -1038,6 +1042,7 @@ bool JuraComponent::await_db_response_(const std::string &command, uint8_t comma
     std::array<uint8_t, 4> chunk{};
     size_t read = link->read_db_stream_chunk(chunk);
     if (read > 0) {
+      ESP_LOGD(TAG, "RX push: %zu bytes", read);
       this->db_framer_.push_encoded(chunk.data(), read);
       auto frames = this->db_framer_.try_extract_frames();
       for (auto &frame : frames) {
@@ -1046,11 +1051,16 @@ bool JuraComponent::await_db_response_(const std::string &command, uint8_t comma
         this->db_pending_frames_.push_back(std::move(pending));
       }
       this->discard_stale_pending_frames_();
+      if (!rx_started) {
+        rx_started = true;
+        rx_start = esphome::millis();
+      }
       continue;
     }
 
     uint32_t now = esphome::millis();
-    if (timeout_ms > 0 && now - start >= timeout_ms) {
+    uint32_t base = rx_started ? rx_start : start;
+    if (timeout_ms > 0 && static_cast<int32_t>(now - base - timeout_ms) >= 0) {
       ESP_LOGW(TAG, "RX_DB timeout %s", command.c_str());
       return false;
     }
@@ -1137,7 +1147,8 @@ bool JuraComponent::perform_xml_cycle_() {
   auto read_block = [&](const std::string &command, uint8_t command_id, size_t expected_length,
                         auto &&parser) -> bool {
     link->drain_db_stream(std::chrono::milliseconds{XML_RX_DRAIN_MS});
-    ESP_LOGD(TAG, "TX_DB \"%s\"", command.c_str());
+    size_t encoded_len = command.size() * 2 + DB_TERMINATOR.size();
+    ESP_LOGD(TAG, "TX_DB \"%s\" (len=%zu)", command.c_str(), encoded_len);
     if (!this->send_db_command_(command)) {
       ESP_LOGW(TAG, "Failed to send XML command %s", command.c_str());
       return false;
