@@ -113,27 +113,66 @@ bool parse_double(const AttributeMap &attrs, std::initializer_list<const char *>
 }
 
 bool load_file_content(const std::string &path, std::string &content) {
+  if (path.empty()) {
+    return false;
+  }
+
+  std::vector<std::string> candidates;
+  candidates.push_back(path);
+
+  if (!path.empty() && path[0] == '/') {
+    candidates.emplace_back(path.begin() + 1, path.end());
+  }
+
+  constexpr char CONFIG_PREFIX[] = "/config/";
+  if (path.rfind(CONFIG_PREFIX, 0) == 0) {
+    candidates.emplace_back(path.begin() + sizeof(CONFIG_PREFIX) - 1, path.end());
+  }
+
+  auto slash = path.find_last_of("/\\");
+  if (slash != std::string::npos && slash + 1 < path.size()) {
+    candidates.push_back(path.substr(slash + 1));
+  }
+
+  // remove duplicates while keeping order
+  std::vector<std::string> unique_candidates;
+  for (const auto &candidate : candidates) {
+    if (candidate.empty()) {
+      continue;
+    }
+    if (std::find(unique_candidates.begin(), unique_candidates.end(), candidate) ==
+        unique_candidates.end()) {
+      unique_candidates.push_back(candidate);
+    }
+  }
+
+  for (const auto &candidate : unique_candidates) {
 #ifdef USE_FILESYSTEM
-  if (auto *fs = esphome::filesystem::global_filesystem; fs != nullptr) {
-    auto file = fs->open(path.c_str(), "r");
-    if (file) {
-      std::ostringstream stream;
-      while (file.available()) {
-        stream << static_cast<char>(file.read());
+    if (auto *fs = esphome::filesystem::global_filesystem; fs != nullptr) {
+      auto file = fs->open(candidate.c_str(), "r");
+      if (file) {
+        ESP_LOGI(TAG, "Lade XML Mapping aus '%s' (Filesystem)", candidate.c_str());
+        std::ostringstream stream;
+        while (file.available()) {
+          stream << static_cast<char>(file.read());
+        }
+        content = stream.str();
+        return true;
       }
+    }
+#endif
+    std::ifstream file(candidate, std::ios::binary);
+    if (file.is_open()) {
+      ESP_LOGI(TAG, "Lade XML Mapping aus '%s'", candidate.c_str());
+      std::ostringstream stream;
+      stream << file.rdbuf();
       content = stream.str();
       return true;
     }
   }
-#endif
-  std::ifstream file(path, std::ios::binary);
-  if (!file.is_open()) {
-    return false;
-  }
-  std::ostringstream stream;
-  stream << file.rdbuf();
-  content = stream.str();
-  return true;
+
+  ESP_LOGW(TAG, "XML Mapping konnte unter keinem bekannten Pfad geladen werden (Original: %s)", path.c_str());
+  return false;
 }
 
 void trim(std::string &value) {
@@ -191,13 +230,20 @@ bool map_fields(const std::vector<uint8_t> &decoded, const XmlCommandMapping &ma
 
 XmlCommandMapping *mapping_for_id(XmlMapping &mapping, const std::string &id) {
   std::string lowered = to_lower(id);
-  if (lowered == "tr32") {
+  std::string canonical;
+  canonical.reserve(lowered.size());
+  for (char ch : lowered) {
+    if (std::isalnum(static_cast<unsigned char>(ch)) != 0) {
+      canonical.push_back(ch);
+    }
+  }
+  if (canonical == "tr32") {
     return &mapping.tr32_fields;
   }
-  if (lowered == "tg43") {
+  if (canonical == "tg43") {
     return &mapping.tg43_fields;
   }
-  if (lowered == "tgc0") {
+  if (canonical == "tgc0") {
     return &mapping.tgc0_fields;
   }
   return nullptr;
