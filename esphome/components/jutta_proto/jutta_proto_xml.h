@@ -24,20 +24,12 @@ struct XmlCommandMapping {
   std::vector<XmlField> fields;
 };
 
-struct XmlCommand {
-  std::string name;
-  std::string code;
-  bool db_mode{true};
-};
-
 struct XmlMapping {
   bool valid{false};
   std::string source_path;
   XmlCommandMapping tr32_fields;
   XmlCommandMapping tg43_fields;
   XmlCommandMapping tgc0_fields;
-  bool has_commands{false};
-  std::vector<XmlCommand> commands;
 };
 
 struct StatValue {
@@ -57,9 +49,6 @@ class MachineStats {
   std::unordered_map<std::string, StatValue> values_{};
 };
 
-bool load_xml_mapping_from_content(const std::string &source_label, const std::string &content,
-                                   XmlMapping &mapping);
-bool load_xml_mapping_from_content(const std::string &source_label, const std::string &content);
 bool load_xml_mapping(const std::string &path, XmlMapping &mapping);
 bool load_xml_mapping(const std::string &path);
 const XmlMapping &get_loaded_xml_mapping();

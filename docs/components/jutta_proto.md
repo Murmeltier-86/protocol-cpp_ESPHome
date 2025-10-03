@@ -17,42 +17,18 @@ uart:
 jutta_proto:
   id: jura
   uart_id: jura_uart
-  enable_xml_poll: true                 # optional, default false
-  xml_poll_interval_ms: 30000           # optional, poll interval in ms
-  xml_mapping: !include jura_joe_xml_bundle_final/joe_codes_example.xml   # optional, XML aus dem Repo-Bundle laden
-  xml_mapping_path: "/data/jura_machine.xml"  # optional, Pfad auf dem Gerät
+  jutta_xml_enable: true           # optional, default false
+  jutta_xml_poll_ms: 30000         # optional, poll interval in ms
+  jutta_xml_rx_timeout_ms: 900     # optional, frame timeout in ms
+  xml_path: "/data/jura_machine.xml"   # optional, override XML mapping path
 ```
 
 The component takes care of the handshake during startup. Once the handshake finishes, all brewing actions become available.
 
-Wenn `enable_xml_poll` auf `true` gesetzt ist, fragt die Komponente zyklisch die JURA-Statistik via DB-Framing ab. Beim Start
-analysiert sie die Mapping-Datei (Standard `/data/jura_machine.xml`, per `xml_mapping_path` anpassbar) und erkennt sowohl
-klassische `<frame ...>`-Blöcke für Statistikfelder als auch `<command ...>`-Einträge aus den aktuellen
-`jura_joe_xml_bundle_final`-Exports. Werden Frames gefunden, ersetzen deren Labels die Standardnamen der Sensoren. Liegen nur
-Kommandos vor, bleibt das Polling deaktiviert – die Liste der Kommandos wird dennoch geladen und im Log ausgegeben.
-
-### Ablage der XML-Mapping-Datei
-
-Damit die XML beim Flashen automatisch übertragen wird, wird sie direkt in der YAML-Konfiguration referenziert. Mit
-`xml_mapping: !include <datei>` liest ESPHome die Datei beim Build ein und verpackt sie in der Firmware – beispielsweise über
-`!include jura_joe_xml_bundle_final/joe_codes_example.xml`, das dem Repository beiliegt. Beim Start lädt der Komponentencode
-das Mapping direkt aus dem eingebetteten Speicher und verwendet `/data/jura_machine.xml` als logischen Pfad. Wer einen anderen
-Gerätepfad benötigt, kann `xml_mapping_path` anpassen – der YAML-Inhalt wird trotzdem eingebettet.
-
-Ein minimales Beispiel mit eingebundenem Mapping:
-
-```yaml
-jutta_proto:
-  id: jura
-  uart_id: jura_uart
-  enable_xml_poll: true
-  xml_mapping: !include jura_joe_xml_bundle_final/joe_codes_example.xml
-```
-
-Das Log meldet nach dem Start `XML mapping loaded from /data/jura_machine.xml (stats=yes, …, commands=…)`. Schlägt das Laden
-fehl, erscheint eine Warnung mit dem in YAML hinterlegten Pfad. In diesem Fall sollte geprüft werden, ob die Datei korrekt
-eingebunden wurde (`esphome config <yaml>` zeigt die expandierte Konfiguration) und ob das XML gültige `<frame>`- oder
-`<command>`-Einträge enthält.
+When `jutta_xml_enable` is set to `true`, the component periodically polls the JURA statistics interface using DB framing.
+During initialization it scans the mapping file (default `/data/jura_machine.xml`, configurable via `xml_path`, typically a
+J.O.E. export) to discover the exact command strings and optional labels for the exposed statistics blocks. If the file is
+missing or malformed the defaults `@TR:32`, `@TG:43`, and `@TG:C0` are used and the sensors keep their generic names.
 
 ### XML statistics sensors
 
