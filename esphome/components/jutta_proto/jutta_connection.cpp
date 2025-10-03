@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdio>
+#include <deque>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -135,6 +136,49 @@ inline void wait_for_jutta_gap() {
     if (JUTTA_SERIAL_GAP_MS > 0) {
         esphome::delay(JUTTA_SERIAL_GAP_MS);
     }
+}
+
+class RawHelloProbeReader : public esphome::uart::UARTDevice {
+ public:
+    explicit RawHelloProbeReader(esphome::uart::UARTComponent* parent) : esphome::uart::UARTDevice(parent) {}
+    using esphome::uart::UARTDevice::available;
+    using esphome::uart::UARTDevice::read_byte;
+};
+
+bool jutta_raw_hello_probe(esphome::uart::UARTComponent& uart) {
+    static std::deque<uint8_t> window;
+    constexpr std::array<uint8_t, 7> HELLO = {'H', 'E', 'L', 'L', 'O', '\r', '\n'};
+
+    RawHelloProbeReader reader(&uart);
+    size_t drained = 0;
+    uint8_t byte = 0;
+
+    while (reader.available() > 0) {
+        if (!reader.read_byte(&byte)) {
+            ESP_LOGW(TAG, "Raw hello probe failed to read UART byte while draining buffer.");
+            break;
+        }
+
+        ++drained;
+        window.push_back(byte);
+        if (window.size() > HELLO.size()) {
+            window.pop_front();
+        }
+
+        if (window.size() == HELLO.size() &&
+            std::equal(window.begin(), window.end(), HELLO.begin())) {
+            ESP_LOGD(TAG, "Detected raw hello sequence from UART.");
+            window.clear();
+            return true;
+        }
+    }
+
+    if (drained > 0) {
+        ESP_LOGVV(TAG, "Raw hello probe consumed %zu byte%s from UART.", drained,
+                  drained == 1 ? "" : "s");
+    }
+
+    return false;
 }
 
 }  // namespace
