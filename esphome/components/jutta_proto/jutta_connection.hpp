@@ -116,30 +116,8 @@ class JuttaConnection {
     /**
      * Sends an escaped DB command ("@..." without trailing CRLF) with the fixed trailer required for XML frames.
      */
-    bool write_db_command(const std::string& command);
-
-    /**
-     * Reads a DB framed response, decoding the payload into "decoded".
-     * Returns true on success.
-     */
-    bool read_db_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout);
-
-    /**
-     * Reads a single DB framed response and decodes the payload into "decoded".
-     * Returns true on success.
-     */
-    bool read_db_data_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout);
-
-    /**
-     * Drains incoming DB stream bytes for the specified duration.
-     */
-    void drain_db_stream(const std::chrono::milliseconds& duration);
-
-    /**
-     * Reads raw encoded DB bytes from the UART stream into the provided buffer.
-     * Returns the number of bytes that were read.
-     */
-    size_t read_db_stream_chunk(std::array<uint8_t, 4>& buffer);
+    void tx_db_command(const std::string& ascii);
+    bool read_db_frame(std::vector<uint8_t>& decoded, uint32_t timeout_ms);
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
@@ -316,11 +294,6 @@ class JuttaConnection {
     mutable std::string response_line_buffer_{};
 
     void reinject_decoded_front(const std::string& data) const;
-
-    bool write_db_encoded_(const std::vector<uint8_t>& encoded);
-    bool read_one_db_frame_encoded_(std::vector<uint8_t>& encoded,
-                                    const std::chrono::milliseconds& timeout);
-    bool unescape_db_frame_(const std::vector<uint8_t>& encoded, std::vector<uint8_t>& decoded) const;
 
     void activate_tx_echo_suppressor_(const std::vector<uint8_t>& frame);
     void deactivate_tx_echo_suppressor_();

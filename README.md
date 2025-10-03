@@ -15,10 +15,45 @@ Since newer models **do not use** this old V1-Protocol any more I started this p
 
 ## ESPHome-Integration (Kurzüberblick)
 
-* **XML-Quelle:** Die Komponente lädt das Mapping entweder aus `xml_inline` im YAML (mehrzeilige Zeichenkette) oder aus `xml_path` (Standard `/config/esphome/e6.xml`). Fehlt ein Dateisystem, wird automatisch auf Inline-Daten zurückgegriffen.
-* **Entitäten:** Für `TR32` (10 Zähler), `TG43` (6 Zähler) und `TGC0` (3 Werte) werden beim Boot Sensoren erstellt und dauerhaft registriert. Labels aus dem XML werden beim Start angewendet.
-* **Polling:** Alle 25–30 s werden nacheinander `@TR:32`, `@TG:43` und `@TG:C0` angefragt. Ein robuster Framer erkennt den Terminator `DF FF DB DB FB FB DB DB`, entfernt Escapes und verwirft fehlerhafte Frames.
-* **Fehlersuche:** Log-Ausgaben zeigen Quelle und Status des XML-Mappings, jede `TX_DB`-/`RX_DB`-Phase sowie Zeitüberschreitungen an. Bei „No filesystem available“ sollte `xml_inline` genutzt oder das Dateisystem aktiviert werden.
+### Aktivierung des XML-Pollings
+
+- `enable_xml_poll`: Schaltet den zusätzlichen XML-Pfad frei (Standard `false`).
+- `xml_mapping_path`: Dateipfad zum J.O.E.-Mapping (Standard `"/config/esphome/e6.xml"`).
+- `xml_poll_interval_ms`: Abstand zwischen zwei Abfragen in Millisekunden (Standard `30000`).
+
+Beispiel-Konfiguration in ESPHome:
+
+```yaml
+uart:
+  id: uart_bus
+  baud_rate: 9600
+
+jutta_proto:
+  id: jura_e6
+  uart_id: uart_bus
+  enable_xml_poll: true
+  xml_mapping_path: "/config/esphome/e6.xml"
+  xml_poll_interval_ms: 30000
+```
+
+### Mapping-Datei
+
+- Das Mapping folgt der Struktur der veröffentlichten `jura_joe_xml_bundle_final`-Dateien.
+- Bei erfolgreichem Laden erscheint im Log eine Zeile wie `XML mapping loaded from /config/esphome/e6.xml (valid=1, fields=...)`.
+- Ist die Datei nicht vorhanden oder fehlerhaft, läuft die Komponente weiter – lediglich das XML-Polling bleibt inaktiv.
+
+### Automatisch erzeugte Sensoren
+
+- Für jedes Feld der Frames `@TR:32`, `@TG:43` und `@TG:C0` wird ein numerischer `sensor::Sensor` erstellt.
+- Typische Werte (abhängig vom Mapping): `coffee_total`, `espresso_total`, `cappuccino_total`, `cleaning_counter`, `decalc_counter`, `filter_change_counter`, `cleaning_percent`, `decalc_percent`, `filter_change_percent`.
+- Die sichtbaren Home-Assistant-Entitäten tragen den im Mapping hinterlegten Label-Text.
+
+### Ablauf & Logging
+
+- Nach erfolgreichem Handshake sendet die Firmware alle `xml_poll_interval_ms` nacheinander `@TR:32`, `@TG:43` und `@TG:C0`.
+- Jeder Befehl wird als `TX_DB` geloggt, Antworten erscheinen als `RX_DB <Frame> decoded_len=<N> reason=<gap|CRLF>`.
+- Zeitüberschreitungen führen lediglich zu einer Warnung; beim nächsten Intervall wird automatisch weiter versucht.
+- Erfolgreich geparste Felder werden mit `XML publish: <Name>=<Wert>` protokolliert.
 
 ## Example
 The following example shows the interaction with a JURA coffee maker over [XMPP](https://xmpp.org/).
