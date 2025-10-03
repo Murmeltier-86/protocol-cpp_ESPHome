@@ -25,7 +25,10 @@ bool jutta_raw_hello_probe(esphome::uart::UARTComponent &uart) {
   uint32_t t0 = esphome::millis();
   while (esphome::millis() - t0 < 40) {
     while (uart.available()) {
-      uart.read();
+      uint8_t discard;
+      if (!uart.read_byte(&discard)) {
+        break;
+      }
     }
     esphome::delay(1);
   }
@@ -39,7 +42,10 @@ bool jutta_raw_hello_probe(esphome::uart::UARTComponent &uart) {
   t0 = esphome::millis();
   while (esphome::millis() - t0 < 3000) {
     while (uart.available()) {
-      uint8_t b = static_cast<uint8_t>(uart.read());
+      uint8_t b;
+      if (!uart.read_byte(&b)) {
+        break;
+      }
       seen++;
       static const char *H = "0123456789ABCDEF";
       hex.push_back(H[b >> 4]);
