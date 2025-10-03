@@ -17,9 +17,31 @@ uart:
 jutta_proto:
   id: jura
   uart_id: jura_uart
+  jutta_xml_enable: true           # optional, default false
+  jutta_xml_poll_ms: 30000         # optional, poll interval in ms
+  jutta_xml_rx_timeout_ms: 900     # optional, frame timeout in ms
 ```
 
 The component takes care of the handshake during startup. Once the handshake finishes, all brewing actions become available.
+
+When `jutta_xml_enable` is set to `true`, the component periodically polls the JURA statistics interface using DB framing.
+During initialization it scans `/data/jura_machine.xml` (J.O.E. export) to discover the exact command strings and optional
+labels for the exposed statistics blocks. If the file is missing or malformed the defaults `@TR:32`, `@TG:43`, and
+`@TG:C0` are used and the sensors keep their generic names.
+
+### XML statistics sensors
+
+Enabling XML polling registers fixed pools of numeric sensors that Home Assistant can consume directly. Every value is
+published only after a complete, valid DB frame was received for the respective block; failed cycles publish nothing.
+
+| Block  | Sensor count | Value width | Default names     |
+| ------ | ------------- | ----------- | ----------------- |
+| TR32   | 10            | 16-bit      | `TR32 1` … `TR32 10` |
+| TG43   | 6             | 16-bit      | `TG43 1` … `TG43 6`  |
+| TG:C0  | 3             | 32-bit      | `TGC0 1` … `TGC0 3`  |
+
+If the XML mapping provides labels for a block, those replace the defaults in the same order. All sensors report integers
+with `accuracy_decimals: 0`, so no templating is required on the ESPHome side.
 
 ## Automation Actions
 

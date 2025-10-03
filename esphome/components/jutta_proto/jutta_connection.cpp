@@ -21,6 +21,9 @@ constexpr uint32_t JUTTA_SERIAL_GAP_MS = 8;
 constexpr uint8_t JUTTA_ENCODE_BASE = 0xFF;
 constexpr uint8_t JUTTA_BIT0_MASK = static_cast<uint8_t>(1u << 2);
 constexpr uint8_t JUTTA_BIT1_MASK = static_cast<uint8_t>(1u << 5);
+constexpr uint8_t DB_ESCAPE = 0xDB;
+constexpr uint8_t DB_XOR_MASK = 0x20;
+constexpr std::array<uint8_t, 8> DB_TRAILER_ENCODED{{0xDF, 0xFF, 0xDB, 0xDB, 0xFB, 0xFB, 0xDB, 0xDB}};
 std::string format_hex(const uint8_t* data, size_t length) {
     if (length == 0) {
         return "[]";
@@ -458,7 +461,7 @@ void JuttaConnection::reinject_decoded_front(const std::string& data) const {
              data.size() == 1 ? "" : "s", encoded.size(), format_printable(data).c_str(), format_hex(encoded).c_str());
 }
 
-bool JuttaConnection::poll_response_line(std::string& line) {
+bool JuttaConnection::read_line_until(std::string& line) {
     if (try_extract_line(this->response_line_buffer_, line)) {
         ESP_LOGD(TAG, "Polled buffered response line: '%s'", format_printable(line).c_str());
         return true;
@@ -490,6 +493,101 @@ void JuttaConnection::reset_response_line_buffer() {
                  this->response_line_buffer_.size() == 1 ? "" : "s");
         this->response_line_buffer_.clear();
     }
+}
+
+bool JuttaConnection::write_db_command(const std::string& command) {
+    std::vector<uint8_t> encoded;
+    encoded.reserve(command.size() * 2 + DB_TRAILER_ENCODED.size());
+    for (unsigned char c : command) {
+        encoded.push_back(DB_ESCAPE);
+        encoded.push_back(static_cast<uint8_t>(c ^ DB_XOR_MASK));
+    }
+    encoded.insert(encoded.end(), DB_TRAILER_ENCODED.begin(), DB_TRAILER_ENCODED.end());
+    return this->write_db_encoded_(encoded);
+}
+
+bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout) {
+    decoded.clear();
+    std::vector<uint8_t> encoded;
+    if (!this->read_db_frame_encoded_(encoded, timeout)) {
+        return false;
+    }
+    if (encoded.size() < DB_TRAILER_ENCODED.size()) {
+        return false;
+    }
+    encoded.resize(encoded.size() - DB_TRAILER_ENCODED.size());
+    decoded.clear();
+    decoded.reserve(encoded.size());
+    for (size_t i = 0; i < encoded.size();) {
+        uint8_t byte = encoded[i++];
+        if (byte == DB_ESCAPE) {
+            if (i >= encoded.size()) {
+                return false;
+            }
+            uint8_t escaped = encoded[i++];
+            decoded.push_back(static_cast<uint8_t>(escaped ^ DB_XOR_MASK));
+        } else {
+            decoded.push_back(byte);
+        }
+    }
+    return true;
+}
+
+void JuttaConnection::drain_db_stream(const std::chrono::milliseconds& duration) {
+    if (duration.count() == 0) {
+        return;
+    }
+    uint32_t start = esphome::millis();
+    std::array<uint8_t, 4> buffer{};
+    while (true) {
+        if (static_cast<int32_t>(esphome::millis() - start - duration.count()) >= 0) {
+            break;
+        }
+        size_t read = this->serial.read_serial(buffer);
+        if (read == 0) {
+            esphome::delay(5);
+        }
+    }
+}
+
+bool JuttaConnection::write_db_encoded_(const std::vector<uint8_t>& encoded) {
+    for (uint8_t byte : encoded) {
+        if (!this->serial.write_serial_byte(byte)) {
+            ESP_LOGW(TAG, "Failed to write DB byte 0x%02X", static_cast<unsigned>(byte));
+            return false;
+        }
+    }
+    this->serial.flush();
+    return true;
+}
+
+bool JuttaConnection::read_db_frame_encoded_(std::vector<uint8_t>& encoded,
+                                             const std::chrono::milliseconds& timeout) {
+    encoded.clear();
+    uint32_t start = esphome::millis();
+    std::array<uint8_t, 4> buffer{};
+    while (true) {
+        size_t read = this->serial.read_serial(buffer);
+        if (read > 0) {
+            encoded.insert(encoded.end(), buffer.begin(), buffer.begin() + read);
+            if (encoded.size() >= DB_TRAILER_ENCODED.size()) {
+                if (std::equal(DB_TRAILER_ENCODED.begin(), DB_TRAILER_ENCODED.end(),
+                               encoded.end() - DB_TRAILER_ENCODED.size())) {
+                    return true;
+                }
+            }
+            continue;
+        }
+        if (timeout.count() == 0) {
+            esphome::delay(5);
+            continue;
+        }
+        if (static_cast<int32_t>(esphome::millis() - start - timeout.count()) >= 0) {
+            break;
+        }
+        esphome::delay(5);
+    }
+    return false;
 }
 
 
