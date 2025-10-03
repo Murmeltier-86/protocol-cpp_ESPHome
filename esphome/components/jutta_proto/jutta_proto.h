@@ -120,8 +120,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void ensure_xml_sensors_created_();
   void reset_xml_cycle_state_();
   bool perform_xml_cycle_();
-  bool read_db_data_frame_(std::vector<uint8_t> &decoded, uint32_t timeout_ms,
-                           std::string_view last_cmd_ascii);
+  bool read_db_data_frame_(std::vector<uint8_t> &decoded, uint32_t timeout_ms);
   bool read_db_with_expected_len_(std::vector<uint8_t> &decoded, uint32_t total_timeout_ms,
                                   std::string_view cmd, size_t expected_len);
   bool send_db_command_(const std::string &command);

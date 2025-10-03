@@ -532,43 +532,13 @@ bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, const std::ch
     return this->unescape_db_frame_(encoded, decoded);
 }
 
-bool JuttaConnection::read_db_data_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout,
-                                         std::string_view last_cmd_ascii) {
+bool JuttaConnection::read_db_data_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout) {
     decoded.clear();
-    const uint32_t start = esphome::millis();
     std::vector<uint8_t> encoded;
-    std::vector<uint8_t> candidate;
-    while (true) {
-        uint32_t remaining_ms = 0;
-        if (timeout.count() > 0) {
-            uint32_t now = esphome::millis();
-            uint32_t elapsed = now - start;
-            uint32_t timeout_ms = static_cast<uint32_t>(timeout.count());
-            if (elapsed >= timeout_ms) {
-                return false;
-            }
-            remaining_ms = timeout_ms - elapsed;
-        }
-
-        if (!this->read_one_db_frame_encoded_(encoded, std::chrono::milliseconds{remaining_ms})) {
-            return false;
-        }
-
-        candidate.clear();
-        if (!this->unescape_db_frame_(encoded, candidate)) {
-            return false;
-        }
-
-        bool ascii = std::all_of(candidate.begin(), candidate.end(), is_printable_ascii);
-        if (ascii && !last_cmd_ascii.empty() && is_ascii_equal(candidate, last_cmd_ascii)) {
-            ESP_LOGD("jutta_proto", "RX_DB echo ignored: \"%.*s\"", static_cast<int>(candidate.size()),
-                     reinterpret_cast<const char*>(candidate.data()));
-            continue;
-        }
-
-        decoded.swap(candidate);
-        return true;
+    if (!this->read_one_db_frame_encoded_(encoded, timeout)) {
+        return false;
     }
+    return this->unescape_db_frame_(encoded, decoded);
 }
 
 void JuttaConnection::drain_db_stream(const std::chrono::milliseconds& duration) {

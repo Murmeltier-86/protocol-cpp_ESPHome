@@ -125,11 +125,10 @@ class JuttaConnection {
     bool read_db_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout);
 
     /**
-     * Reads DB framed responses while skipping optional ASCII echo frames that exactly match the
-     * provided command. The decoded payload of the first non-echo frame is stored in "decoded".
+     * Reads a single DB framed response and decodes the payload into "decoded".
+     * Returns true on success.
      */
-    bool read_db_data_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout,
-                            std::string_view last_cmd_ascii);
+    bool read_db_data_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout);
 
     /**
      * Drains incoming DB stream bytes for the specified duration.
