@@ -540,14 +540,25 @@ JuttaConnection::WaitResult JuttaConnection::await_device_type(std::string &out_
   uint32_t ty_deadline = device_probe_.start_time + TY_TIMEOUT_MS;
   uint32_t ok_deadline = ty_deadline + OK_TIMEOUT_MS;
 
-  if (!device_probe_.ty_line.empty() && device_probe_.ok_received) {
-    out_ty = device_probe_.ty_line;
-    cancel_device_probe();
-    return WaitResult::Success;
+  if (!device_probe_.ty_line.empty()) {
+    if (device_probe_.ok_received) {
+      out_ty = device_probe_.ty_line;
+      cancel_device_probe();
+      return WaitResult::Success;
+    }
+
+    if (time_reached(now, ok_deadline)) {
+      ESP_LOGW(TAG, "HELLO: received %s without trailing OK:, continuing handshake anyway.",
+               printable_snippet(device_probe_.ty_line).c_str());
+      out_ty = device_probe_.ty_line;
+      cancel_device_probe();
+      return WaitResult::Success;
+    }
+
+    return WaitResult::Pending;
   }
 
-  if ((device_probe_.ty_line.empty() && time_reached(now, ty_deadline)) ||
-      (!device_probe_.ok_received && time_reached(now, ok_deadline))) {
+  if (time_reached(now, ty_deadline)) {
     ESP_LOGW(TAG, "HELLO timeout; ty_received=%s ok_received=%s",
              YESNO(!device_probe_.ty_line.empty()), YESNO(device_probe_.ok_received));
     cancel_device_probe();

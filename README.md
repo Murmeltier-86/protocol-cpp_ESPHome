@@ -33,10 +33,17 @@ To connect to an JURA coffee maker we are using a 5V UART signal with the follow
 * **RX Flow Control Threshold:** 0
 
 #### Deobfuscating
-Once a connection has been established we can start sending and receiving data.  
+Once a connection has been established we can start sending and receiving data.
 **But** all data send and received is obfuscated.
-The following description shows how to **deobfuscate** data received from the coffee maker.  
+The following description shows how to **deobfuscate** data received from the coffee maker.
 To obfuscate data just follow the steps in reverse.
+The reference implementation in [`Test_Protocol/jura.cpp`](Test_Protocol/jura.cpp) does exactly that:
+each outgoing character that is written via `send_command()` is run through
+`obfuscate_byte()` before being put on the UART, and received data is passed
+through the matching `deobfuscate_4bytes()` helper before it is interpreted.
+This means the raw serial traffic that you see during the initial handshake
+(`TY:` / `ty:`) is already obfuscated on the wire and only becomes readable once
+the helper functions run.
 
 **Step 0**
 The coffee maker always sends 4 "raw" byte per one byte of data with a break of 8ms in between each "raw" byte.
