@@ -13,6 +13,13 @@ Since newer models **do not use** this old V1-Protocol any more I started this p
 3. [Requirements](#requirements)
 4. [Building](#building)
 
+## ESPHome-Integration (Kurzüberblick)
+
+* **XML-Quelle:** Die Komponente lädt das Mapping entweder aus `xml_inline` im YAML (mehrzeilige Zeichenkette) oder aus `xml_path` (Standard `/config/esphome/e6.xml`). Fehlt ein Dateisystem, wird automatisch auf Inline-Daten zurückgegriffen.
+* **Entitäten:** Für `TR32` (10 Zähler), `TG43` (6 Zähler) und `TGC0` (3 Werte) werden beim Boot Sensoren erstellt und dauerhaft registriert. Labels aus dem XML werden beim Start angewendet.
+* **Polling:** Alle 25–30 s werden nacheinander `@TR:32`, `@TG:43` und `@TG:C0` angefragt. Ein robuster Framer erkennt den Terminator `DF FF DB DB FB FB DB DB`, entfernt Escapes und verwirft fehlerhafte Frames.
+* **Fehlersuche:** Log-Ausgaben zeigen Quelle und Status des XML-Mappings, jede `TX_DB`-/`RX_DB`-Phase sowie Zeitüberschreitungen an. Bei „No filesystem available“ sollte `xml_inline` genutzt oder das Dateisystem aktiviert werden.
+
 ## Example
 The following example shows the interaction with a JURA coffee maker over [XMPP](https://xmpp.org/).
 The complete implementation for this demo can be found [here](https://github.com/COM8/esp32-jura).
