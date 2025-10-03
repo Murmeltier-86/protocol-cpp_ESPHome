@@ -716,9 +716,6 @@ void JuraComponent::load_xml_mapping_() {
   std::string content;
 #if defined(USE_FILESYSTEM)
   auto *fs = ::esphome::filesystem::global_filesystem;
-#else
-  auto *fs = nullptr;
-#endif
   if (fs == nullptr) {
     ESP_LOGW(TAG, "No filesystem available for XML mapping");
     commands_ok = false;
@@ -761,6 +758,10 @@ void JuraComponent::load_xml_mapping_() {
       parse_block("TGC0", this->xml_mapping_.tgc0_command, this->xml_mapping_.tgc0_labels);
     }
   }
+#else
+  ESP_LOGW(TAG, "No filesystem available for XML mapping");
+  commands_ok = false;
+#endif
 
   this->xml_mapping_.valid = commands_ok;
   if (!this->xml_mapping_logged_) {
