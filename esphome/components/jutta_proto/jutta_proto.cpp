@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <sstream>
 #include <utility>
+#include <cstring>
 
 #include "esphome/core/application.h"
 #include "esphome/core/time.h"
@@ -901,41 +902,55 @@ bool JuraComponent::send_db_command_(const std::string &command) {
   return this->coffee_maker_->connection->write_db_command(command);
 }
 
-bool JuraComponent::read_db_data_frame_(std::vector<uint8_t> &decoded, uint32_t timeout_ms,
-                                        std::string_view last_cmd_ascii) {
+bool JuraComponent::read_db_data_frame_(std::vector<uint8_t> &decoded, uint32_t timeout_ms) {
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     return false;
   }
-  return this->coffee_maker_->connection->read_db_data_frame(decoded, std::chrono::milliseconds{timeout_ms},
-                                                             last_cmd_ascii);
+  return this->coffee_maker_->connection->read_db_data_frame(decoded, std::chrono::milliseconds{timeout_ms});
 }
 
 bool JuraComponent::read_db_with_expected_len_(std::vector<uint8_t> &decoded, uint32_t total_timeout_ms,
                                                std::string_view cmd, size_t expected_len) {
   const uint32_t start = esphome::millis();
+  bool echo_seen = false;
   while (true) {
-    uint32_t remaining = 0;
-    if (total_timeout_ms > 0) {
-      uint32_t now = esphome::millis();
-      uint32_t elapsed = now - start;
-      if (elapsed >= total_timeout_ms) {
-        ESP_LOGW(TAG, "RX_DB timeout");
-        return false;
-      }
-      remaining = total_timeout_ms - elapsed;
-    }
-
-    if (!this->read_db_data_frame_(decoded, remaining, cmd)) {
+    uint32_t now = esphome::millis();
+    if (total_timeout_ms > 0 && now - start >= total_timeout_ms) {
       ESP_LOGW(TAG, "RX_DB timeout");
       return false;
     }
 
-    ESP_LOGD(TAG, "RX_DB decoded_len=%zu", decoded.size());
+    uint32_t remaining = 0;
+    if (total_timeout_ms > 0) {
+      remaining = total_timeout_ms - (now - start);
+    }
+
+    if (!this->read_db_data_frame_(decoded, remaining)) {
+      ESP_LOGW(TAG, "RX_DB timeout");
+      return false;
+    }
+
+    if (!echo_seen) {
+      bool ascii = std::all_of(decoded.begin(), decoded.end(), [](uint8_t c) {
+        return c >= 0x20 && c <= 0x7E;
+      });
+      if (ascii && decoded.size() == cmd.size() &&
+          std::memcmp(decoded.data(), cmd.data(), decoded.size()) == 0) {
+        ESP_LOGD("jutta_proto", "RX_DB echo ignored: \"%.*s\"", static_cast<int>(decoded.size()),
+                 reinterpret_cast<const char *>(decoded.data()));
+        echo_seen = true;
+        continue;
+      }
+      echo_seen = true;
+    }
+
     if (decoded.size() == expected_len) {
+      ESP_LOGD(TAG, "RX_DB decoded_len=%zu", decoded.size());
       return true;
     }
 
-    ESP_LOGW(TAG, "RX_DB decoded_len=%zu expected=%zu, continue waiting", decoded.size(), expected_len);
+    ESP_LOGV(TAG, "RX_DB len=%u != %u → drop", static_cast<unsigned>(decoded.size()),
+             static_cast<unsigned>(expected_len));
   }
 }
 

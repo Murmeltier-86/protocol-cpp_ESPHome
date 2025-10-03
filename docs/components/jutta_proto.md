@@ -48,8 +48,10 @@ with `accuracy_decimals: 0`, so no templating is required on the ESPHome side.
 
 The XML transport uses escaped DB frames. Some legacy Wi-Fi bridges reply with an ASCII echo of the `@TR:32`, `@TG:43`, or
 `@TG:C0` command before the actual data frame arrives. The component drains the UART briefly before the first command in a
-poll cycle, skips such echo frames automatically, and validates the decoded payload length (21/13/13 bytes). Only complete
-and valid data frames update the sensor values; incomplete cycles simply keep the previous readings.
+poll cycle, skips such echo frames automatically, and validates the decoded payload length (21/13/13 bytes). Frames that are
+too short or too long are treated as unrelated telemetry and dropped without touching the timeout budget. The per-command
+timeout defaults to 1.5 seconds, which proved sufficient in field tests. Keep the poll interval at or above 25 seconds so the
+telemetry stream does not collide with the XML polling.
 
 ## Automation Actions
 

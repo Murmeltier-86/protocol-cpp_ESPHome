@@ -96,7 +96,9 @@ CONFIG_SCHEMA = (
             cv.GenerateID(): cv.declare_id(JuraComponent),
             cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_JUTTA_XML_ENABLE, default=True): cv.boolean,
-            cv.Optional(CONF_JUTTA_XML_POLL_MS, default=30000): cv.positive_int,
+            cv.Optional(CONF_JUTTA_XML_POLL_MS, default=30000): cv.All(
+                cv.positive_int, cv.Range(min=25000)
+            ),
             cv.Optional(CONF_JUTTA_XML_RX_TIMEOUT_MS, default=1500): cv.positive_int,
             cv.Optional(CONF_XML_PATH): cv.string,
         }
