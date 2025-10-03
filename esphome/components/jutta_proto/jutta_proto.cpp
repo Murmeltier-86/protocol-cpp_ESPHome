@@ -66,7 +66,6 @@ auto try_set_parent(SensorT *sensor, Component *parent, int)
 template<typename SensorT>
 void try_set_parent(SensorT *, Component *, ...) {}
 
-template <size_t N>
 std::string format_printable_char(uint8_t byte) {
   switch (byte) {
     case '\r':
@@ -738,9 +737,15 @@ void JuraComponent::finish_xml_cycle_(uint32_t now, bool success) {
     }
   };
 
-  handle_response(0, map_tr32);
-  handle_response(1, map_tg43);
-  handle_response(2, map_tgc0);
+  handle_response(0,
+                   static_cast<bool (*)(const std::vector<uint8_t> &, const XmlMapping &, MachineStats &)>(
+                       map_tr32));
+  handle_response(1,
+                   static_cast<bool (*)(const std::vector<uint8_t> &, const XmlMapping &, MachineStats &)>(
+                       map_tg43));
+  handle_response(2,
+                   static_cast<bool (*)(const std::vector<uint8_t> &, const XmlMapping &, MachineStats &)>(
+                       map_tgc0));
 
   if (any_value) {
     this->publish_xml_stats_();

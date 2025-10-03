@@ -157,3 +157,16 @@ Use `raw` instead of `command` when you need to send a custom UART command strin
 
 The component logs handshake progress during startup. The `dump_config()` output lists the detected machine type as well as the
 latest key exchange messages, which can help troubleshoot UART or wiring issues.
+
+## Fehlerbehebung bei der Integration
+
+Wenn während des Kompiliervorgangs Build-Fehler in `jutta_proto.cpp` auftreten, prüfen Sie die verwendete ESPHome-Version. Die
+Komponentenfunktionen `map_tr32`, `map_tg43` und `map_tgc0` sind Teil des mitgelieferten XML-Mappers und werden als Funktionszeiger
+übergeben. In älteren Snapshots kann es notwendig sein, einen vollständigen Funktionsprototyp zu übergeben, damit der C++-Compiler
+keine Überladungs-Konflikte meldet. Ab der korrigierten Variante werden die drei Mapper explizit als Funktionszeiger mit den
+Argumenten `(const std::vector<uint8_t> &, const XmlMapping &, MachineStats &)` übergeben, womit sie sowohl auf aktuellen als auch
+auf älteren Toolchains fehlerfrei kompilieren.
+
+Zusätzlich wurde die Hilfsfunktion zur Formatierung druckbarer Zeichen so angepasst, dass sie ohne nicht genutzten Template-Parameter
+auskommt. Damit bleibt die Ausgabe in den ESPHome-Logs (z. B. beim UART-Handshaking) unverändert, gleichzeitig verhindert die Änderung
+jedoch, dass GCC oder Clang bei der Vorlagendeduktion scheitern.
