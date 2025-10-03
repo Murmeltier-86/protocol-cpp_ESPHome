@@ -21,6 +21,37 @@ std::atomic<bool> uart_busy{false};
 namespace {
 static const char *const TAG = "jutta_connection";
 
+bool jutta_raw_hello_probe(esphome::uart::UARTComponent &uart) {
+  uint32_t t0 = esphome::millis();
+  while (esphome::millis() - t0 < 40) {
+    while (uart.available()) {
+      uart.read();
+    }
+    esphome::delay(1);
+  }
+
+  const char *cmd = "ty:\r\n";
+  uart.write_array(reinterpret_cast<const uint8_t *>(cmd), 4);
+
+  std::string hex;
+  hex.reserve(512);
+  uint32_t seen = 0;
+  t0 = esphome::millis();
+  while (esphome::millis() - t0 < 3000) {
+    while (uart.available()) {
+      uint8_t b = static_cast<uint8_t>(uart.read());
+      seen++;
+      static const char *H = "0123456789ABCDEF";
+      hex.push_back(H[b >> 4]);
+      hex.push_back(H[b & 0x0F]);
+      hex.push_back(' ');
+    }
+    esphome::delay(1);
+  }
+  ESP_LOGD("jutta_probe", "RAW HELLO bytes_seen=%u hex=[%s]", seen, hex.c_str());
+  return seen > 0;
+}
+
 constexpr uint32_t JUTTA_SERIAL_GAP_MS = 35;
 constexpr std::array<uint8_t, 8> DB_TRAILER = {0xDF, 0xFF, 0xDB, 0xDB, 0xFB, 0xFB, 0xDB, 0xDB};
 constexpr uint8_t DB_ESC = 0xDB;
@@ -466,6 +497,9 @@ bool JuttaConnection::read_line_until(std::string &out, uint32_t timeout_ms, uin
 }
 
 bool JuttaConnection::await_device_type(std::string &out_ty) {
+  if (auto *parent = serial_.get_parent()) {
+    jutta_raw_hello_probe(*parent);
+  }
   UartGuard lock(uart_busy);
   drain_uart_for_ms(40);
   send_line_cmd("ty:");

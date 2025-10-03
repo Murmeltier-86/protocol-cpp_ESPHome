@@ -112,6 +112,10 @@ void SerialConnection::flush() const {
     }
 }
 
+esphome::uart::UARTComponent* SerialConnection::get_parent() const {
+    return this->parent_;
+}
+
 std::vector<std::string> SerialConnection::get_available_ports() {
     return {};
 }
