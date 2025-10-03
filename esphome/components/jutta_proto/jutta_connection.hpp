@@ -313,8 +313,8 @@ class JuttaConnection {
     void reinject_decoded_front(const std::string& data) const;
 
     bool write_db_encoded_(const std::vector<uint8_t>& encoded);
-    bool read_one_db_frame_with_trailer_(std::vector<uint8_t>& encoded,
-                                         const std::chrono::milliseconds& timeout);
+    bool read_one_db_frame_encoded_(std::vector<uint8_t>& encoded,
+                                    const std::chrono::milliseconds& timeout);
     bool unescape_db_frame_(const std::vector<uint8_t>& encoded, std::vector<uint8_t>& decoded) const;
 
 };
