@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -9,6 +10,7 @@
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
+#include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/uart/uart.h"
 
@@ -36,6 +38,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const std::string &device_type() const { return this->device_type_; }
 
   void set_machine_data_sensor(text_sensor::TextSensor *sensor) { this->machine_data_sensor_ = sensor; }
+  void set_xml_enabled(bool enabled) { this->xml_enabled_ = enabled; }
+  void set_xml_poll_interval(uint32_t interval_ms) { this->xml_poll_interval_ms_ = interval_ms; }
+  void set_xml_rx_timeout(uint32_t timeout_ms) { this->xml_rx_timeout_ms_ = timeout_ms; }
 
  protected:
   enum class HandshakeStage { IDLE, HELLO, SEND_T1, WAIT_T2, SEND_T2, WAIT_T3, SEND_T3, DONE, FAILED };
@@ -48,6 +53,19 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   static bool time_reached(uint32_t now, uint32_t target);
   void process_machine_data_query();
   void publish_machine_data_(const std::string &response);
+  void process_xml_polling();
+  void load_xml_mapping_();
+  void ensure_xml_sensors_created_();
+  void reset_xml_cycle_state_();
+  bool perform_xml_cycle_();
+  bool poll_xml_block_(const std::string &command, std::vector<uint16_t> &out_values_u16,
+                       size_t expected_count);
+  bool poll_xml_block_(const std::string &command, std::vector<uint32_t> &out_values_u32,
+                       size_t expected_count);
+  bool read_db_frame_(std::vector<uint8_t> &decoded, uint32_t timeout_ms);
+  bool send_db_command_(const std::string &command);
+  void publish_xml_values_();
+  void update_sensor_names_();
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
   std::unique_ptr<::jutta_proto::CoffeeMaker> coffee_maker_;
@@ -64,6 +82,31 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t machine_data_query_next_{0};
   bool machine_data_request_pending_{false};
   uint32_t machine_data_request_start_{0};
+
+  struct XmlMapping {
+    bool valid{false};
+    std::string tr32_command{"@TR:32"};
+    std::string tg43_command{"@TG:43"};
+    std::string tgc0_command{"@TG:C0"};
+    std::array<std::string, 10> tr32_labels{};
+    std::array<std::string, 6> tg43_labels{};
+    std::array<std::string, 3> tgc0_labels{};
+  };
+
+  XmlMapping xml_mapping_{};
+  bool xml_enabled_{false};
+  uint32_t xml_poll_interval_ms_{30000};
+  uint32_t xml_rx_timeout_ms_{900};
+  uint32_t xml_next_poll_{0};
+  bool xml_initialized_{false};
+  bool xml_mapping_logged_{false};
+  std::array<std::unique_ptr<sensor::Sensor>, 10> xml_tr32_sensors_{};
+  std::array<std::unique_ptr<sensor::Sensor>, 6> xml_tg43_sensors_{};
+  std::array<std::unique_ptr<sensor::Sensor>, 3> xml_tgc0_sensors_{};
+  std::array<uint16_t, 10> xml_tr32_values_{};
+  std::array<uint16_t, 6> xml_tg43_values_{};
+  std::array<uint32_t, 3> xml_tgc0_values_{};
+  bool xml_has_values_{false};
 };
 
 class StartBrewAction : public esphome::Action<> {

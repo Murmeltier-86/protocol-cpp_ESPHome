@@ -101,16 +101,32 @@ class JuttaConnection {
                                                                  std::chrono::milliseconds{5000});
 
     /**
-     * Polls for the next CRLF-terminated response line.
+     * Reads the next CRLF-terminated response line if available.
      * Returns true if a complete line became available and stores it in "line" without the trailing CRLF.
      * Returns false when no complete line has been received yet.
      */
-    bool poll_response_line(std::string& line);
+    bool read_line_until(std::string& line);
 
     /**
      * Clears buffered fragments collected while polling for response lines.
-     */
+    */
     void reset_response_line_buffer();
+
+    /**
+     * Sends an escaped DB command ("@..." without trailing CRLF) with the fixed trailer required for XML frames.
+     */
+    bool write_db_command(const std::string& command);
+
+    /**
+     * Reads a DB framed response, decoding the payload into "decoded".
+     * Returns true on success.
+     */
+    bool read_db_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout);
+
+    /**
+     * Drains incoming DB stream bytes for the specified duration.
+     */
+    void drain_db_stream(const std::chrono::milliseconds& duration);
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
@@ -287,6 +303,9 @@ class JuttaConnection {
     mutable std::string response_line_buffer_{};
 
     void reinject_decoded_front(const std::string& data) const;
+
+    bool write_db_encoded_(const std::vector<uint8_t>& encoded);
+    bool read_db_frame_encoded_(std::vector<uint8_t>& encoded, const std::chrono::milliseconds& timeout);
 
 };
 //---------------------------------------------------------------------------

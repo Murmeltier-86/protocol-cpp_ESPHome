@@ -19,6 +19,9 @@ CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
+CONF_JUTTA_XML_ENABLE = "jutta_xml_enable"
+CONF_JUTTA_XML_POLL_MS = "jutta_xml_poll_ms"
+CONF_JUTTA_XML_RX_TIMEOUT_MS = "jutta_xml_rx_timeout_ms"
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -91,6 +94,9 @@ CONFIG_SCHEMA = (
         {
             cv.GenerateID(): cv.declare_id(JuraComponent),
             cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_JUTTA_XML_ENABLE, default=False): cv.boolean,
+            cv.Optional(CONF_JUTTA_XML_POLL_MS, default=30000): cv.positive_int,
+            cv.Optional(CONF_JUTTA_XML_RX_TIMEOUT_MS, default=900): cv.positive_int,
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
@@ -232,6 +238,10 @@ async def to_code(config):
     JURA_COMPONENT_IDS.append(config[CONF_ID])
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
+
+    cg.add(var.set_xml_enabled(config[CONF_JUTTA_XML_ENABLE]))
+    cg.add(var.set_xml_poll_interval(config[CONF_JUTTA_XML_POLL_MS]))
+    cg.add(var.set_xml_rx_timeout(config[CONF_JUTTA_XML_RX_TIMEOUT_MS]))
 
     if CONF_MACHINE_DATA in config:
         sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
