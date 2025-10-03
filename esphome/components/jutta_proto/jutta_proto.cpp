@@ -1301,7 +1301,11 @@ void JuraComponent::process_handshake() {
       break;
     case HandshakeStage::HELLO: {
       std::string device_line;
-      if (!this->connection_->await_device_type(device_line)) {
+      auto wait_result = this->connection_->await_device_type(device_line);
+      if (wait_result == JuttaConnection::WaitResult::Pending) {
+        break;
+      }
+      if (wait_result != JuttaConnection::WaitResult::Success) {
         this->restart_handshake("failed to read device type");
         break;
       }
@@ -1445,6 +1449,7 @@ void JuraComponent::restart_handshake(const char *reason) {
   ESP_LOGI(TAG, "Scheduling handshake retry in %u ms", HANDSHAKE_RETRY_DELAY_MS);
   if (this->connection_ != nullptr) {
     this->connection_->reset_response_line_buffer();
+    this->connection_->cancel_device_probe();
   }
 }
 

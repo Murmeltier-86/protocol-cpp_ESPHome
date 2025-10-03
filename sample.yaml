@@ -5,9 +5,31 @@ esphome:
 esp32:
   board: esp32dev
 
+# Enable the native ESPHome API so Home Assistant can connect
+api:
+
 # Configure logging for verbose handshake diagnostics
 logger:
   level: DEBUG
+
+# Basic OTA setup to allow wireless firmware updates
+ota:
+
+# Wi-Fi configuration for the ESP32
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Comment or remove the next block once the device is provisioned.
+  ap:
+    ssid: "JURA Coffee Maker Fallback"
+    password: !secret wifi_ap_password
+
+# Optional status LED so you can confirm Wi-Fi/API connection state at a glance.
+status_led:
+  pin: GPIO2
+
+# If Wi-Fi credentials fail, fall back to the captive portal for provisioning
+captive_portal:
 
 # Hardware UART used to communicate with the coffee maker
 uart:

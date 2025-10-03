@@ -6,6 +6,20 @@ with a JURA coffee maker and exposes convenient automation actions for brewing d
 ## Configuration
 
 ```yaml
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "JURA Coffee Maker Fallback"
+    password: !secret wifi_ap_password
+
+api:
+
+ota:
+
+status_led:
+  pin: GPIO2
+
 uart:
   id: jura_uart
   tx_pin: 17
@@ -20,6 +34,12 @@ jutta_proto:
 ```
 
 The component takes care of the handshake during startup. Once the handshake finishes, all brewing actions become available.
+
+!!! note
+    The example above includes the standard ESPHome `wifi`, `api`, and `ota` blocks so Home Assistant can connect to the device and you can perform wireless updates. Replace the Wi-Fi credentials with values that match your network (ideally using the `secrets.yaml` file) before flashing the firmware. Define `wifi_ap_password` in `secrets.yaml` if you keep the fallback access point enabled.
+
+!!! tip
+    Provision the device close to your wireless access point and keep the optional fallback access point (`wifi.ap`) enabled until the node shows up in Home Assistant. The fallback AP lets you connect directly to the ESP32 and update the Wi-Fi credentials if it cannot reach your network yet.
 
 ## Automation Actions
 
@@ -157,6 +177,17 @@ jutta_proto:
     status: jura_status
     processes: jura_processes
     raw: jura_machine_raw
+
+## Troubleshooting API Connectivity
+
+If Home Assistant still shows `Can't connect to ESPHome API` after flashing the firmware, try the following diagnostics:
+
+1. **Verify the node is on Wi-Fi.** Connect the ESP32 over USB and run `esphome logs <config.yaml>` to check for `WiFi connected` and `API server listening` messages. If the device repeatedly retries Wi-Fi, double-check the SSID and password or temporarily disable `fast_connect` if you are using it with a visible network.
+2. **Check the IP address.** Look for `Got IP` in the serial logs and confirm that the reported address matches what Home Assistant is trying to reach. You can also ping the IP from the Home Assistant host to confirm connectivity.
+3. **Match API credentials.** If you enable API encryption or set an API password, make sure the same key/password is configured in Home Assistant (`Configuration → Integrations → ESPHome → Configure`). A mismatch will result in connection failures even though the TCP port is reachable.
+4. **Inspect firewalls.** Ensure port 6053 is open between Home Assistant and the ESP32. Some routers or VLAN setups block device-to-device communication by default.
+
+The device should stay online as long as it maintains Wi-Fi connectivity. Use the optional `status_led` block from the sample configuration to see the connection state without opening the logs (slow blink = Wi-Fi only, fast blink = connecting, solid = API connected).
 
 To publish the built-in set of machine data field sensors, enable `auto_fields`. All known statistics, maintenance counters,
 maintenance percentages, and helper fields are pre-registered up front and reuse the same entity names on every boot. Numeric

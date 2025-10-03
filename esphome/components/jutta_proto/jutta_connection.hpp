@@ -54,7 +54,9 @@ class JuttaConnection {
 
   bool read_line_until(std::string &out, uint32_t timeout_ms, uint32_t *bytes_seen = nullptr);
 
-  bool await_device_type(std::string &out_ty);
+  WaitResult await_device_type(std::string &out_ty);
+
+  void cancel_device_probe();
 
   bool prime_initial_db();
 
@@ -106,6 +108,14 @@ class JuttaConnection {
 
   std::string line_read_buffer_;
   std::string line_buffer_;
+
+  struct DeviceProbeContext {
+    bool active{false};
+    bool command_sent{false};
+    bool ok_received{false};
+    uint32_t start_time{0};
+    std::string ty_line;
+  } device_probe_;
 };
 
 }  // namespace jutta_proto
