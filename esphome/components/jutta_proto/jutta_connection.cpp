@@ -476,7 +476,7 @@ JuttaConnection::WaitResult JuttaConnection::await_device_type(std::string &out_
     {
       UartGuard guard(uart_busy);
       flush_serial_input();
-      send_line_cmd("ty:");
+      send_line_cmd("TY:");
     }
     device_probe_ = {};
     device_probe_.active = true;
