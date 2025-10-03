@@ -14,6 +14,8 @@
 
 #include "esphome/core/application.h"
 #include "esphome/core/time.h"
+#include "jutta_config.h"
+#include "jutta_xml.h"
 #include "machine_data_parser.h"
 
 namespace esphome {
@@ -1235,6 +1237,104 @@ void JuraComponent::loop() {
       this->custom_cancel_flag_ = false;
     }
   }
+
+#if JUTTA_XML_ENABLE
+  if (this->handshake_stage_ == HandshakeStage::DONE && this->parent_ != nullptr &&
+      this->has_machine_data_subscribers_()) {
+    static uint32_t last_xml_poll = 0;
+    uint32_t now = esphome::millis();
+    if (now - last_xml_poll >= JUTTA_XML_POLL_MS) {
+      last_xml_poll = now;
+
+      ::jutta_proto::UartGuard guard(::jutta_proto::uart_busy);
+      auto *uart = this->parent_;
+
+      uint32_t drain_deadline = esphome::millis() + 40;
+      while (!JuraComponent::time_reached(esphome::millis(), drain_deadline)) {
+        while (uart->available()) {
+          uart->read();
+        }
+        esphome::delay(1);
+      }
+
+      std::vector<uint16_t> product_counters;
+      std::vector<uint16_t> maintenance_counters;
+      uint32_t percent_a = 0;
+      uint32_t percent_b = 0;
+      uint32_t percent_c = 0;
+
+      if (jutta_xml::query_TR32(*uart, product_counters) &&
+          jutta_xml::query_TG43(*uart, maintenance_counters) &&
+          jutta_xml::query_TGC0(*uart, percent_a, percent_b, percent_c)) {
+        MachineDataFieldMap xml_fields;
+
+        if (product_counters.size() == PRODUCT_COUNTER_DEFINITIONS.size()) {
+          std::vector<std::string> base_labels = {"Statistic", "Product Counter"};
+          std::string prefix = "statistic.productcounter";
+          for (size_t i = 0; i < PRODUCT_COUNTER_DEFINITIONS.size(); ++i) {
+            MachineDataFieldValue value;
+            value.labels = base_labels;
+            value.labels.push_back(PRODUCT_COUNTER_DEFINITIONS[i].name);
+            value.text_value = std::to_string(product_counters[i]);
+            value.numeric_value = static_cast<float>(product_counters[i]);
+            value.unit = "";
+            std::string key = prefix + '.' + slugify(PRODUCT_COUNTER_DEFINITIONS[i].name);
+            xml_fields[key] = std::move(value);
+          }
+        }
+
+        if (maintenance_counters.size() == MAINTENANCE_COUNTER_NAMES.size()) {
+          std::vector<std::string> base_labels = {"Statistic", "Maintenance Counter"};
+          std::string prefix = "statistic.maintenancecounter";
+          for (size_t i = 0; i < MAINTENANCE_COUNTER_NAMES.size(); ++i) {
+            MachineDataFieldValue value;
+            value.labels = base_labels;
+            value.labels.push_back(MAINTENANCE_COUNTER_NAMES[i]);
+            value.text_value = std::to_string(maintenance_counters[i]);
+            value.numeric_value = static_cast<float>(maintenance_counters[i]);
+            value.unit = "";
+            std::string key = prefix + '.' + slugify(MAINTENANCE_COUNTER_NAMES[i]);
+            xml_fields[key] = std::move(value);
+          }
+        }
+
+        std::array<uint32_t, 3> percent_values = {percent_a, percent_b, percent_c};
+        if (percent_values.size() == MAINTENANCE_PERCENT_NAMES.size()) {
+          std::vector<std::string> base_labels = {"Statistic", "Maintenance Percent"};
+          std::string prefix = "statistic.maintenancepercent";
+          for (size_t i = 0; i < MAINTENANCE_PERCENT_NAMES.size(); ++i) {
+            uint32_t raw_value = percent_values[i];
+            float percent = decode_percent_fixed_point(raw_value);
+            uint16_t raw_aux = decode_percent_auxiliary(raw_value);
+
+            MachineDataFieldValue percent_entry;
+            percent_entry.labels = base_labels;
+            percent_entry.labels.push_back(std::string(MAINTENANCE_PERCENT_NAMES[i]) + " Percent");
+            percent_entry.text_value = format_percent_value(percent);
+            percent_entry.numeric_value = percent;
+            percent_entry.unit = "%";
+            std::string percent_key = prefix + '.' + slugify(std::string(MAINTENANCE_PERCENT_NAMES[i]) + " Percent");
+            xml_fields[percent_key] = std::move(percent_entry);
+
+            MachineDataFieldValue raw_entry;
+            raw_entry.labels = base_labels;
+            raw_entry.labels.push_back(std::string(MAINTENANCE_PERCENT_NAMES[i]) + " Raw");
+            raw_entry.text_value = std::to_string(raw_aux);
+            raw_entry.numeric_value = static_cast<float>(raw_aux);
+            raw_entry.unit = "";
+            std::string raw_key = prefix + '.' + slugify(std::string(MAINTENANCE_PERCENT_NAMES[i]) + " Raw");
+            xml_fields[raw_key] = std::move(raw_entry);
+          }
+        }
+
+        if (!xml_fields.empty()) {
+          this->machine_data_field_values_ = xml_fields;
+          this->publish_machine_data_fields_(xml_fields);
+        }
+      }
+    }
+  }
+#endif
 
   this->process_machine_data_query();
 }

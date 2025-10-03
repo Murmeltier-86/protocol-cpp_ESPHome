@@ -1,0 +1,5 @@
+#pragma once
+
+#define JUTTA_XML_ENABLE 1
+#define JUTTA_XML_POLL_MS 30000
+#define JUTTA_XML_RX_TIMEOUT_MS 900
