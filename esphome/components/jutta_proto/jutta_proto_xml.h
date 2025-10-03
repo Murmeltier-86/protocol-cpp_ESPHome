@@ -49,9 +49,6 @@ class MachineStats {
   std::unordered_map<std::string, StatValue> values_{};
 };
 
-bool load_xml_mapping_from_content(const std::string &source_label, const std::string &content,
-                                   XmlMapping &mapping);
-bool load_xml_mapping_from_content(const std::string &source_label, const std::string &content);
 bool load_xml_mapping(const std::string &path, XmlMapping &mapping);
 bool load_xml_mapping(const std::string &path);
 const XmlMapping &get_loaded_xml_mapping();
