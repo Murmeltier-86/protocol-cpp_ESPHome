@@ -10,8 +10,58 @@
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
+#if defined(__has_include)
+#if __has_include("esphome/components/sensor/sensor.h")
 #include "esphome/components/sensor/sensor.h"
+#else
+#define ESPHOME_JUTTA_SENSOR_STUB
+#endif
+#else
+#define ESPHOME_JUTTA_SENSOR_STUB
+#endif
+
+#ifdef ESPHOME_JUTTA_SENSOR_STUB
+namespace esphome {
+namespace sensor {
+
+class Sensor {
+ public:
+  virtual ~Sensor() = default;
+  virtual void publish_state(float) {}
+  virtual void set_accuracy_decimals(int) {}
+  virtual void set_name(const std::string &) {}
+};
+
+}  // namespace sensor
+}  // namespace esphome
+#endif
+
+#undef ESPHOME_JUTTA_SENSOR_STUB
+
+#if defined(__has_include)
+#if __has_include("esphome/components/text_sensor/text_sensor.h")
 #include "esphome/components/text_sensor/text_sensor.h"
+#else
+#define ESPHOME_JUTTA_TEXT_SENSOR_STUB
+#endif
+#else
+#define ESPHOME_JUTTA_TEXT_SENSOR_STUB
+#endif
+
+#ifdef ESPHOME_JUTTA_TEXT_SENSOR_STUB
+namespace esphome {
+namespace text_sensor {
+
+class TextSensor {
+ public:
+  virtual ~TextSensor() = default;
+  virtual void publish_state(const std::string &) {}
+};
+
+}  // namespace text_sensor
+}  // namespace esphome
+#endif
+#undef ESPHOME_JUTTA_TEXT_SENSOR_STUB
 #include "esphome/components/uart/uart.h"
 
 #include "coffee_maker.hpp"
