@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "esphome/core/automation.h"
@@ -118,11 +119,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void ensure_xml_sensors_created_();
   void reset_xml_cycle_state_();
   bool perform_xml_cycle_();
-  bool poll_xml_block_(const std::string &command, std::vector<uint16_t> &out_values_u16,
-                       size_t expected_count);
-  bool poll_xml_block_(const std::string &command, std::vector<uint32_t> &out_values_u32,
-                       size_t expected_count);
-  bool read_db_frame_(std::vector<uint8_t> &decoded, uint32_t timeout_ms);
+  bool read_db_data_frame_(std::vector<uint8_t> &decoded, uint32_t timeout_ms,
+                           std::string_view last_cmd_ascii);
   bool send_db_command_(const std::string &command);
   void publish_xml_values_();
   void update_sensor_names_();

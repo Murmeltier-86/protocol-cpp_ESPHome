@@ -43,6 +43,13 @@ published only after a complete, valid DB frame was received for the respective 
 If the XML mapping provides labels for a block, those replace the defaults in the same order. All sensors report integers
 with `accuracy_decimals: 0`, so no templating is required on the ESPHome side.
 
+### DB frame handling
+
+The XML transport uses escaped DB frames. Some legacy Wi-Fi bridges reply with an ASCII echo of the `@TR:32`, `@TG:43`, or
+`@TG:C0` command before the actual data frame arrives. The component drains the UART briefly before the first command in a
+poll cycle, skips such echo frames automatically, and validates the decoded payload length (21/13/13 bytes). Only complete
+and valid data frames update the sensor values; incomplete cycles simply keep the previous readings.
+
 ## Automation Actions
 
 Use the registered actions inside automations or button handlers. When only one `jutta_proto` component is configured, the

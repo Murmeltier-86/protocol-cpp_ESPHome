@@ -818,92 +818,67 @@ bool JuraComponent::perform_xml_cycle_() {
   auto *link = this->coffee_maker_->connection.get();
   link->drain_db_stream(std::chrono::milliseconds{XML_RX_DRAIN_MS});
 
-  std::vector<uint16_t> tr32_values;
-  std::vector<uint16_t> tg43_values;
-  std::vector<uint32_t> tgc0_values;
+  std::vector<uint8_t> buffer;
+  std::array<uint16_t, XML_TR32_COUNT> tr32_values{};
+  std::array<uint16_t, XML_TG43_COUNT> tg43_values{};
+  std::array<uint32_t, XML_TGC0_COUNT> tgc0_values{};
 
-  if (!this->poll_xml_block_(this->xml_mapping_.tr32_command, tr32_values, XML_TR32_COUNT)) {
+  auto parse_u16 = [](const std::vector<uint8_t> &src, auto &dest) {
+    for (size_t i = 0; i < dest.size(); ++i) {
+      size_t offset = 1 + i * 2;
+      dest[i] = static_cast<uint16_t>((static_cast<uint16_t>(src[offset]) << 8) |
+                                      static_cast<uint16_t>(src[offset + 1]));
+    }
+  };
+  auto parse_u32 = [](const std::vector<uint8_t> &src, auto &dest) {
+    for (size_t i = 0; i < dest.size(); ++i) {
+      size_t offset = 1 + i * 4;
+      dest[i] = (static_cast<uint32_t>(src[offset]) << 24) |
+                (static_cast<uint32_t>(src[offset + 1]) << 16) |
+                (static_cast<uint32_t>(src[offset + 2]) << 8) |
+                static_cast<uint32_t>(src[offset + 3]);
+    }
+  };
+
+  auto read_block = [&](const std::string &command, size_t expected_length, auto &&parser) -> bool {
+    ESP_LOGD(TAG, "TX_DB \"%s\"", command.c_str());
+    if (!this->send_db_command_(command)) {
+      ESP_LOGW(TAG, "Failed to send XML command %s", command.c_str());
+      return false;
+    }
+    if (!this->read_db_data_frame_(buffer, this->xml_rx_timeout_ms_, command)) {
+      ESP_LOGW(TAG, "RX_DB timeout");
+      return false;
+    }
+    ESP_LOGD(TAG, "RX_DB decoded_len=%zu", buffer.size());
+    if (buffer.size() != expected_length) {
+      ESP_LOGW(TAG, "decoded_len=%zu expected=%zu", buffer.size(), expected_length);
+      return false;
+    }
+    parser(buffer);
+    return true;
+  };
+
+  if (!read_block(this->xml_mapping_.tr32_command, 1 + XML_TR32_COUNT * 2, [&](const std::vector<uint8_t> &src) {
+        parse_u16(src, tr32_values);
+      })) {
     return false;
   }
-  if (!this->poll_xml_block_(this->xml_mapping_.tg43_command, tg43_values, XML_TG43_COUNT)) {
+  if (!read_block(this->xml_mapping_.tg43_command, 1 + XML_TG43_COUNT * 2, [&](const std::vector<uint8_t> &src) {
+        parse_u16(src, tg43_values);
+      })) {
     return false;
   }
-  if (!this->poll_xml_block_(this->xml_mapping_.tgc0_command, tgc0_values, XML_TGC0_COUNT)) {
+  if (!read_block(this->xml_mapping_.tgc0_command, 1 + XML_TGC0_COUNT * 4, [&](const std::vector<uint8_t> &src) {
+        parse_u32(src, tgc0_values);
+      })) {
     return false;
   }
 
-  for (size_t i = 0; i < XML_TR32_COUNT; ++i) {
-    this->xml_tr32_values_[i] = tr32_values[i];
-  }
-  for (size_t i = 0; i < XML_TG43_COUNT; ++i) {
-    this->xml_tg43_values_[i] = tg43_values[i];
-  }
-  for (size_t i = 0; i < XML_TGC0_COUNT; ++i) {
-    this->xml_tgc0_values_[i] = tgc0_values[i];
-  }
+  this->xml_tr32_values_ = tr32_values;
+  this->xml_tg43_values_ = tg43_values;
+  this->xml_tgc0_values_ = tgc0_values;
   this->xml_has_values_ = true;
-  return true;
-}
-
-bool JuraComponent::poll_xml_block_(const std::string &command, std::vector<uint16_t> &out_values_u16,
-                                    size_t expected_count) {
-  std::vector<uint8_t> decoded;
-  ESP_LOGD(TAG, "TX_DB \"%s\"", command.c_str());
-  if (!this->send_db_command_(command)) {
-    ESP_LOGW(TAG, "Failed to send XML command %s", command.c_str());
-    return false;
-  }
-  bool frame_ok = this->read_db_frame_(decoded, this->xml_rx_timeout_ms_);
-  size_t expected_len = 1 + expected_count * 2;
-  if (!frame_ok) {
-    ESP_LOGW(TAG, "RX_DB timeout");
-    return false;
-  }
-  ESP_LOGD(TAG, "RX_DB decoded_len=%zu expected=%zu", decoded.size(), expected_len);
-  if (decoded.size() != expected_len) {
-    ESP_LOGW(TAG, "decoded_len=%zu expected=%zu", decoded.size(), expected_len);
-    return false;
-  }
-  out_values_u16.clear();
-  out_values_u16.reserve(expected_count);
-  for (size_t i = 0; i < expected_count; ++i) {
-    size_t offset = 1 + i * 2;
-    uint16_t value = static_cast<uint16_t>((static_cast<uint16_t>(decoded[offset]) << 8) |
-                                           static_cast<uint16_t>(decoded[offset + 1]));
-    out_values_u16.push_back(value);
-  }
-  return true;
-}
-
-bool JuraComponent::poll_xml_block_(const std::string &command, std::vector<uint32_t> &out_values_u32,
-                                    size_t expected_count) {
-  std::vector<uint8_t> decoded;
-  ESP_LOGD(TAG, "TX_DB \"%s\"", command.c_str());
-  if (!this->send_db_command_(command)) {
-    ESP_LOGW(TAG, "Failed to send XML command %s", command.c_str());
-    return false;
-  }
-  bool frame_ok = this->read_db_frame_(decoded, this->xml_rx_timeout_ms_);
-  size_t expected_len = 1 + expected_count * 4;
-  if (!frame_ok) {
-    ESP_LOGW(TAG, "RX_DB timeout");
-    return false;
-  }
-  ESP_LOGD(TAG, "RX_DB decoded_len=%zu expected=%zu", decoded.size(), expected_len);
-  if (decoded.size() != expected_len) {
-    ESP_LOGW(TAG, "decoded_len=%zu expected=%zu", decoded.size(), expected_len);
-    return false;
-  }
-  out_values_u32.clear();
-  out_values_u32.reserve(expected_count);
-  for (size_t i = 0; i < expected_count; ++i) {
-    size_t offset = 1 + i * 4;
-    uint32_t value = (static_cast<uint32_t>(decoded[offset]) << 24) |
-                     (static_cast<uint32_t>(decoded[offset + 1]) << 16) |
-                     (static_cast<uint32_t>(decoded[offset + 2]) << 8) |
-                     static_cast<uint32_t>(decoded[offset + 3]);
-    out_values_u32.push_back(value);
-  }
   return true;
 }
 
@@ -914,11 +889,13 @@ bool JuraComponent::send_db_command_(const std::string &command) {
   return this->coffee_maker_->connection->write_db_command(command);
 }
 
-bool JuraComponent::read_db_frame_(std::vector<uint8_t> &decoded, uint32_t timeout_ms) {
+bool JuraComponent::read_db_data_frame_(std::vector<uint8_t> &decoded, uint32_t timeout_ms,
+                                        std::string_view last_cmd_ascii) {
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     return false;
   }
-  return this->coffee_maker_->connection->read_db_frame(decoded, std::chrono::milliseconds{timeout_ms});
+  return this->coffee_maker_->connection->read_db_data_frame(decoded, std::chrono::milliseconds{timeout_ms},
+                                                             last_cmd_ascii);
 }
 
 void JuraComponent::publish_xml_values_() {
