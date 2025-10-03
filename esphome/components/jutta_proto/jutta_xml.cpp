@@ -52,11 +52,11 @@ bool read_db_frame(esphome::uart::UARTComponent &uart, std::vector<uint8_t> &dec
   uint32_t start = esphome::millis();
   while (esphome::millis() - start < timeout_ms) {
     while (uart.available()) {
-      int value = uart.read();
-      if (value < 0) {
+      uint8_t value;
+      if (!uart.read_byte(&value)) {
         continue;
       }
-      raw.push_back(static_cast<uint8_t>(value));
+      raw.push_back(value);
       start = esphome::millis();
       if (raw.size() >= std::size(TERM) &&
           std::equal(raw.end() - std::size(TERM), raw.end(), std::begin(TERM))) {
