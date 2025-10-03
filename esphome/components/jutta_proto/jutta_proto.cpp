@@ -47,9 +47,16 @@ inline void register_sensor_with_app(sensor::Sensor *sensor) {
   if (sensor == nullptr) {
     return;
   }
+#ifdef __GXX_RTTI
   if (auto *component = dynamic_cast<Component *>(sensor)) {
     App.register_component(component);
   }
+#else
+  // Ohne RTTI können wir keinen sicheren Cross-Cast durchführen. In diesem Fall
+  // verzichten wir lediglich darauf, die Komponente bei App zu registrieren.
+  // Dies entspricht dem Verhalten, das auch mit dem Stub-Sensortyp greift, der
+  // nicht von Component erbt.
+#endif
   try_register_sensor(App, sensor, 0L);
 }
 
