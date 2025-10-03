@@ -6,8 +6,8 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
-#include <deque>
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -71,6 +71,7 @@ class TextSensor {
 #include "jutta_config.h"
 #include "jutta_connection.hpp"
 #include "jutta_commands.hpp"
+#include "jutta_proto_xml.h"
 
 namespace esphome {
 namespace jutta_component {
@@ -93,18 +94,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const std::string &device_type() const { return this->device_type_; }
 
   void set_machine_data_sensor(text_sensor::TextSensor *sensor) { this->machine_data_sensor_ = sensor; }
-  void set_xml_enabled(bool enabled) {
-#if JUTTA_XML_ENABLE
-    this->xml_enabled_ = enabled;
-#else
-    (void) enabled;
-    this->xml_enabled_ = false;
-#endif
-  }
+  void set_enable_xml_poll(bool enabled) { this->enable_xml_poll_ = enabled; }
+  void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
   void set_xml_poll_interval(uint32_t interval_ms) { this->xml_poll_interval_ms_ = interval_ms; }
-  void set_xml_rx_timeout(uint32_t timeout_ms) { this->xml_rx_timeout_ms_ = timeout_ms; }
-  void set_xml_path(const std::string &path) { this->xml_path_ = path; }
-  void set_xml_inline(const std::string &xml);
 
  protected:
   enum class HandshakeStage { IDLE, HELLO, SEND_T1, WAIT_T2, SEND_T2, WAIT_T3, SEND_T3, DONE, FAILED };
@@ -118,24 +110,19 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void process_machine_data_query();
   void publish_machine_data_(const std::string &response);
   void process_xml_polling();
-  void load_xml_mapping_();
+  bool ensure_xml_mapping_loaded_();
+  void log_xml_mapping_status_();
   void ensure_xml_sensors_created_();
-  void apply_xml_labels_();
   void reset_xml_cycle_state_();
-  bool perform_xml_cycle_();
-  bool send_db_command_(const std::string &command);
-  void publish_xml_values_();
-  void update_sensor_names_();
-  bool ensure_filesystem_ready_();
-  bool load_xml_from_path_(std::string &content);
-  bool parse_xml_content_(const std::string &content);
-  bool parse_command_id_(const std::string &command, uint8_t &command_id) const;
-  void log_xml_mapping_info_();
-  bool await_db_response_(const std::string &command, uint8_t command_id, size_t expected_len,
-                          std::vector<uint8_t> &decoded);
-  bool consume_pending_db_frame_(const std::string &command, uint8_t command_id, size_t expected_len,
-                                 std::vector<uint8_t> &decoded, bool *dropped_echo = nullptr);
-  void discard_stale_pending_frames_();
+  void start_xml_cycle_(uint32_t now);
+  void handle_xml_cycle_(uint32_t now);
+  bool try_receive_xml_frame_(uint32_t now);
+  void finish_xml_cycle_(uint32_t now, bool success);
+  void publish_xml_stats_();
+  void publish_single_stat_(const std::string &name, double value, const std::string &label);
+  sensor::Sensor *get_or_create_sensor_(const std::string &name, const std::string &label);
+  static const char *xml_command_for_index_(size_t index);
+  static const char *xml_log_label_for_index_(size_t index);
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
   std::unique_ptr<::jutta_proto::CoffeeMaker> coffee_maker_;
@@ -153,63 +140,28 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool machine_data_request_pending_{false};
   uint32_t machine_data_request_start_{0};
 
-  struct XmlMapping {
-    bool valid{false};
-    std::string tr32_command{"@TR:32"};
-    std::string tg43_command{"@TG:43"};
-    std::string tgc0_command{"@TG:C0"};
-    std::array<std::string, 10> tr32_labels{};
-    std::array<std::string, 6> tg43_labels{};
-    std::array<std::string, 3> tgc0_labels{};
-    uint8_t tr32_id{0x32};
-    uint8_t tg43_id{0x43};
-    uint8_t tgc0_id{0xC0};
-  };
-
-  XmlMapping xml_mapping_{};
-  bool xml_enabled_{JUTTA_XML_ENABLE != 0};
-  uint32_t xml_poll_interval_ms_{JUTTA_XML_POLL_MS};
-  uint32_t xml_rx_timeout_ms_{JUTTA_XML_RX_TIMEOUT_MS};
+  bool enable_xml_poll_{false};
+  uint32_t xml_poll_interval_ms_{30000};
+  std::string xml_mapping_path_{"/config/esphome/e6.xml"};
   uint32_t xml_next_poll_{0};
-  bool xml_initialized_{false};
   bool xml_mapping_logged_{false};
-  std::array<sensor::Sensor *, 10> xml_tr32_sensors_{};
-  std::array<sensor::Sensor *, 6> xml_tg43_sensors_{};
-  std::array<sensor::Sensor *, 3> xml_tgc0_sensors_{};
-  std::array<uint16_t, 10> xml_tr32_values_{};
-  std::array<uint16_t, 6> xml_tg43_values_{};
-  std::array<uint32_t, 3> xml_tgc0_values_{};
-  bool xml_has_values_{false};
-  bool xml_busy_{false};
-  std::string xml_path_{"/config/esphome/e6.xml"};
-  std::string xml_inline_{};
-  bool filesystem_attempted_{false};
-  bool filesystem_available_{false};
+  bool xml_mapping_loaded_{false};
+  XmlMapping xml_mapping_{};
+  MachineStats xml_stats_{};
+  std::unordered_map<std::string, sensor::Sensor *> xml_sensors_{};
+  std::unordered_map<std::string, std::string> xml_sensor_labels_{};
 
-  struct DbFramer {
-    void clear();
-    void push_encoded(const uint8_t *data, size_t length);
-    std::vector<std::vector<uint8_t>> try_extract_frames();
+  struct XmlCycleState {
+    enum class Phase { Idle, WaitingForFrame, DelayBeforeNext };
 
-    static constexpr size_t BUFFER_CAPACITY = 2048;
+    void reset();
 
-   private:
-    void consume(size_t length);
-
-    std::array<uint8_t, BUFFER_CAPACITY> buffer_{};
-    size_t head_{0};
-    size_t size_{0};
-  };
-
-  struct PendingDbFrame {
-    std::vector<uint8_t> encoded;
-    std::vector<uint8_t> decoded;
-    bool decoded_valid{false};
-    bool decode_attempted{false};
-  };
-
-  DbFramer db_framer_{};
-  std::deque<PendingDbFrame> db_pending_frames_{};
+    Phase phase{Phase::Idle};
+    size_t command_index{0};
+    uint32_t deadline_ms{0};
+    uint32_t next_action_ms{0};
+    std::array<std::vector<uint8_t>, 3> responses{};
+  } xml_cycle_{};
 };
 
 class StartBrewAction : public esphome::Action<> {

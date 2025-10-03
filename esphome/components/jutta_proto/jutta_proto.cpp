@@ -10,14 +10,6 @@
 
 #include "esphome/core/application.h"
 #include "esphome/core/time.h"
-#ifdef USE_FILESYSTEM
-#include "esphome/components/filesystem/filesystem.h"
-#endif
-#if defined(USE_LITTLEFS)
-#include <LittleFS.h>
-#elif defined(USE_SPIFFS)
-#include <SPIFFS.h>
-#endif
 
 namespace esphome {
 namespace jutta_component {
@@ -30,42 +22,8 @@ constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
 constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
 const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
-constexpr size_t XML_TR32_COUNT = 10;
-constexpr size_t XML_TG43_COUNT = 6;
-constexpr size_t XML_TGC0_COUNT = 3;
-constexpr uint32_t XML_RX_DRAIN_MS = 40;
-constexpr uint8_t DB_ESCAPE = 0xDB;
-constexpr uint8_t DB_XOR_MASK = 0x20;
-constexpr std::array<uint8_t, 8> DB_TERMINATOR{{0xDF, 0xFF, 0xDB, 0xDB, 0xFB, 0xFB, 0xDB, 0xDB}};
-
-bool decode_db_frame(const std::vector<uint8_t> &encoded, std::vector<uint8_t> &decoded) {
-  if (encoded.size() < DB_TERMINATOR.size()) {
-    return false;
-  }
-  size_t payload_len = encoded.size() - DB_TERMINATOR.size();
-  decoded.clear();
-  decoded.reserve(payload_len);
-  for (size_t i = 0; i < payload_len;) {
-    uint8_t byte = encoded[i++];
-    if (byte == DB_ESCAPE) {
-      if (i >= payload_len) {
-        return false;
-      }
-      uint8_t escaped = encoded[i++];
-      decoded.push_back(static_cast<uint8_t>(escaped ^ DB_XOR_MASK));
-    } else {
-      decoded.push_back(byte);
-    }
-  }
-  return true;
-}
-
-bool is_ascii_echo(const std::vector<uint8_t> &decoded, const std::string &command) {
-  if (decoded.size() != command.size()) {
-    return false;
-  }
-  return std::equal(decoded.begin(), decoded.end(), command.begin());
-}
+constexpr uint32_t XML_RESPONSE_TIMEOUT_MS = 1000;
+constexpr uint32_t XML_INTER_COMMAND_DELAY_MS = 180;
 
 template<typename AppT>
 auto try_register_sensor(AppT &app, sensor::Sensor *sensor, long)
@@ -109,77 +67,6 @@ template<typename SensorT>
 void try_set_parent(SensorT *, Component *, ...) {}
 
 template <size_t N>
-void fill_default_labels(const char *prefix, std::array<std::string, N> &labels) {
-  for (size_t i = 0; i < N; ++i) {
-    char buffer[32];
-    snprintf(buffer, sizeof(buffer), "%s %u", prefix, static_cast<unsigned>(i + 1));
-    labels[i] = buffer;
-  }
-}
-
-template <size_t N>
-size_t count_non_empty(const std::array<std::string, N> &labels) {
-  size_t count = 0;
-  for (const auto &label : labels) {
-    if (!label.empty()) {
-      ++count;
-    }
-  }
-  return count;
-}
-
-bool extract_command(const std::string &content, size_t anchor, std::string &command) {
-  size_t search_start = content.find('@', anchor);
-  if (search_start == std::string::npos) {
-    return false;
-  }
-  size_t end = search_start;
-  while (end < content.size()) {
-    unsigned char ch = static_cast<unsigned char>(content[end]);
-    if (std::isalnum(ch) != 0 || ch == '@' || ch == ':' || ch == '_' || ch == '-') {
-      ++end;
-    } else {
-      break;
-    }
-  }
-  if (end <= search_start + 1) {
-    return false;
-  }
-  command = content.substr(search_start, end - search_start);
-  return true;
-}
-
-template <size_t N>
-void extract_labels(const std::string &content, size_t anchor, std::array<std::string, N> &labels) {
-  size_t block_end = content.find("</", anchor);
-  if (block_end == std::string::npos) {
-    block_end = content.size();
-  }
-  size_t cursor = anchor;
-  size_t count = 0;
-  while (count < N) {
-    size_t label_pos = content.find("label", cursor);
-    if (label_pos == std::string::npos || label_pos >= block_end) {
-      break;
-    }
-    size_t quote_pos = content.find_first_of("\"'", label_pos);
-    if (quote_pos == std::string::npos) {
-      break;
-    }
-    char quote_char = content[quote_pos];
-    size_t value_start = quote_pos + 1;
-    size_t value_end = content.find(quote_char, value_start);
-    if (value_end == std::string::npos) {
-      break;
-    }
-    if (value_end > value_start) {
-      labels[count] = content.substr(value_start, value_end - value_start);
-    }
-    ++count;
-    cursor = value_end + 1;
-  }
-}
-
 std::string format_printable_char(uint8_t byte) {
   switch (byte) {
     case '\r':
@@ -286,18 +173,11 @@ const char *JuraComponent::handshake_stage_name(JuraComponent::HandshakeStage st
 }
 
 JuraComponent::~JuraComponent() {
-  auto cleanup_pool = [](auto &pool) {
-    for (auto *&sensor : pool) {
-      delete sensor;
-      sensor = nullptr;
-    }
-  };
-  cleanup_pool(this->xml_tr32_sensors_);
-  cleanup_pool(this->xml_tg43_sensors_);
-  cleanup_pool(this->xml_tgc0_sensors_);
+  for (auto &entry : this->xml_sensors_) {
+    delete entry.second;
+  }
+  this->xml_sensors_.clear();
 }
-
-void JuraComponent::set_xml_inline(const std::string &xml) { this->xml_inline_ = xml; }
 
 void JuraComponent::setup() {
   if (this->parent_ == nullptr) {
@@ -313,11 +193,11 @@ void JuraComponent::setup() {
   ESP_LOGI(TAG, "Starting handshake with coffee maker...");
 
   this->reset_xml_cycle_state_();
-  this->load_xml_mapping_();
-  this->ensure_xml_sensors_created_();
-  this->apply_xml_labels_();
-  this->xml_initialized_ = true;
   this->xml_next_poll_ = esphome::millis();
+  if (this->enable_xml_poll_) {
+    this->ensure_xml_mapping_loaded_();
+    this->ensure_xml_sensors_created_();
+  }
 }
 
 void JuraComponent::loop() {
@@ -335,7 +215,7 @@ void JuraComponent::loop() {
     this->process_handshake();
   }
 
-  if (this->coffee_maker_ != nullptr && !this->xml_busy_) {
+  if (this->coffee_maker_ != nullptr) {
     this->coffee_maker_->loop();
     if (!this->coffee_maker_->is_locked()) {
       this->custom_cancel_flag_ = false;
@@ -399,13 +279,12 @@ void JuraComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  Coffee maker ready: %s", YESNO(false));
   }
 
-  ESP_LOGCONFIG(TAG, "  XML polling: %s", this->xml_enabled_ ? "enabled" : "disabled");
-  ESP_LOGCONFIG(TAG, "  XML mapping path: %s", this->xml_path_.c_str());
-  ESP_LOGCONFIG(TAG, "  XML inline mapping: %s", this->xml_inline_.empty() ? "no" : "yes");
-  if (this->xml_enabled_) {
-    ESP_LOGCONFIG(TAG, "  XML poll interval: %u ms", static_cast<unsigned>(this->xml_poll_interval_ms_));
-    ESP_LOGCONFIG(TAG, "  XML RX timeout: %u ms", static_cast<unsigned>(this->xml_rx_timeout_ms_));
-  }
+  ESP_LOGCONFIG(TAG, "  XML polling: %s", this->enable_xml_poll_ ? "enabled" : "disabled");
+  ESP_LOGCONFIG(TAG, "  XML mapping path: %s", this->xml_mapping_path_.c_str());
+  ESP_LOGCONFIG(TAG, "  XML poll interval: %u ms", static_cast<unsigned>(this->xml_poll_interval_ms_));
+  ESP_LOGCONFIG(TAG, "  XML mapping loaded: %s",
+                YESNO(this->xml_mapping_loaded_ && this->xml_mapping_.valid));
+  ESP_LOGCONFIG(TAG, "  XML sensors: %u", static_cast<unsigned>(this->xml_sensors_.size()));
 }
 
 void JuraComponent::process_handshake() {
@@ -634,9 +513,6 @@ void JuraComponent::process_machine_data_query() {
   if (this->is_busy()) {
     return;
   }
-  if (this->xml_busy_) {
-    return;
-  }
 
   uint32_t now = esphome::millis();
 
@@ -690,544 +566,260 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
   }
 }
 
-void JuraComponent::reset_xml_cycle_state_() {
-  this->xml_initialized_ = false;
-  this->xml_has_values_ = false;
-  this->xml_next_poll_ = 0;
-  this->xml_mapping_logged_ = false;
-  this->xml_busy_ = false;
-  this->db_framer_.clear();
-  this->db_pending_frames_.clear();
-}
-
 void JuraComponent::ensure_xml_sensors_created_() {
-  auto create_pool = [&](auto &pool) {
-    for (auto *&sensor_ptr : pool) {
-      if (sensor_ptr == nullptr) {
-        auto *sensor_obj = new sensor::Sensor();
-        sensor_obj->set_accuracy_decimals(0);
-        sensor_obj->set_internal(false);
-        try_set_parent(sensor_obj, this, 0);
-        register_sensor_with_app(sensor_obj);
-        sensor_ptr = sensor_obj;
-      }
-    }
-  };
-  create_pool(this->xml_tr32_sensors_);
-  create_pool(this->xml_tg43_sensors_);
-  create_pool(this->xml_tgc0_sensors_);
-}
-
-void JuraComponent::update_sensor_names_() {
-  auto assign = [](auto &pool, const auto &labels, const char *default_prefix) {
-    for (size_t i = 0; i < pool.size(); ++i) {
-      if (pool[i] == nullptr) {
-        continue;
-      }
-      std::string label = labels[i];
-      if (label.empty()) {
-        char buffer[32];
-        snprintf(buffer, sizeof(buffer), "%s %u", default_prefix, static_cast<unsigned>(i + 1));
-        label = buffer;
-      }
-      pool[i]->set_name(label);
-    }
-  };
-  assign(this->xml_tr32_sensors_, this->xml_mapping_.tr32_labels, "TR32");
-  assign(this->xml_tg43_sensors_, this->xml_mapping_.tg43_labels, "TG43");
-  assign(this->xml_tgc0_sensors_, this->xml_mapping_.tgc0_labels, "TGC0");
-}
-
-void JuraComponent::apply_xml_labels_() {
-  this->update_sensor_names_();
-}
-
-void JuraComponent::load_xml_mapping_() {
-  fill_default_labels("TR32", this->xml_mapping_.tr32_labels);
-  fill_default_labels("TG43", this->xml_mapping_.tg43_labels);
-  fill_default_labels("TGC0", this->xml_mapping_.tgc0_labels);
-  this->xml_mapping_.tr32_command = "@TR:32";
-  this->xml_mapping_.tg43_command = "@TG:43";
-  this->xml_mapping_.tgc0_command = "@TG:C0";
-  this->xml_mapping_.tr32_id = 0x32;
-  this->xml_mapping_.tg43_id = 0x43;
-  this->xml_mapping_.tgc0_id = 0xC0;
-  this->xml_mapping_.valid = false;
-
-  if (!this->xml_enabled_) {
-    this->log_xml_mapping_info_();
+  if (!this->enable_xml_poll_ || !this->xml_mapping_.valid) {
     return;
   }
-
-  std::string content;
-  if (!this->xml_inline_.empty()) {
-    content = this->xml_inline_;
-  } else if (!this->xml_path_.empty()) {
-    if (!this->load_xml_from_path_(content)) {
-      ESP_LOGW(TAG, "Failed to load XML mapping at %s", this->xml_path_.c_str());
-    }
-  }
-
-  if (!content.empty()) {
-    if (!this->parse_xml_content_(content)) {
-      ESP_LOGW(TAG, "XML mapping parse failed, keeping defaults");
-    }
-  }
-
-  this->log_xml_mapping_info_();
-  this->apply_xml_labels_();
-}
-
-void JuraComponent::log_xml_mapping_info_() {
-  if (this->xml_mapping_logged_) {
-    return;
-  }
-  ESP_LOGI(TAG, "XML mapping path = %s", this->xml_path_.c_str());
-  ESP_LOGI(TAG, "inline XML = %s", this->xml_inline_.empty() ? "no" : "yes");
-  size_t tr32_labels = count_non_empty(this->xml_mapping_.tr32_labels);
-  size_t tg43_labels = count_non_empty(this->xml_mapping_.tg43_labels);
-  size_t tgc0_labels = count_non_empty(this->xml_mapping_.tgc0_labels);
-  ESP_LOGI(TAG, "XML mapping valid=%d, cmds=<%s, %s, %s>", static_cast<int>(this->xml_mapping_.valid),
-           this->xml_mapping_.tr32_command.c_str(), this->xml_mapping_.tg43_command.c_str(),
-           this->xml_mapping_.tgc0_command.c_str());
-  ESP_LOGI(TAG, "XML labels: TR32=%u, TG43=%u, TGC0=%u", static_cast<unsigned>(tr32_labels),
-           static_cast<unsigned>(tg43_labels), static_cast<unsigned>(tgc0_labels));
-  this->xml_mapping_logged_ = true;
-}
-
-bool JuraComponent::ensure_filesystem_ready_() {
-#if defined(USE_FILESYSTEM)
-  if (this->filesystem_attempted_) {
-    return this->filesystem_available_;
-  }
-  this->filesystem_attempted_ = true;
-  bool ok = true;
-#if defined(USE_LITTLEFS)
-  ok = LittleFS.begin();
-  ESP_LOGI(TAG, "LittleFS.begin() %s", ok ? "succeeded" : "failed");
-#elif defined(USE_SPIFFS)
-  ok = SPIFFS.begin();
-  ESP_LOGI(TAG, "SPIFFS.begin() %s", ok ? "succeeded" : "failed");
-#else
-  ESP_LOGV(TAG, "Using ESPHome filesystem backend without explicit mount call");
-#endif
-  this->filesystem_available_ = ok;
-  if (!ok) {
-    ESP_LOGW(TAG, "Failed to initialise filesystem backend for XML mapping");
-  }
-  return ok;
-#else
-  return false;
-#endif
-}
-
-bool JuraComponent::load_xml_from_path_(std::string &content) {
-  content.clear();
-#if defined(USE_FILESYSTEM)
-  if (!this->ensure_filesystem_ready_()) {
-    ESP_LOGW(TAG, "No filesystem available for XML mapping");
-    return false;
-  }
-  auto *fs = ::esphome::filesystem::global_filesystem;
-  if (fs == nullptr) {
-    ESP_LOGW(TAG, "No filesystem instance accessible");
-    return false;
-  }
-  auto file = fs->open(this->xml_path_.c_str(), "r");
-  if (!file) {
-    return false;
-  }
-  char buffer[256];
-  while (true) {
-    size_t read = file.readBytes(buffer, sizeof(buffer));
-    if (read == 0) {
-      break;
-    }
-    content.append(buffer, read);
-    if (read < sizeof(buffer) && !file.available()) {
-      break;
-    }
-  }
-  file.close();
-  return true;
-#else
-  (void) content;
-  return false;
-#endif
-}
-
-bool JuraComponent::parse_xml_content_(const std::string &content) {
-  bool commands_ok = true;
-  auto parse_block = [&](const char *anchor_token, std::string &command, auto &labels) {
-    size_t anchor_pos = content.find(anchor_token);
-    if (anchor_pos == std::string::npos) {
-      commands_ok = false;
-      return;
-    }
-    std::string parsed_command;
-    if (extract_command(content, anchor_pos, parsed_command)) {
-      command = parsed_command;
-    } else {
-      commands_ok = false;
-    }
-    extract_labels(content, anchor_pos, labels);
+  auto ensure_field = [&](const XmlField &field) {
+    this->get_or_create_sensor_(field.name, field.label);
   };
+  for (const auto &field : this->xml_mapping_.tr32_fields.fields) {
+    ensure_field(field);
+  }
+  for (const auto &field : this->xml_mapping_.tg43_fields.fields) {
+    ensure_field(field);
+  }
+  for (const auto &field : this->xml_mapping_.tgc0_fields.fields) {
+    ensure_field(field);
+  }
+}
 
-  parse_block("TR32", this->xml_mapping_.tr32_command, this->xml_mapping_.tr32_labels);
-  parse_block("TG43", this->xml_mapping_.tg43_command, this->xml_mapping_.tg43_labels);
-  parse_block("TGC0", this->xml_mapping_.tgc0_command, this->xml_mapping_.tgc0_labels);
-
-  bool ids_ok = true;
-  ids_ok &= this->parse_command_id_(this->xml_mapping_.tr32_command, this->xml_mapping_.tr32_id);
-  ids_ok &= this->parse_command_id_(this->xml_mapping_.tg43_command, this->xml_mapping_.tg43_id);
-  ids_ok &= this->parse_command_id_(this->xml_mapping_.tgc0_command, this->xml_mapping_.tgc0_id);
-
-  this->xml_mapping_.valid = commands_ok && ids_ok;
+bool JuraComponent::ensure_xml_mapping_loaded_() {
+  if (!this->enable_xml_poll_) {
+    return false;
+  }
+  if (this->xml_mapping_loaded_) {
+    return this->xml_mapping_.valid;
+  }
+  XmlMapping mapping;
+  if (!load_xml_mapping(this->xml_mapping_path_, mapping)) {
+    ESP_LOGW(TAG, "Failed to load XML mapping at %s", this->xml_mapping_path_.c_str());
+    this->xml_mapping_loaded_ = false;
+    this->xml_mapping_.valid = false;
+    this->xml_mapping_logged_ = false;
+    this->xml_stats_.clear();
+    this->log_xml_mapping_status_();
+    return false;
+  }
+  this->xml_mapping_ = std::move(mapping);
+  this->xml_mapping_loaded_ = this->xml_mapping_.valid;
+  this->xml_mapping_logged_ = false;
+  this->xml_stats_.clear();
+  this->log_xml_mapping_status_();
   return this->xml_mapping_.valid;
 }
 
-bool JuraComponent::parse_command_id_(const std::string &command, uint8_t &command_id) const {
-  size_t colon = command.find(':');
-  if (colon == std::string::npos || colon + 1 >= command.size()) {
-    ESP_LOGW(TAG, "Cannot derive command id from '%s'", command.c_str());
-    return false;
-  }
-  unsigned value = 0;
-  for (size_t i = colon + 1; i < command.size(); ++i) {
-    unsigned char ch = static_cast<unsigned char>(command[i]);
-    if (std::isxdigit(ch) == 0) {
-      ESP_LOGW(TAG, "Invalid hex digit '%c' in command '%s'", command[i], command.c_str());
-      return false;
-    }
-    value <<= 4;
-    if (ch >= '0' && ch <= '9') {
-      value |= static_cast<unsigned>(ch - '0');
-    } else {
-      ch = static_cast<unsigned char>(std::tolower(ch));
-      value |= static_cast<unsigned>(ch - 'a' + 10);
-    }
-    if (value > 0xFF) {
-      ESP_LOGW(TAG, "Command id overflow in '%s'", command.c_str());
-      return false;
-    }
-  }
-  command_id = static_cast<uint8_t>(value);
-  return true;
-}
-
-void JuraComponent::DbFramer::clear() {
-  this->head_ = 0;
-  this->size_ = 0;
-}
-
-void JuraComponent::DbFramer::consume(size_t length) {
-  if (length >= this->size_) {
-    this->clear();
+void JuraComponent::log_xml_mapping_status_() {
+  if (this->xml_mapping_logged_) {
     return;
   }
-  this->head_ = (this->head_ + length) % BUFFER_CAPACITY;
-  this->size_ -= length;
+  ESP_LOGI(TAG, "XML mapping loaded from %s (valid=%d, fields=%u/%u/%u)",
+           this->xml_mapping_path_.c_str(), static_cast<int>(this->xml_mapping_.valid),
+           static_cast<unsigned>(this->xml_mapping_.tr32_fields.fields.size()),
+           static_cast<unsigned>(this->xml_mapping_.tg43_fields.fields.size()),
+           static_cast<unsigned>(this->xml_mapping_.tgc0_fields.fields.size()));
+  this->xml_mapping_logged_ = true;
 }
 
-void JuraComponent::DbFramer::push_encoded(const uint8_t *data, size_t length) {
-  if (length == 0) {
-    return;
-  }
-  if (length >= BUFFER_CAPACITY) {
-    data += length - BUFFER_CAPACITY;
-    length = BUFFER_CAPACITY;
-    this->clear();
-  }
-  while (this->size_ + length > BUFFER_CAPACITY) {
-    this->consume(1);
-  }
-  for (size_t i = 0; i < length; ++i) {
-    size_t index = (this->head_ + this->size_) % BUFFER_CAPACITY;
-    this->buffer_[index] = data[i];
-    ++this->size_;
-  }
-}
-
-std::vector<std::vector<uint8_t>> JuraComponent::DbFramer::try_extract_frames() {
-  std::vector<std::vector<uint8_t>> frames;
-  while (this->size_ >= DB_TERMINATOR.size()) {
-    std::vector<uint8_t> linear(this->size_);
-    for (size_t i = 0; i < this->size_; ++i) {
-      linear[i] = this->buffer_[(this->head_ + i) % BUFFER_CAPACITY];
-    }
-    auto it = std::search(linear.begin(), linear.end(), DB_TERMINATOR.begin(), DB_TERMINATOR.end());
-    if (it == linear.end()) {
-      break;
-    }
-    size_t frame_len = static_cast<size_t>(std::distance(linear.begin(), it)) + DB_TERMINATOR.size();
-    std::vector<uint8_t> frame(frame_len);
-    std::copy_n(linear.begin(), frame_len, frame.begin());
-    frames.push_back(std::move(frame));
-    this->consume(frame_len);
-  }
-  return frames;
-}
-
-void JuraComponent::discard_stale_pending_frames_() {
-  constexpr size_t MAX_PENDING_FRAMES = 16;
-  while (this->db_pending_frames_.size() > MAX_PENDING_FRAMES) {
-    this->db_pending_frames_.pop_front();
-  }
-}
-
-bool JuraComponent::consume_pending_db_frame_(const std::string &command, uint8_t command_id, size_t expected_len,
-                                              std::vector<uint8_t> &decoded, bool *dropped_echo) {
-  if (dropped_echo != nullptr) {
-    *dropped_echo = false;
-  }
-  for (auto it = this->db_pending_frames_.begin(); it != this->db_pending_frames_.end();) {
-    PendingDbFrame &pending = *it;
-    if (!pending.decode_attempted) {
-      pending.decode_attempted = true;
-      pending.decoded_valid = decode_db_frame(pending.encoded, pending.decoded);
-      if (!pending.decoded_valid) {
-        ESP_LOGD(TAG, "RX_DB frame decode failed (%zu bytes) -> drop", pending.encoded.size());
-        it = this->db_pending_frames_.erase(it);
-        continue;
-      }
-    }
-    if (!pending.decoded_valid) {
-      it = this->db_pending_frames_.erase(it);
-      continue;
-    }
-
-    auto &payload = pending.decoded;
-    if (is_ascii_echo(payload, command)) {
-      ESP_LOGD(TAG, "RX_DB echo ignored: \"%s\"", command.c_str());
-      if (dropped_echo != nullptr) {
-        *dropped_echo = true;
-      }
-      it = this->db_pending_frames_.erase(it);
-      continue;
-    }
-    if (payload.empty()) {
-      ESP_LOGD(TAG, "RX_DB empty payload -> drop");
-      it = this->db_pending_frames_.erase(it);
-      continue;
-    }
-    if (payload[0] == command_id) {
-      ESP_LOGD(TAG, "RX_DB encoded_len=%zu decoded_len=%zu (expected=%zu)",
-               pending.encoded.size(), payload.size(), expected_len);
-      if (payload.size() != expected_len) {
-        ESP_LOGD(TAG, "RX_DB len=%u != %u → drop", static_cast<unsigned>(payload.size()),
-                 static_cast<unsigned>(expected_len));
-        it = this->db_pending_frames_.erase(it);
-        continue;
-      }
-      decoded = payload;
-      this->db_pending_frames_.erase(it);
-      ESP_LOGD(TAG, "RX_DB decoded_len=%zu expected=%zu", decoded.size(), expected_len);
-      return true;
-    }
-    ++it;
-  }
-  return false;
-}
-
-bool JuraComponent::await_db_response_(const std::string &command, uint8_t command_id, size_t expected_len,
-                                       std::vector<uint8_t> &decoded) {
-  auto *link = this->coffee_maker_->connection.get();
-  if (link == nullptr) {
-    return false;
-  }
-  uint32_t start = esphome::millis();
-  const uint32_t timeout_ms = this->xml_rx_timeout_ms_;
-  bool rx_started = false;
-  uint32_t rx_start = 0;
-
-  while (true) {
-    bool dropped_echo = false;
-    if (this->consume_pending_db_frame_(command, command_id, expected_len, decoded, &dropped_echo)) {
-      return true;
-    }
-    if (dropped_echo) {
-      rx_started = false;
-      rx_start = 0;
-    }
-
-    std::array<uint8_t, 4> chunk{};
-    size_t read = link->read_db_stream_chunk(chunk);
-    if (read > 0) {
-      ESP_LOGD(TAG, "RX push: %zu bytes", read);
-      this->db_framer_.push_encoded(chunk.data(), read);
-      auto frames = this->db_framer_.try_extract_frames();
-      for (auto &frame : frames) {
-        PendingDbFrame pending;
-        pending.encoded = std::move(frame);
-        this->db_pending_frames_.push_back(std::move(pending));
-      }
-      this->discard_stale_pending_frames_();
-      if (!rx_started) {
-        rx_started = true;
-        rx_start = esphome::millis();
-      }
-      continue;
-    }
-
-    uint32_t now = esphome::millis();
-    uint32_t base = rx_started ? rx_start : start;
-    if (timeout_ms > 0 && static_cast<int32_t>(now - base - timeout_ms) >= 0) {
-      ESP_LOGW(TAG, "RX_DB timeout %s", command.c_str());
-      return false;
-    }
-    esphome::delay(5);
-  }
+void JuraComponent::reset_xml_cycle_state_() {
+  this->xml_cycle_.reset();
+  this->xml_stats_.clear();
 }
 
 void JuraComponent::process_xml_polling() {
-  if (!this->xml_enabled_) {
+  if (!this->enable_xml_poll_) {
     return;
   }
   if (!this->is_ready()) {
     return;
   }
-  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+  if (!this->ensure_xml_mapping_loaded_()) {
     return;
   }
-  if (this->is_busy()) {
-    return;
-  }
-
-  if (this->xml_busy_) {
-    return;
-  }
+  this->ensure_xml_sensors_created_();
 
   uint32_t now = esphome::millis();
-
-  if (!this->xml_initialized_) {
-    this->load_xml_mapping_();
-    this->ensure_xml_sensors_created_();
-    this->xml_initialized_ = true;
-    this->xml_next_poll_ = now;
+  if (this->xml_cycle_.phase == XmlCycleState::Phase::Idle) {
+    if (this->xml_next_poll_ != 0 && !time_reached(now, this->xml_next_poll_)) {
+      return;
+    }
+    this->start_xml_cycle_(now);
     return;
   }
-
-  if (this->xml_next_poll_ != 0 && !time_reached(now, this->xml_next_poll_)) {
-    return;
-  }
-
-  ESP_LOGD(TAG, "XML poll start");
-  if (this->perform_xml_cycle_()) {
-    this->publish_xml_values_();
-  }
-  this->xml_next_poll_ = now + this->xml_poll_interval_ms_;
+  this->handle_xml_cycle_(now);
 }
 
-bool JuraComponent::perform_xml_cycle_() {
+void JuraComponent::start_xml_cycle_(uint32_t now) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return;
+  }
+  this->xml_cycle_.reset();
+  this->xml_cycle_.phase = XmlCycleState::Phase::WaitingForFrame;
+  this->xml_cycle_.command_index = 0;
+  const char *command = xml_command_for_index_(0);
+  ESP_LOGD(TAG, "TX_DB \"%s\"", command);
+  this->coffee_maker_->connection->tx_db_command(command);
+  this->xml_cycle_.deadline_ms = now + XML_RESPONSE_TIMEOUT_MS;
+  this->xml_cycle_.next_action_ms = 0;
+}
+
+void JuraComponent::handle_xml_cycle_(uint32_t now) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    this->finish_xml_cycle_(now, false);
+    return;
+  }
+
+  switch (this->xml_cycle_.phase) {
+    case XmlCycleState::Phase::Idle:
+      break;
+    case XmlCycleState::Phase::WaitingForFrame: {
+      if (this->try_receive_xml_frame_(now)) {
+        this->xml_cycle_.phase = XmlCycleState::Phase::DelayBeforeNext;
+        this->xml_cycle_.next_action_ms = now + XML_INTER_COMMAND_DELAY_MS;
+        return;
+      }
+      if (this->xml_cycle_.deadline_ms != 0 &&
+          static_cast<int32_t>(now - this->xml_cycle_.deadline_ms) >= 0) {
+        ESP_LOGW(TAG, "RX_DB timeout %s", xml_log_label_for_index_(this->xml_cycle_.command_index));
+        this->xml_cycle_.phase = XmlCycleState::Phase::DelayBeforeNext;
+        this->xml_cycle_.next_action_ms = now + XML_INTER_COMMAND_DELAY_MS;
+      }
+      break;
+    }
+    case XmlCycleState::Phase::DelayBeforeNext: {
+      if (this->xml_cycle_.next_action_ms != 0 &&
+          static_cast<int32_t>(now - this->xml_cycle_.next_action_ms) < 0) {
+        return;
+      }
+      size_t next_index = this->xml_cycle_.command_index + 1;
+      if (next_index >= 3) {
+        this->finish_xml_cycle_(now, true);
+        return;
+      }
+      const char *command = xml_command_for_index_(next_index);
+      ESP_LOGD(TAG, "TX_DB \"%s\"", command);
+      this->coffee_maker_->connection->tx_db_command(command);
+      this->xml_cycle_.command_index = next_index;
+      this->xml_cycle_.phase = XmlCycleState::Phase::WaitingForFrame;
+      this->xml_cycle_.deadline_ms = now + XML_RESPONSE_TIMEOUT_MS;
+      break;
+    }
+  }
+}
+
+bool JuraComponent::try_receive_xml_frame_(uint32_t now) {
+  (void) now;
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     return false;
   }
-  if (this->xml_busy_) {
-    ESP_LOGW(TAG, "XML poll skipped because connection is busy.");
+  std::vector<uint8_t> decoded;
+  if (!this->coffee_maker_->connection->read_db_frame(decoded, 0)) {
     return false;
   }
-
-  struct BusyGuard {
-    bool &flag;
-    explicit BusyGuard(bool &ref) : flag(ref) { flag = true; }
-    ~BusyGuard() { flag = false; }
-  } guard(this->xml_busy_);
-
-  auto *link = this->coffee_maker_->connection.get();
-  std::array<uint16_t, XML_TR32_COUNT> tr32_values{};
-  std::array<uint16_t, XML_TG43_COUNT> tg43_values{};
-  std::array<uint32_t, XML_TGC0_COUNT> tgc0_values{};
-
-  auto parse_u16 = [](const std::vector<uint8_t> &src, auto &dest) {
-    for (size_t i = 0; i < dest.size(); ++i) {
-      size_t offset = 1 + i * 2;
-      dest[i] = static_cast<uint16_t>((static_cast<uint16_t>(src[offset]) << 8) |
-                                      static_cast<uint16_t>(src[offset + 1]));
-    }
-  };
-  auto parse_u32 = [](const std::vector<uint8_t> &src, auto &dest) {
-    for (size_t i = 0; i < dest.size(); ++i) {
-      size_t offset = 1 + i * 4;
-      dest[i] = (static_cast<uint32_t>(src[offset]) << 24) |
-                (static_cast<uint32_t>(src[offset + 1]) << 16) |
-                (static_cast<uint32_t>(src[offset + 2]) << 8) |
-                static_cast<uint32_t>(src[offset + 3]);
-    }
-  };
-
-  auto read_block = [&](const std::string &command, uint8_t command_id, size_t expected_length,
-                        auto &&parser) -> bool {
-    link->drain_db_stream(std::chrono::milliseconds{XML_RX_DRAIN_MS});
-    size_t encoded_len = command.size() * 2 + DB_TERMINATOR.size();
-    ESP_LOGD(TAG, "TX_DB \"%s\" (len=%zu)", command.c_str(), encoded_len);
-    if (!this->send_db_command_(command)) {
-      ESP_LOGW(TAG, "Failed to send XML command %s", command.c_str());
-      return false;
-    }
-    std::vector<uint8_t> buffer;
-    uint32_t start = esphome::millis();
-    if (!this->await_db_response_(command, command_id, expected_length, buffer)) {
-      return false;
-    }
-    uint32_t elapsed = esphome::millis() - start;
-    ESP_LOGD(TAG, "OK %s in %u ms", command.c_str(), static_cast<unsigned>(elapsed));
-    parser(buffer);
-    return true;
-  };
-
-  bool tr32_ok = read_block(this->xml_mapping_.tr32_command, this->xml_mapping_.tr32_id,
-                            1 + XML_TR32_COUNT * 2, [&](const std::vector<uint8_t> &src) {
-                              parse_u16(src, tr32_values);
-                            });
-  bool tg43_ok = read_block(this->xml_mapping_.tg43_command, this->xml_mapping_.tg43_id,
-                            1 + XML_TG43_COUNT * 2, [&](const std::vector<uint8_t> &src) {
-                              parse_u16(src, tg43_values);
-                            });
-  bool tgc0_ok = read_block(this->xml_mapping_.tgc0_command, this->xml_mapping_.tgc0_id,
-                            1 + XML_TGC0_COUNT * 4, [&](const std::vector<uint8_t> &src) {
-                              parse_u32(src, tgc0_values);
-                            });
-
-  if (!(tr32_ok && tg43_ok && tgc0_ok)) {
-    return false;
-  }
-
-  this->xml_tr32_values_ = tr32_values;
-  this->xml_tg43_values_ = tg43_values;
-  this->xml_tgc0_values_ = tgc0_values;
-  this->xml_has_values_ = true;
+  size_t index = this->xml_cycle_.command_index;
+  this->xml_cycle_.responses[index] = std::move(decoded);
+  ESP_LOGD(TAG, "RX_DB %s decoded_len=%u", xml_log_label_for_index_(index),
+           static_cast<unsigned>(this->xml_cycle_.responses[index].size()));
   return true;
 }
 
-bool JuraComponent::send_db_command_(const std::string &command) {
-  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
-    return false;
+void JuraComponent::finish_xml_cycle_(uint32_t now, bool success) {
+  bool any_value = false;
+
+  auto handle_response = [&](size_t index, auto mapper) {
+    const auto &response = this->xml_cycle_.responses[index];
+    const char *label = xml_log_label_for_index_(index);
+    if (response.empty()) {
+      ESP_LOGW(TAG, "XML %s: keine Daten empfangen", label);
+      return;
+    }
+    if (mapper(response, this->xml_mapping_, this->xml_stats_)) {
+      any_value = true;
+    }
+  };
+
+  handle_response(0, map_tr32);
+  handle_response(1, map_tg43);
+  handle_response(2, map_tgc0);
+
+  if (any_value) {
+    this->publish_xml_stats_();
   }
-  return this->coffee_maker_->connection->write_db_command(command);
+
+  if (!success) {
+    ESP_LOGW(TAG, "XML poll aborted");
+  }
+  this->xml_cycle_.reset();
+  this->xml_next_poll_ = now + this->xml_poll_interval_ms_;
 }
 
-void JuraComponent::publish_xml_values_() {
-  if (!this->xml_enabled_ || !this->xml_has_values_) {
+void JuraComponent::publish_xml_stats_() {
+  if (!this->enable_xml_poll_) {
     return;
   }
-  ESP_LOGD(TAG, "publish TR32=%s TG43=%s TGC0=%s",
-           format_numeric_array(this->xml_tr32_values_).c_str(),
-           format_numeric_array(this->xml_tg43_values_).c_str(),
-           format_numeric_array(this->xml_tgc0_values_).c_str());
-  for (size_t i = 0; i < this->xml_tr32_sensors_.size(); ++i) {
-    if (this->xml_tr32_sensors_[i] != nullptr) {
-      this->xml_tr32_sensors_[i]->publish_state(static_cast<float>(this->xml_tr32_values_[i]));
-    }
+  if (this->xml_stats_.empty()) {
+    return;
   }
-  for (size_t i = 0; i < this->xml_tg43_sensors_.size(); ++i) {
-    if (this->xml_tg43_sensors_[i] != nullptr) {
-      this->xml_tg43_sensors_[i]->publish_state(static_cast<float>(this->xml_tg43_values_[i]));
-    }
+  const auto &stats = this->xml_stats_.values();
+  for (const auto &entry : stats) {
+    this->publish_single_stat_(entry.first, entry.second.value, entry.second.label);
   }
-  for (size_t i = 0; i < this->xml_tgc0_sensors_.size(); ++i) {
-    if (this->xml_tgc0_sensors_[i] != nullptr) {
-      this->xml_tgc0_sensors_[i]->publish_state(static_cast<float>(this->xml_tgc0_values_[i]));
+}
+
+void JuraComponent::publish_single_stat_(const std::string &name, double value, const std::string &label) {
+  auto *sensor = this->get_or_create_sensor_(name, label);
+  if (sensor == nullptr) {
+    ESP_LOGW(TAG, "XML field %s konnte nicht veröffentlicht werden", name.c_str());
+    return;
+  }
+  sensor->publish_state(static_cast<float>(value));
+  ESP_LOGD(TAG, "XML publish: %s=%.3f", name.c_str(), value);
+}
+
+sensor::Sensor *JuraComponent::get_or_create_sensor_(const std::string &name, const std::string &label) {
+  auto it = this->xml_sensors_.find(name);
+  if (it != this->xml_sensors_.end()) {
+    if (!label.empty() && this->xml_sensor_labels_[name] != label) {
+      it->second->set_name(label);
+      this->xml_sensor_labels_[name] = label;
     }
+    return it->second;
+  }
+  auto *sensor_obj = new sensor::Sensor();
+  sensor_obj->set_accuracy_decimals(0);
+  sensor_obj->set_internal(false);
+  try_set_parent(sensor_obj, this, 0);
+  register_sensor_with_app(sensor_obj);
+  std::string effective_label = label.empty() ? name : label;
+  sensor_obj->set_name(effective_label);
+  this->xml_sensor_labels_[name] = effective_label;
+  this->xml_sensors_[name] = sensor_obj;
+  return sensor_obj;
+}
+
+const char *JuraComponent::xml_command_for_index_(size_t index) {
+  static const char *const COMMANDS[] = {"@TR:32", "@TG:43", "@TG:C0"};
+  if (index >= sizeof(COMMANDS) / sizeof(COMMANDS[0])) {
+    return "";
+  }
+  return COMMANDS[index];
+}
+
+const char *JuraComponent::xml_log_label_for_index_(size_t index) {
+  static const char *const LABELS[] = {"TR32", "TG43", "TGC0"};
+  if (index >= sizeof(LABELS) / sizeof(LABELS[0])) {
+    return "?";
+  }
+  return LABELS[index];
+}
+
+void JuraComponent::XmlCycleState::reset() {
+  this->phase = Phase::Idle;
+  this->command_index = 0;
+  this->deadline_ms = 0;
+  this->next_action_ms = 0;
+  for (auto &response : this->responses) {
+    response.clear();
   }
 }
 

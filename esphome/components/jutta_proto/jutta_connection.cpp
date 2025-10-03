@@ -23,9 +23,6 @@ constexpr uint32_t JUTTA_TX_ECHO_WINDOW_MS = 200;
 constexpr uint8_t JUTTA_ENCODE_BASE = 0xFF;
 constexpr uint8_t JUTTA_BIT0_MASK = static_cast<uint8_t>(1u << 2);
 constexpr uint8_t JUTTA_BIT1_MASK = static_cast<uint8_t>(1u << 5);
-constexpr uint8_t DB_ESCAPE = 0xDB;
-constexpr uint8_t DB_XOR_MASK = 0x20;
-constexpr std::array<uint8_t, 8> DB_TRAILER_ENCODED{{0xDF, 0xFF, 0xDB, 0xDB, 0xFB, 0xFB, 0xDB, 0xDB}};
 std::string format_hex(const uint8_t* data, size_t length) {
     if (length == 0) {
         return "[]";
@@ -513,155 +510,165 @@ void JuttaConnection::reset_response_line_buffer() {
     }
 }
 
-bool JuttaConnection::write_db_command(const std::string& command) {
+void JuttaConnection::tx_db_command(const std::string& ascii) {
+    static const std::array<uint8_t, 8> TERMINATOR{{0xDF, 0xFF, 0xDB, 0xDB, 0xFB, 0xFB, 0xDB, 0xDB}};
     std::vector<uint8_t> encoded;
-    encoded.reserve(command.size() * 2 + DB_TRAILER_ENCODED.size());
-    for (unsigned char c : command) {
-        encoded.push_back(DB_ESCAPE);
-        encoded.push_back(static_cast<uint8_t>(c ^ DB_XOR_MASK));
+    encoded.reserve(ascii.size() * 4 + TERMINATOR.size());
+
+    for (unsigned char ch : ascii) {
+        uint8_t value = static_cast<uint8_t>(ch);
+        for (int pair = 0; pair < 4; ++pair) {
+            uint8_t symbol = 0xDB;
+            int shift = 6 - 2 * pair;
+            uint8_t two_bits = static_cast<uint8_t>((value >> shift) & 0x03);
+            if ((two_bits & 0x01u) != 0u) {
+                symbol |= 0x04u;
+            }
+            if ((two_bits & 0x02u) != 0u) {
+                symbol |= 0x20u;
+            }
+            encoded.push_back(symbol);
+        }
     }
-    encoded.insert(encoded.end(), DB_TRAILER_ENCODED.begin(), DB_TRAILER_ENCODED.end());
+
+    encoded.insert(encoded.end(), TERMINATOR.begin(), TERMINATOR.end());
+
     this->activate_tx_echo_suppressor_(encoded);
-    if (!this->write_db_encoded_(encoded)) {
-        this->deactivate_tx_echo_suppressor_();
-        return false;
-    }
-    return true;
-}
+    ESP_LOGD(TAG, "TX_DB \"%s\"", ascii.c_str());
 
-bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout) {
-    decoded.clear();
-    std::vector<uint8_t> encoded;
-    if (!this->read_one_db_frame_encoded_(encoded, timeout)) {
-        return false;
-    }
-    return this->unescape_db_frame_(encoded, decoded);
-}
-
-bool JuttaConnection::read_db_data_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout) {
-    decoded.clear();
-    std::vector<uint8_t> encoded;
-    if (!this->read_one_db_frame_encoded_(encoded, timeout)) {
-        return false;
-    }
-    return this->unescape_db_frame_(encoded, decoded);
-}
-
-void JuttaConnection::drain_db_stream(const std::chrono::milliseconds& duration) {
-    if (duration.count() == 0) {
-        return;
-    }
-    this->db_rx_queue_.clear();
-    uint32_t start = esphome::millis();
-    std::array<uint8_t, 4> buffer{};
-    while (true) {
-        if (static_cast<int32_t>(esphome::millis() - start - duration.count()) >= 0) {
-            break;
-        }
-        size_t read = this->serial.read_serial(buffer);
-        if (read == 0) {
-            esphome::delay(5);
-            continue;
-        }
-        std::vector<uint8_t> filtered;
-        filtered.reserve(read);
-        size_t dropped = this->filter_tx_echo_(buffer.data(), read, filtered);
-        if (dropped > 0) {
-            ESP_LOGD(TAG, "Echo drop: %zu of %zu bytes", dropped, read);
-        }
-        // Drop any remaining bytes by not enqueuing them.
-    }
-}
-
-size_t JuttaConnection::read_db_stream_chunk(std::array<uint8_t, 4>& buffer) {
-    size_t produced = 0;
-    while (produced < buffer.size() && !this->db_rx_queue_.empty()) {
-        buffer[produced++] = this->db_rx_queue_.front();
-        this->db_rx_queue_.pop_front();
-    }
-    if (produced > 0) {
-        return produced;
-    }
-
-    std::array<uint8_t, 4> raw{};
-    size_t read = this->serial.read_serial(raw);
-    if (read == 0) {
-        return 0;
-    }
-
-    std::vector<uint8_t> filtered;
-    filtered.reserve(read);
-    size_t dropped = this->filter_tx_echo_(raw.data(), read, filtered);
-    if (dropped > 0) {
-        ESP_LOGD(TAG, "Echo drop: %zu of %zu bytes", dropped, read);
-    }
-    for (uint8_t byte : filtered) {
-        this->db_rx_queue_.push_back(byte);
-    }
-
-    while (produced < buffer.size() && !this->db_rx_queue_.empty()) {
-        buffer[produced++] = this->db_rx_queue_.front();
-        this->db_rx_queue_.pop_front();
-    }
-    return produced;
-}
-
-bool JuttaConnection::write_db_encoded_(const std::vector<uint8_t>& encoded) {
     for (uint8_t byte : encoded) {
         if (!this->serial.write_serial_byte(byte)) {
             ESP_LOGW(TAG, "Failed to write DB byte 0x%02X", static_cast<unsigned>(byte));
-            return false;
+            this->deactivate_tx_echo_suppressor_();
+            return;
         }
     }
     this->serial.flush();
-    return true;
 }
 
-bool JuttaConnection::read_one_db_frame_encoded_(std::vector<uint8_t>& encoded,
-                                                 const std::chrono::milliseconds& timeout) {
-    encoded.clear();
+bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t timeout_ms) {
+    decoded.clear();
+
+    constexpr uint32_t GAP_MS = 20;
+    enum class FrameEnd { None, Gap, Terminator, Timeout };
+
+    FrameEnd end_reason = FrameEnd::None;
     uint32_t start = esphome::millis();
-    std::array<uint8_t, 4> buffer{};
-    while (true) {
-        size_t read = this->read_db_stream_chunk(buffer);
-        if (read > 0) {
-            encoded.insert(encoded.end(), buffer.begin(), buffer.begin() + read);
-            if (encoded.size() >= DB_TRAILER_ENCODED.size()) {
-                if (std::equal(DB_TRAILER_ENCODED.begin(), DB_TRAILER_ENCODED.end(),
-                               encoded.end() - DB_TRAILER_ENCODED.size())) {
-                    encoded.resize(encoded.size() - DB_TRAILER_ENCODED.size());
-                    return true;
+    uint32_t last_activity = 0;
+    bool frame_started = false;
+    bool frame_complete = false;
+    uint8_t accumulator = 0;
+    int pair_count = 0;
+
+    auto decode_symbol = [&](uint8_t symbol) {
+        if ((symbol & 0xDBu) != 0xDBu) {
+            return;
+        }
+        accumulator >>= 2;
+        if ((symbol & 0x04u) != 0u) {
+            accumulator |= 0x40u;
+        }
+        if ((symbol & 0x20u) != 0u) {
+            accumulator |= 0x80u;
+        }
+        if (++pair_count == 4) {
+            decoded.push_back(accumulator);
+            pair_count = 0;
+            accumulator = 0;
+            if (decoded.size() >= 2) {
+                size_t n = decoded.size();
+                if (decoded[n - 2] == '\r' && decoded[n - 1] == '\n') {
+                    decoded.resize(n - 2);
+                    frame_complete = true;
+                    end_reason = FrameEnd::Terminator;
                 }
             }
+        }
+    };
+
+    auto process_queue = [&]() {
+        while (!this->db_rx_queue_.empty() && !frame_complete) {
+            uint8_t symbol = this->db_rx_queue_.front();
+            this->db_rx_queue_.pop_front();
+            decode_symbol(symbol);
+            frame_started = true;
+            last_activity = esphome::millis();
+        }
+    };
+
+    process_queue();
+    if (frame_complete) {
+        ESP_LOGD(TAG, "RX_DB decoded_len=%u reason=CRLF", static_cast<unsigned>(decoded.size()));
+        return true;
+    }
+    if (timeout_ms == 0 && !frame_started) {
+        return false;
+    }
+
+    while (!frame_complete) {
+        std::array<uint8_t, 4> raw{};
+        size_t read = this->serial.read_serial(raw);
+        if (read > 0) {
+            last_activity = esphome::millis();
+            std::vector<uint8_t> filtered;
+            filtered.reserve(read);
+            size_t dropped = this->filter_tx_echo_(raw.data(), read, filtered);
+            if (dropped > 0) {
+                ESP_LOGV(TAG, "Dropped %zu echo byte%s while reading DB frame.", dropped,
+                         dropped == 1 ? "" : "s");
+            }
+            for (uint8_t byte : filtered) {
+                this->db_rx_queue_.push_back(byte);
+            }
+            process_queue();
+            if (frame_complete) {
+                break;
+            }
+            frame_started = frame_started || !filtered.empty();
             continue;
         }
-        if (timeout.count() == 0) {
-            esphome::delay(1);
-            continue;
+
+        uint32_t now = esphome::millis();
+        if (frame_started && last_activity != 0 &&
+            static_cast<int32_t>(now - last_activity - GAP_MS) >= 0) {
+            end_reason = FrameEnd::Gap;
+            break;
         }
-        if (static_cast<int32_t>(esphome::millis() - start - timeout.count()) >= 0) {
+        if (timeout_ms != 0 && static_cast<int32_t>(now - start - timeout_ms) >= 0) {
+            end_reason = frame_started ? FrameEnd::Gap : FrameEnd::Timeout;
             break;
         }
         esphome::delay(1);
     }
-    return false;
-}
 
-bool JuttaConnection::unescape_db_frame_(const std::vector<uint8_t>& encoded, std::vector<uint8_t>& decoded) const {
-    decoded.clear();
-    decoded.reserve(encoded.size());
-    for (size_t i = 0; i < encoded.size();) {
-        uint8_t byte = encoded[i++];
-        if (byte == DB_ESCAPE) {
-            if (i >= encoded.size()) {
-                return false;
-            }
-            uint8_t escaped = encoded[i++];
-            decoded.push_back(static_cast<uint8_t>(escaped ^ DB_XOR_MASK));
-        } else {
-            decoded.push_back(byte);
+    if (decoded.empty()) {
+        if (end_reason == FrameEnd::Timeout) {
+            ESP_LOGW(TAG, "RX_DB timeout (no data)");
         }
+        return false;
     }
+
+    if (end_reason == FrameEnd::None) {
+        end_reason = FrameEnd::Gap;
+    }
+
+    const char* reason = nullptr;
+    switch (end_reason) {
+        case FrameEnd::Gap:
+            reason = "gap";
+            break;
+        case FrameEnd::Terminator:
+            reason = "CRLF";
+            break;
+        case FrameEnd::Timeout:
+            reason = "timeout";
+            break;
+        case FrameEnd::None:
+            reason = "unknown";
+            break;
+    }
+
+    ESP_LOGD(TAG, "RX_DB decoded_len=%u reason=%s", static_cast<unsigned>(decoded.size()), reason);
     return true;
 }
 

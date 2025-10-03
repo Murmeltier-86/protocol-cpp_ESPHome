@@ -19,11 +19,9 @@ CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
-CONF_JUTTA_XML_ENABLE = "jutta_xml_enable"
-CONF_JUTTA_XML_POLL_MS = "jutta_xml_poll_ms"
-CONF_JUTTA_XML_RX_TIMEOUT_MS = "jutta_xml_rx_timeout_ms"
-CONF_XML_PATH = "xml_path"
-CONF_XML_INLINE = "xml_inline"
+CONF_ENABLE_XML_POLL = "enable_xml_poll"
+CONF_XML_MAPPING_PATH = "xml_mapping_path"
+CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -96,13 +94,11 @@ CONFIG_SCHEMA = (
         {
             cv.GenerateID(): cv.declare_id(JuraComponent),
             cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(),
-            cv.Optional(CONF_JUTTA_XML_ENABLE, default=True): cv.boolean,
-            cv.Optional(CONF_JUTTA_XML_POLL_MS, default=30000): cv.All(
+            cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
+            cv.Optional(CONF_XML_MAPPING_PATH, default="/config/esphome/e6.xml"): cv.string,
+            cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=30000): cv.All(
                 cv.positive_int, cv.Range(min=25000)
             ),
-            cv.Optional(CONF_JUTTA_XML_RX_TIMEOUT_MS, default=1500): cv.positive_int,
-            cv.Optional(CONF_XML_PATH, default="/config/esphome/e6.xml"): cv.string,
-            cv.Optional(CONF_XML_INLINE, default=""): cv.string,
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
@@ -245,12 +241,9 @@ async def to_code(config):
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
 
-    cg.add(var.set_xml_enabled(config[CONF_JUTTA_XML_ENABLE]))
-    cg.add(var.set_xml_poll_interval(config[CONF_JUTTA_XML_POLL_MS]))
-    cg.add(var.set_xml_rx_timeout(config[CONF_JUTTA_XML_RX_TIMEOUT_MS]))
-    cg.add(var.set_xml_path(cg.std_string(config[CONF_XML_PATH])))
-    if CONF_XML_INLINE in config and config[CONF_XML_INLINE]:
-        cg.add(var.set_xml_inline(cg.std_string(config[CONF_XML_INLINE])))
+    cg.add(var.set_enable_xml_poll(config[CONF_ENABLE_XML_POLL]))
+    cg.add(var.set_xml_mapping_path(cg.std_string(config[CONF_XML_MAPPING_PATH])))
+    cg.add(var.set_xml_poll_interval(config[CONF_XML_POLL_INTERVAL_MS]))
 
     if CONF_MACHINE_DATA in config:
         sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
