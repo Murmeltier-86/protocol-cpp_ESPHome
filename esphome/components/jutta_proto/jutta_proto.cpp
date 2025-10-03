@@ -10,6 +10,9 @@
 
 #include "esphome/core/application.h"
 #include "esphome/core/time.h"
+#ifdef USE_FILESYSTEM
+#include "esphome/components/filesystem/filesystem.h"
+#endif
 
 namespace esphome {
 namespace jutta_component {
@@ -711,7 +714,11 @@ void JuraComponent::load_xml_mapping_() {
 
   bool commands_ok = true;
   std::string content;
-  auto *fs = App.get_filesystem();
+#if defined(USE_FILESYSTEM)
+  auto *fs = ::esphome::filesystem::global_filesystem;
+#else
+  auto *fs = nullptr;
+#endif
   if (fs == nullptr) {
     ESP_LOGW(TAG, "No filesystem available for XML mapping");
     commands_ok = false;
