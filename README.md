@@ -262,6 +262,19 @@ registriert und bleiben dauerhaft sichtbar.
    `TX_DB "@TR:32"`, `RX_DB decoded_len=21 expected=21` sowie `publish TR32=[…]`. Bei einem Timeout wird `RX_DB timeout`
    ausgegeben. Nur wenn alle drei Blöcke korrekt gelesen werden, werden neue Werte veröffentlicht.
 
+#### XML-Pfad konfigurieren
+
+* Standardpfad für das Mapping ist `/data/jura_machine.xml`.
+* Über die YAML-Option `xml_path` kann ein alternativer Speicherort angegeben werden:
+
+  ```yaml
+  jutta_proto:
+    id: jura1
+    xml_path: "/data/my_mapping/jura_map.xml"
+  ```
+
+* Die referenzierte Datei muss vorab mit `uploadfs` oder über das ESPHome Dashboard auf das Gerät kopiert werden.
+
 #### Fehlersuche
 
 * **Sensoren tauchen nicht auf:** Prüfe, ob das Feature aktiviert ist und ob beim Start Meldungen zur Sensorregistrierung

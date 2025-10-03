@@ -22,7 +22,6 @@ constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
 constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
 const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
-constexpr const char *XML_MAPPING_PATH = "/data/jura_machine.xml";
 constexpr size_t XML_TR32_COUNT = 10;
 constexpr size_t XML_TG43_COUNT = 6;
 constexpr size_t XML_TGC0_COUNT = 3;
@@ -358,6 +357,7 @@ void JuraComponent::dump_config() {
   }
 
   ESP_LOGCONFIG(TAG, "  XML polling: %s", this->xml_enabled_ ? "enabled" : "disabled");
+  ESP_LOGCONFIG(TAG, "  XML mapping path: %s", this->xml_path_.c_str());
   if (this->xml_enabled_) {
     ESP_LOGCONFIG(TAG, "  XML poll interval: %u ms", static_cast<unsigned>(this->xml_poll_interval_ms_));
     ESP_LOGCONFIG(TAG, "  XML RX timeout: %u ms", static_cast<unsigned>(this->xml_rx_timeout_ms_));
@@ -711,43 +711,53 @@ void JuraComponent::load_xml_mapping_() {
 
   bool commands_ok = true;
   std::string content;
-  FILE *file = fopen(XML_MAPPING_PATH, "rb");
-  if (file == nullptr) {
-    ESP_LOGW(TAG, "Failed to open XML mapping at %s", XML_MAPPING_PATH);
+  auto *fs = App.get_filesystem();
+  if (fs == nullptr) {
+    ESP_LOGW(TAG, "No filesystem available for XML mapping");
     commands_ok = false;
   } else {
-    char buffer[256];
-    while (true) {
-      size_t read = fread(buffer, 1, sizeof(buffer), file);
-      if (read == 0) {
-        break;
+    auto file = fs->open(this->xml_path_.c_str(), "r");
+    if (!file) {
+      ESP_LOGW(TAG, "Failed to open XML mapping at %s", this->xml_path_.c_str());
+      commands_ok = false;
+    } else {
+      char buffer[256];
+      while (true) {
+        size_t read = file.readBytes(buffer, sizeof(buffer));
+        if (read == 0) {
+          break;
+        }
+        content.append(buffer, read);
+        if (read < sizeof(buffer) && !file.available()) {
+          break;
+        }
       }
-      content.append(buffer, read);
+      file.close();
+
+      auto parse_block = [&](const char *anchor_token, std::string &command, auto &labels) {
+        size_t anchor_pos = content.find(anchor_token);
+        if (anchor_pos == std::string::npos) {
+          commands_ok = false;
+          return;
+        }
+        std::string parsed_command;
+        if (extract_command(content, anchor_pos, parsed_command)) {
+          command = parsed_command;
+        } else {
+          commands_ok = false;
+        }
+        extract_labels(content, anchor_pos, labels);
+      };
+
+      parse_block("TR32", this->xml_mapping_.tr32_command, this->xml_mapping_.tr32_labels);
+      parse_block("TG43", this->xml_mapping_.tg43_command, this->xml_mapping_.tg43_labels);
+      parse_block("TGC0", this->xml_mapping_.tgc0_command, this->xml_mapping_.tgc0_labels);
     }
-    fclose(file);
-
-    auto parse_block = [&](const char *anchor_token, std::string &command, auto &labels) {
-      size_t anchor_pos = content.find(anchor_token);
-      if (anchor_pos == std::string::npos) {
-        commands_ok = false;
-        return;
-      }
-      std::string parsed_command;
-      if (extract_command(content, anchor_pos, parsed_command)) {
-        command = parsed_command;
-      } else {
-        commands_ok = false;
-      }
-      extract_labels(content, anchor_pos, labels);
-    };
-
-    parse_block("TR32", this->xml_mapping_.tr32_command, this->xml_mapping_.tr32_labels);
-    parse_block("TG43", this->xml_mapping_.tg43_command, this->xml_mapping_.tg43_labels);
-    parse_block("TGC0", this->xml_mapping_.tgc0_command, this->xml_mapping_.tgc0_labels);
   }
 
   this->xml_mapping_.valid = commands_ok;
   if (!this->xml_mapping_logged_) {
+    ESP_LOGI(TAG, "XML mapping path = %s", this->xml_path_.c_str());
     size_t tr32_labels = count_non_empty(this->xml_mapping_.tr32_labels);
     size_t tg43_labels = count_non_empty(this->xml_mapping_.tg43_labels);
     size_t tgc0_labels = count_non_empty(this->xml_mapping_.tgc0_labels);
