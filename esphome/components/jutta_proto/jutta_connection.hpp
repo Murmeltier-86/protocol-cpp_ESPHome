@@ -136,6 +136,12 @@ class JuttaConnection {
     void drain_db_stream(const std::chrono::milliseconds& duration);
 
     /**
+     * Reads raw encoded DB bytes from the UART stream into the provided buffer.
+     * Returns the number of bytes that were read.
+     */
+    size_t read_db_stream_chunk(std::array<uint8_t, 4>& buffer);
+
+    /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
      * [Thread Safe]
      **/

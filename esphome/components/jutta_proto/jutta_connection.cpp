@@ -558,6 +558,10 @@ void JuttaConnection::drain_db_stream(const std::chrono::milliseconds& duration)
     }
 }
 
+size_t JuttaConnection::read_db_stream_chunk(std::array<uint8_t, 4>& buffer) {
+    return this->serial.read_serial(buffer);
+}
+
 bool JuttaConnection::write_db_encoded_(const std::vector<uint8_t>& encoded) {
     for (uint8_t byte : encoded) {
         if (!this->serial.write_serial_byte(byte)) {

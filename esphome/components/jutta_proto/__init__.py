@@ -23,6 +23,7 @@ CONF_JUTTA_XML_ENABLE = "jutta_xml_enable"
 CONF_JUTTA_XML_POLL_MS = "jutta_xml_poll_ms"
 CONF_JUTTA_XML_RX_TIMEOUT_MS = "jutta_xml_rx_timeout_ms"
 CONF_XML_PATH = "xml_path"
+CONF_XML_INLINE = "xml_inline"
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -100,7 +101,8 @@ CONFIG_SCHEMA = (
                 cv.positive_int, cv.Range(min=25000)
             ),
             cv.Optional(CONF_JUTTA_XML_RX_TIMEOUT_MS, default=1500): cv.positive_int,
-            cv.Optional(CONF_XML_PATH): cv.string,
+            cv.Optional(CONF_XML_PATH, default="/config/esphome/e6.xml"): cv.string,
+            cv.Optional(CONF_XML_INLINE, default=""): cv.string,
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
@@ -246,8 +248,9 @@ async def to_code(config):
     cg.add(var.set_xml_enabled(config[CONF_JUTTA_XML_ENABLE]))
     cg.add(var.set_xml_poll_interval(config[CONF_JUTTA_XML_POLL_MS]))
     cg.add(var.set_xml_rx_timeout(config[CONF_JUTTA_XML_RX_TIMEOUT_MS]))
-    if CONF_XML_PATH in config:
-        cg.add(var.set_xml_path(config[CONF_XML_PATH]))
+    cg.add(var.set_xml_path(cg.std_string(config[CONF_XML_PATH])))
+    if CONF_XML_INLINE in config and config[CONF_XML_INLINE]:
+        cg.add(var.set_xml_inline(cg.std_string(config[CONF_XML_INLINE])))
 
     if CONF_MACHINE_DATA in config:
         sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
