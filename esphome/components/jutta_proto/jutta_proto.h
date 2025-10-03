@@ -96,6 +96,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_machine_data_sensor(text_sensor::TextSensor *sensor) { this->machine_data_sensor_ = sensor; }
   void set_enable_xml_poll(bool enabled) { this->enable_xml_poll_ = enabled; }
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
+  void set_xml_mapping_blob(const std::string &blob) {
+    this->xml_mapping_blob_ = blob;
+    this->xml_mapping_has_blob_ = true;
+  }
   void set_xml_poll_interval(uint32_t interval_ms) { this->xml_poll_interval_ms_ = interval_ms; }
 
  protected:
@@ -142,7 +146,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
 
   bool enable_xml_poll_{false};
   uint32_t xml_poll_interval_ms_{30000};
-  std::string xml_mapping_path_{"/config/esphome/e6.xml"};
+  std::string xml_mapping_path_{"/data/jura_machine.xml"};
+  std::string xml_mapping_blob_{};
+  bool xml_mapping_has_blob_{false};
   uint32_t xml_next_poll_{0};
   bool xml_mapping_logged_{false};
   bool xml_mapping_loaded_{false};
