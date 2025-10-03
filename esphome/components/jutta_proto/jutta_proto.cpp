@@ -28,6 +28,34 @@ constexpr size_t XML_TG43_COUNT = 6;
 constexpr size_t XML_TGC0_COUNT = 3;
 constexpr uint32_t XML_RX_DRAIN_MS = 40;
 
+template<typename AppT>
+auto try_register_sensor(AppT &app, sensor::Sensor *sensor, int)
+    -> decltype(app.register_sensor(sensor), void()) {
+  app.register_sensor(sensor);
+}
+
+template<typename AppT>
+auto try_register_sensor(AppT &app, sensor::Sensor *sensor, long)
+    -> decltype(app.register_entity(sensor), void()) {
+  app.register_entity(sensor);
+}
+
+template<typename AppT>
+void try_register_sensor(AppT &, sensor::Sensor *, ...) {}
+
+inline void register_sensor_with_app(sensor::Sensor *sensor) {
+  try_register_sensor(App, sensor, 0);
+}
+
+template<typename SensorT>
+auto try_set_parent(SensorT *sensor, Component *parent, int)
+    -> decltype(sensor->set_parent(parent), void()) {
+  sensor->set_parent(parent);
+}
+
+template<typename SensorT>
+void try_set_parent(SensorT *, Component *, ...) {}
+
 template <size_t N>
 void fill_default_labels(const char *prefix, std::array<std::string, N> &labels) {
   for (size_t i = 0; i < N; ++i) {
@@ -588,7 +616,8 @@ void JuraComponent::ensure_xml_sensors_created_() {
       if (sensor_ptr == nullptr) {
         auto sensor_obj = std::make_unique<sensor::Sensor>();
         sensor_obj->set_accuracy_decimals(0);
-        App.register_sensor(sensor_obj.get());
+        try_set_parent(sensor_obj.get(), this, 0);
+        register_sensor_with_app(sensor_obj.get());
         sensor_ptr = std::move(sensor_obj);
       }
     }
