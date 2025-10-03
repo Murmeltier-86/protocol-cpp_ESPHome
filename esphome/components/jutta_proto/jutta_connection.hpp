@@ -4,6 +4,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <deque>
 
@@ -122,6 +123,13 @@ class JuttaConnection {
      * Returns true on success.
      */
     bool read_db_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout);
+
+    /**
+     * Reads DB framed responses while skipping optional ASCII echo frames that exactly match the
+     * provided command. The decoded payload of the first non-echo frame is stored in "decoded".
+     */
+    bool read_db_data_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout,
+                            std::string_view last_cmd_ascii);
 
     /**
      * Drains incoming DB stream bytes for the specified duration.
@@ -305,7 +313,9 @@ class JuttaConnection {
     void reinject_decoded_front(const std::string& data) const;
 
     bool write_db_encoded_(const std::vector<uint8_t>& encoded);
-    bool read_db_frame_encoded_(std::vector<uint8_t>& encoded, const std::chrono::milliseconds& timeout);
+    bool read_one_db_frame_with_trailer_(std::vector<uint8_t>& encoded,
+                                         const std::chrono::milliseconds& timeout);
+    bool unescape_db_frame_(const std::vector<uint8_t>& encoded, std::vector<uint8_t>& decoded) const;
 
 };
 //---------------------------------------------------------------------------

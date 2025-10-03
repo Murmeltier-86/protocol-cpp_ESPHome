@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include "esphome/core/log.h"
 #include "esphome/core/time.h"
 
@@ -509,28 +510,58 @@ bool JuttaConnection::write_db_command(const std::string& command) {
 bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout) {
     decoded.clear();
     std::vector<uint8_t> encoded;
-    if (!this->read_db_frame_encoded_(encoded, timeout)) {
+    if (!this->read_one_db_frame_with_trailer_(encoded, timeout)) {
         return false;
     }
-    if (encoded.size() < DB_TRAILER_ENCODED.size()) {
-        return false;
-    }
-    encoded.resize(encoded.size() - DB_TRAILER_ENCODED.size());
+    return this->unescape_db_frame_(encoded, decoded);
+}
+
+bool JuttaConnection::read_db_data_frame(std::vector<uint8_t>& decoded, const std::chrono::milliseconds& timeout,
+                                         std::string_view last_cmd_ascii) {
     decoded.clear();
-    decoded.reserve(encoded.size());
-    for (size_t i = 0; i < encoded.size();) {
-        uint8_t byte = encoded[i++];
-        if (byte == DB_ESCAPE) {
-            if (i >= encoded.size()) {
+    const uint32_t start = esphome::millis();
+    while (true) {
+        std::chrono::milliseconds remaining = timeout;
+        if (timeout.count() > 0) {
+            uint32_t elapsed = esphome::millis() - start;
+            if (static_cast<int32_t>(elapsed - static_cast<uint32_t>(timeout.count())) >= 0) {
                 return false;
             }
-            uint8_t escaped = encoded[i++];
-            decoded.push_back(static_cast<uint8_t>(escaped ^ DB_XOR_MASK));
-        } else {
-            decoded.push_back(byte);
+            uint32_t timeout_ms = static_cast<uint32_t>(timeout.count());
+            if (elapsed < timeout_ms) {
+                remaining = std::chrono::milliseconds{timeout_ms - elapsed};
+            } else {
+                remaining = std::chrono::milliseconds{0};
+            }
         }
+
+        std::vector<uint8_t> candidate;
+        if (!this->read_db_frame(candidate, remaining)) {
+            return false;
+        }
+
+        bool is_echo = false;
+        if (!last_cmd_ascii.empty() && !candidate.empty()) {
+            is_echo = std::all_of(candidate.begin(), candidate.end(), [](uint8_t b) {
+                return b >= 0x20 && b <= 0x7E;
+            });
+            if (is_echo) {
+                std::string_view view(reinterpret_cast<const char*>(candidate.data()), candidate.size());
+                if (view != last_cmd_ascii) {
+                    is_echo = false;
+                }
+            }
+        }
+
+        if (is_echo) {
+            ESP_LOGD("jutta_proto", "RX_DB echo ignored: \"%.*s\"", static_cast<int>(candidate.size()),
+                     reinterpret_cast<const char*>(candidate.data()));
+            continue;
+        }
+
+        decoded.swap(candidate);
+        return true;
     }
-    return true;
 }
 
 void JuttaConnection::drain_db_stream(const std::chrono::milliseconds& duration) {
@@ -561,8 +592,8 @@ bool JuttaConnection::write_db_encoded_(const std::vector<uint8_t>& encoded) {
     return true;
 }
 
-bool JuttaConnection::read_db_frame_encoded_(std::vector<uint8_t>& encoded,
-                                             const std::chrono::milliseconds& timeout) {
+bool JuttaConnection::read_one_db_frame_with_trailer_(std::vector<uint8_t>& encoded,
+                                                      const std::chrono::milliseconds& timeout) {
     encoded.clear();
     uint32_t start = esphome::millis();
     std::array<uint8_t, 4> buffer{};
@@ -573,6 +604,7 @@ bool JuttaConnection::read_db_frame_encoded_(std::vector<uint8_t>& encoded,
             if (encoded.size() >= DB_TRAILER_ENCODED.size()) {
                 if (std::equal(DB_TRAILER_ENCODED.begin(), DB_TRAILER_ENCODED.end(),
                                encoded.end() - DB_TRAILER_ENCODED.size())) {
+                    encoded.resize(encoded.size() - DB_TRAILER_ENCODED.size());
                     return true;
                 }
             }
@@ -588,6 +620,25 @@ bool JuttaConnection::read_db_frame_encoded_(std::vector<uint8_t>& encoded,
         esphome::delay(5);
     }
     return false;
+}
+
+bool JuttaConnection::unescape_db_frame_(const std::vector<uint8_t>& encoded, std::vector<uint8_t>& decoded) const {
+    decoded.clear();
+    decoded.reserve(encoded.size());
+    for (size_t i = 0; i < encoded.size(); ++i) {
+        uint8_t byte = encoded[i];
+        if (byte == DB_ESCAPE) {
+            ++i;
+            if (i >= encoded.size()) {
+                return false;
+            }
+            uint8_t escaped = encoded[i];
+            decoded.push_back(static_cast<uint8_t>(escaped ^ DB_XOR_MASK));
+        } else {
+            decoded.push_back(byte);
+        }
+    }
+    return true;
 }
 
 
