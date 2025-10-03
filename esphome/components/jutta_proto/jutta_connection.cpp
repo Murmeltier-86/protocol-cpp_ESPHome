@@ -19,6 +19,7 @@ static const char* TAG = "jutta_connection";
 
 namespace {
 constexpr uint32_t JUTTA_SERIAL_GAP_MS = 8;
+constexpr uint32_t JUTTA_TX_ECHO_WINDOW_MS = 200;
 constexpr uint8_t JUTTA_ENCODE_BASE = 0xFF;
 constexpr uint8_t JUTTA_BIT0_MASK = static_cast<uint8_t>(1u << 2);
 constexpr uint8_t JUTTA_BIT1_MASK = static_cast<uint8_t>(1u << 5);
@@ -667,7 +668,7 @@ bool JuttaConnection::unescape_db_frame_(const std::vector<uint8_t>& encoded, st
 void JuttaConnection::activate_tx_echo_suppressor_(const std::vector<uint8_t>& frame) {
     this->last_tx_frame_ = frame;
     this->last_tx_echo_progress_ = 0;
-    this->last_tx_deadline_ = esphome::millis() + 20;
+    this->last_tx_deadline_ = esphome::millis() + JUTTA_TX_ECHO_WINDOW_MS;
     this->last_tx_echo_active_ = true;
 }
 
@@ -708,6 +709,7 @@ size_t JuttaConnection::filter_tx_echo_(const uint8_t* data, size_t length, std:
             if (data[index] == expected) {
                 ++dropped;
                 ++this->last_tx_echo_progress_;
+                this->last_tx_deadline_ = esphome::millis() + JUTTA_TX_ECHO_WINDOW_MS;
                 ++index;
                 if (this->last_tx_echo_progress_ >= this->last_tx_frame_.size()) {
                     this->deactivate_tx_echo_suppressor_();
