@@ -30,6 +30,7 @@ class Sensor {
   virtual void publish_state(float) {}
   virtual void set_accuracy_decimals(int) {}
   virtual void set_name(const std::string &) {}
+  virtual void set_internal(bool) {}
 };
 
 }  // namespace sensor
@@ -65,6 +66,7 @@ class TextSensor {
 #include "esphome/components/uart/uart.h"
 
 #include "coffee_maker.hpp"
+#include "jutta_config.h"
 #include "jutta_connection.hpp"
 #include "jutta_commands.hpp"
 
@@ -73,6 +75,7 @@ namespace jutta_component {
 
 class JuraComponent : public esphome::Component, public esphome::uart::UARTDevice {
  public:
+  ~JuraComponent() override;
   void setup() override;
   void loop() override;
   void dump_config() override;
@@ -88,7 +91,14 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const std::string &device_type() const { return this->device_type_; }
 
   void set_machine_data_sensor(text_sensor::TextSensor *sensor) { this->machine_data_sensor_ = sensor; }
-  void set_xml_enabled(bool enabled) { this->xml_enabled_ = enabled; }
+  void set_xml_enabled(bool enabled) {
+#if JUTTA_XML_ENABLE
+    this->xml_enabled_ = enabled;
+#else
+    (void) enabled;
+    this->xml_enabled_ = false;
+#endif
+  }
   void set_xml_poll_interval(uint32_t interval_ms) { this->xml_poll_interval_ms_ = interval_ms; }
   void set_xml_rx_timeout(uint32_t timeout_ms) { this->xml_rx_timeout_ms_ = timeout_ms; }
 
@@ -144,19 +154,20 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   };
 
   XmlMapping xml_mapping_{};
-  bool xml_enabled_{false};
-  uint32_t xml_poll_interval_ms_{30000};
-  uint32_t xml_rx_timeout_ms_{900};
+  bool xml_enabled_{JUTTA_XML_ENABLE != 0};
+  uint32_t xml_poll_interval_ms_{JUTTA_XML_POLL_MS};
+  uint32_t xml_rx_timeout_ms_{JUTTA_XML_RX_TIMEOUT_MS};
   uint32_t xml_next_poll_{0};
   bool xml_initialized_{false};
   bool xml_mapping_logged_{false};
-  std::array<std::unique_ptr<sensor::Sensor>, 10> xml_tr32_sensors_{};
-  std::array<std::unique_ptr<sensor::Sensor>, 6> xml_tg43_sensors_{};
-  std::array<std::unique_ptr<sensor::Sensor>, 3> xml_tgc0_sensors_{};
+  std::array<sensor::Sensor *, 10> xml_tr32_sensors_{};
+  std::array<sensor::Sensor *, 6> xml_tg43_sensors_{};
+  std::array<sensor::Sensor *, 3> xml_tgc0_sensors_{};
   std::array<uint16_t, 10> xml_tr32_values_{};
   std::array<uint16_t, 6> xml_tg43_values_{};
   std::array<uint32_t, 3> xml_tgc0_values_{};
   bool xml_has_values_{false};
+  bool xml_busy_{false};
 };
 
 class StartBrewAction : public esphome::Action<> {
