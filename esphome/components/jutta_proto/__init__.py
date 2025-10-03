@@ -22,6 +22,7 @@ CONF_MACHINE_DATA = "machine_data"
 CONF_ENABLE_XML_POLL = "enable_xml_poll"
 CONF_XML_MAPPING_PATH = "xml_mapping_path"
 CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
+CONF_XML_MAPPING_INLINE = "xml_mapping"
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -95,7 +96,8 @@ CONFIG_SCHEMA = (
             cv.GenerateID(): cv.declare_id(JuraComponent),
             cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
-            cv.Optional(CONF_XML_MAPPING_PATH, default="/config/esphome/e6.xml"): cv.string,
+            cv.Optional(CONF_XML_MAPPING_PATH, default="/data/jura_machine.xml"): cv.string,
+            cv.Optional(CONF_XML_MAPPING_INLINE): cv.string,
             cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=30000): cv.All(
                 cv.positive_int, cv.Range(min=25000)
             ),
@@ -243,6 +245,8 @@ async def to_code(config):
 
     cg.add(var.set_enable_xml_poll(config[CONF_ENABLE_XML_POLL]))
     cg.add(var.set_xml_mapping_path(cg.std_string(config[CONF_XML_MAPPING_PATH])))
+    if CONF_XML_MAPPING_INLINE in config:
+        cg.add(var.set_xml_mapping_blob(cg.std_string(config[CONF_XML_MAPPING_INLINE])))
     cg.add(var.set_xml_poll_interval(config[CONF_XML_POLL_INTERVAL_MS]))
 
     if CONF_MACHINE_DATA in config:

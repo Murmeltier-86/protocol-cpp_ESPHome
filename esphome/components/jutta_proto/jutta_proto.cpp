@@ -591,7 +591,13 @@ bool JuraComponent::ensure_xml_mapping_loaded_() {
     return this->xml_mapping_.valid;
   }
   XmlMapping mapping;
-  if (!load_xml_mapping(this->xml_mapping_path_, mapping)) {
+  bool loaded = false;
+  if (this->xml_mapping_has_blob_) {
+    loaded = load_xml_mapping_from_content(this->xml_mapping_path_, this->xml_mapping_blob_, mapping);
+  } else {
+    loaded = load_xml_mapping(this->xml_mapping_path_, mapping);
+  }
+  if (!loaded) {
     ESP_LOGW(TAG, "Failed to load XML mapping at %s", this->xml_mapping_path_.c_str());
     this->xml_mapping_loaded_ = false;
     this->xml_mapping_.valid = false;
@@ -612,8 +618,10 @@ void JuraComponent::log_xml_mapping_status_() {
   if (this->xml_mapping_logged_) {
     return;
   }
-  ESP_LOGI(TAG, "XML mapping loaded from %s (valid=%d, fields=%u/%u/%u)",
-           this->xml_mapping_path_.c_str(), static_cast<int>(this->xml_mapping_.valid),
+  const std::string &source = this->xml_mapping_.source_path.empty() ? this->xml_mapping_path_
+                                                                     : this->xml_mapping_.source_path;
+  ESP_LOGI(TAG, "XML mapping loaded from %s (valid=%d, fields=%u/%u/%u)", source.c_str(),
+           static_cast<int>(this->xml_mapping_.valid),
            static_cast<unsigned>(this->xml_mapping_.tr32_fields.fields.size()),
            static_cast<unsigned>(this->xml_mapping_.tg43_fields.fields.size()),
            static_cast<unsigned>(this->xml_mapping_.tgc0_fields.fields.size()));
