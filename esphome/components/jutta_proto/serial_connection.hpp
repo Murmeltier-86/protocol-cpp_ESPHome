@@ -60,6 +60,8 @@ class SerialConnection : public esphome::uart::UARTDevice {
     [[nodiscard]] bool write_serial_byte(uint8_t byte) const;
     void flush() const;
 
+    esphome::uart::UARTComponent* get_parent() const;
+
     /**
      * Returns all available serial port paths for this device.
      **/
