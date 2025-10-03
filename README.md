@@ -18,7 +18,7 @@ Since newer models **do not use** this old V1-Protocol any more I started this p
 ### Aktivierung des XML-Pollings
 
 - `enable_xml_poll`: Schaltet den zusätzlichen XML-Pfad frei (Standard `false`).
-- `xml_mapping_path`: Dateipfad zum J.O.E.-Mapping (Standard `"/config/esphome/e6.xml"`).
+- `xml_mapping_path`: Dateipfad zum J.O.E.-Mapping (Standard `"/data/jura_machine.xml"`).
 - `xml_poll_interval_ms`: Abstand zwischen zwei Abfragen in Millisekunden (Standard `30000`).
 
 Beispiel-Konfiguration in ESPHome:
@@ -32,14 +32,15 @@ jutta_proto:
   id: jura_e6
   uart_id: uart_bus
   enable_xml_poll: true
-  xml_mapping_path: "/config/esphome/e6.xml"
+  xml_mapping: !include jura_machine.xml
+  xml_mapping_path: "/data/jura_machine.xml"
   xml_poll_interval_ms: 30000
 ```
 
 ### Mapping-Datei
 
 - Das Mapping folgt der Struktur der veröffentlichten `jura_joe_xml_bundle_final`-Dateien.
-- Bei erfolgreichem Laden erscheint im Log eine Zeile wie `XML mapping loaded from /config/esphome/e6.xml (valid=1, fields=...)`.
+- Bei erfolgreichem Laden erscheint im Log eine Zeile wie `XML mapping loaded from /data/jura_machine.xml (valid=1, fields=...)`.
 - Ist die Datei nicht vorhanden oder fehlerhaft, läuft die Komponente weiter – lediglich das XML-Polling bleibt inaktiv.
 
 ### Automatisch erzeugte Sensoren
@@ -297,8 +298,9 @@ registriert und bleiben dauerhaft sichtbar.
 1. **Feature aktivieren:** Die Standardwerte werden über `esphome/components/jutta_proto/jutta_config.h` gesteuert. Dort
    können `JUTTA_XML_ENABLE`, `JUTTA_XML_POLL_MS` und `JUTTA_XML_RX_TIMEOUT_MS` bei Bedarf angepasst werden. Voreinstellung ist
    `JUTTA_XML_ENABLE 1`, sodass der XML-Pfad ohne weitere Änderungen aktiv ist.
-2. **XML-Mapping bereitstellen:** Exportiere in der J.O.E.-App die Maschinen-XML und kopiere die Datei als
-   `/data/jura_machine.xml` auf das ESPHome-Gerät. Falls die Datei fehlt oder unvollständig ist, werden Standardbefehle und
+2. **XML-Mapping bereitstellen:** Exportiere in der J.O.E.-App die Maschinen-XML und binde die Datei über die YAML-Option
+   `xml_mapping: !include <pfad-zur-xml>` ein. Die Firmware übernimmt die Daten beim Flashen automatisch und stellt sie zur
+   Laufzeit unter dem logischen Pfad `/data/jura_machine.xml` bereit. Falls die Datei fehlt oder unvollständig ist, werden Standardbefehle und
    generische Labels verwendet.
 3. **Zyklische Abfrage beobachten:** Nach erfolgreichem Legacy-Handshake erscheinen im Log Einträge wie `XML poll start`,
    `TX_DB "@TR:32"`, `RX_DB decoded_len=21 expected=21` sowie `publish TR32=[…]`. Bei einem Timeout wird `RX_DB timeout`
@@ -307,15 +309,16 @@ registriert und bleiben dauerhaft sichtbar.
 #### XML-Pfad konfigurieren
 
 * Standardpfad für das Mapping ist `/data/jura_machine.xml`.
-* Über die YAML-Option `xml_path` kann ein alternativer Speicherort angegeben werden:
+* Über die YAML-Option `xml_mapping_path` kann ein alternativer Gerätepfad angegeben werden:
 
   ```yaml
   jutta_proto:
     id: jura1
-    xml_path: "/data/my_mapping/jura_map.xml"
+    xml_mapping_path: "/data/my_mapping/jura_map.xml"
   ```
 
-* Die referenzierte Datei muss vorab mit `uploadfs` oder über das ESPHome Dashboard auf das Gerät kopiert werden.
+* Die referenzierte Datei wird automatisch über `xml_mapping: !include ...` in die Firmware eingebettet; ein separates
+  Hochladen ist nicht erforderlich.
 
 #### Fehlersuche
 
