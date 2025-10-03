@@ -1206,6 +1206,7 @@ void JuraComponent::setup() {
   }
 
   this->handshake_stage_ = HandshakeStage::HELLO;
+  this->handshake_retry_at_ = 0;
   ESP_LOGI(TAG, "Starting handshake with coffee maker...");
 }
 
@@ -1221,6 +1222,10 @@ void JuraComponent::loop() {
 
   if (this->connection_ != nullptr && this->handshake_stage_ != HandshakeStage::DONE &&
       this->handshake_stage_ != HandshakeStage::FAILED) {
+    if (this->handshake_stage_ == HandshakeStage::HELLO && this->handshake_retry_at_ != 0 &&
+        !JuraComponent::time_reached(esphome::millis(), this->handshake_retry_at_)) {
+      return;
+    }
     this->process_handshake();
   }
 
@@ -1310,6 +1315,7 @@ void JuraComponent::process_handshake() {
         ESP_LOGI(TAG, "Detected coffee maker response: %s", this->device_type_.c_str());
       }
 
+      this->handshake_retry_at_ = 0;
       if (!this->connection_->prime_initial_db()) {
         ESP_LOGW(TAG, "HELLO: initial DB warm-up failed");
       }
@@ -1406,6 +1412,7 @@ void JuraComponent::process_handshake() {
         this->handshake_stage_ = HandshakeStage::DONE;
         this->handshake_buffer_.clear();
         this->handshake_deadline_ = 0;
+        this->handshake_retry_at_ = 0;
       } else {
         this->restart_handshake("failed to send @t3");
       }
@@ -1433,6 +1440,9 @@ void JuraComponent::restart_handshake(const char *reason) {
   this->handshake_hello_request_sent_ = false;
   this->handshake_stage_ = HandshakeStage::HELLO;
   this->last_logged_stage_ = HandshakeStage::FAILED;
+  constexpr uint32_t HANDSHAKE_RETRY_DELAY_MS = 1000;
+  this->handshake_retry_at_ = esphome::millis() + HANDSHAKE_RETRY_DELAY_MS;
+  ESP_LOGI(TAG, "Scheduling handshake retry in %u ms", HANDSHAKE_RETRY_DELAY_MS);
   if (this->connection_ != nullptr) {
     this->connection_->reset_response_line_buffer();
   }
