@@ -220,6 +220,8 @@ class JuttaConnection {
     [[nodiscard]] bool read_decoded_unsafe(std::vector<uint8_t>& data) const;
 
     void flush_serial_input() const;
+    void flush_db_rx_queue();
+    void flush_all_rx();
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
