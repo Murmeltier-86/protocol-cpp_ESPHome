@@ -233,6 +233,18 @@ void JuraComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  Detected device: (pending)");
   }
 
+  if (this->enable_xml_poll_) {
+    // Stelle sicher, dass der aktuelle Status des XML-Mappings bereits zur
+    // Konfigurationsausgabe geladen und protokolliert wurde. Andernfalls sieht
+    // es so aus, als wäre kein Mapping verfügbar, obwohl es kurz darauf in
+    // setup() geladen wird.
+    if (!this->xml_mapping_loaded_) {
+      this->ensure_xml_mapping_loaded_();
+    }
+    this->log_xml_mapping_status_();
+    this->ensure_xml_sensors_created_();
+  }
+
   const char *state = "unknown";
   switch (this->handshake_stage_) {
     case HandshakeStage::IDLE:
