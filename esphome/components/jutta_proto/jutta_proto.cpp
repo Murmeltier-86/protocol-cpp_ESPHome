@@ -24,6 +24,7 @@ constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
 const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
 constexpr uint32_t XML_RESPONSE_TIMEOUT_MS = 1400;
 constexpr uint32_t XML_INTER_COMMAND_DELAY_MS = 180;
+constexpr size_t XML_COMMAND_COUNT = 3;
 
 template<typename AppT>
 auto try_register_sensor(AppT &app, sensor::Sensor *sensor, long)
@@ -233,6 +234,13 @@ void JuraComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  Detected device: (pending)");
   }
 
+  if (this->enable_xml_poll_) {
+    // Stelle sicher, dass der aktuelle Status des XML-Mappings bereits zur
+    // Konfigurationsausgabe geladen und die Sensoren angelegt wurden.
+    this->ensure_xml_mapping_loaded_();
+    this->ensure_xml_sensors_created_();
+  }
+
   const char *state = "unknown";
   switch (this->handshake_stage_) {
     case HandshakeStage::IDLE:
@@ -281,8 +289,20 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML polling: %s", this->enable_xml_poll_ ? "enabled" : "disabled");
   ESP_LOGCONFIG(TAG, "  XML mapping Quelle: %s", this->xml_mapping_path_.c_str());
   ESP_LOGCONFIG(TAG, "  XML poll interval: %u ms", static_cast<unsigned>(this->xml_poll_interval_ms_));
-  ESP_LOGCONFIG(TAG, "  XML mapping loaded: %s",
-                YESNO(this->xml_mapping_loaded_ && this->xml_mapping_.valid));
+  if (this->enable_xml_poll_) {
+    this->log_xml_mapping_status_(true);
+    ESP_LOGCONFIG(TAG, "  XML mapping loaded: %s", YESNO(this->xml_mapping_loaded_));
+    ESP_LOGCONFIG(TAG, "  XML mapping valid: %s", YESNO(this->xml_mapping_.valid));
+    ESP_LOGCONFIG(TAG, "  XML mapping commands: TR32=%s (%u Felder), TG43=%s (%u Felder), TGC0=%s (%u Felder)",
+                  YESNO(!this->xml_mapping_.tr32.empty()),
+                  static_cast<unsigned>(this->xml_mapping_.tr32.fields.size()),
+                  YESNO(!this->xml_mapping_.tg43.empty()),
+                  static_cast<unsigned>(this->xml_mapping_.tg43.fields.size()),
+                  YESNO(!this->xml_mapping_.tgc0.empty()),
+                  static_cast<unsigned>(this->xml_mapping_.tgc0.fields.size()));
+  } else {
+    ESP_LOGCONFIG(TAG, "  XML mapping loaded: %s", YESNO(false));
+  }
   ESP_LOGCONFIG(TAG, "  XML sensors: %u", static_cast<unsigned>(this->xml_sensors_.size()));
 }
 
@@ -569,10 +589,13 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
 }
 
 void JuraComponent::ensure_xml_sensors_created_() {
-  if (!this->enable_xml_poll_ || !this->xml_mapping_.valid) {
+  if (!this->enable_xml_poll_) {
     return;
   }
   auto ensure_block = [&](const XmlCommandMapping &mapping) {
+    if (mapping.empty()) {
+      return;
+    }
     for (const auto &field : mapping.fields) {
       this->get_or_create_sensor_(field.name, field.label);
     }
@@ -594,7 +617,7 @@ bool JuraComponent::ensure_xml_mapping_loaded_() {
     ESP_LOGW(TAG, "Kein XML-Mapping verfügbar (Quelle: %s)",
              this->xml_mapping_path_.c_str());
     this->xml_mapping_loaded_ = true;
-    this->xml_mapping_.valid = false;
+    this->xml_mapping_ = {};
     this->xml_stats_.clear();
     this->log_xml_mapping_status_();
     return false;
@@ -606,9 +629,6 @@ bool JuraComponent::ensure_xml_mapping_loaded_() {
   this->xml_mapping_loaded_ = true;
   this->xml_mapping_logged_ = false;
   this->xml_stats_.clear();
-  if (!valid) {
-    this->xml_mapping_.valid = false;
-  }
   this->log_xml_mapping_status_();
   if (this->xml_mapping_.valid) {
     this->ensure_xml_sensors_created_();
@@ -616,12 +636,15 @@ bool JuraComponent::ensure_xml_mapping_loaded_() {
   return this->xml_mapping_.valid;
 }
 
-void JuraComponent::log_xml_mapping_status_() {
-  if (this->xml_mapping_logged_) {
+void JuraComponent::log_xml_mapping_status_(bool force) {
+  if (this->xml_mapping_logged_ && !force) {
     return;
   }
-  ESP_LOGI(TAG, "XML mapping valid=%d, cmds=<@TR:32, @TG:43, @TG:C0>",
-           static_cast<int>(this->xml_mapping_.valid));
+  ESP_LOGCONFIG(TAG,
+                "  XML mapping Status: geladen=%s, gültig=%s, TR32=%s, TG43=%s, TGC0=%s",
+                YESNO(this->xml_mapping_loaded_), YESNO(this->xml_mapping_.valid),
+                YESNO(!this->xml_mapping_.tr32.empty()), YESNO(!this->xml_mapping_.tg43.empty()),
+                YESNO(!this->xml_mapping_.tgc0.empty()));
   this->xml_mapping_logged_ = true;
 }
 
@@ -659,8 +682,15 @@ void JuraComponent::start_xml_cycle_(uint32_t now) {
   }
   this->xml_cycle_.reset();
   this->xml_cycle_.phase = XmlCycleState::Phase::WaitingForFrame;
-  this->xml_cycle_.command_index = 0;
-  const char *command = xml_command_for_index_(0);
+  size_t first_index = this->first_mapped_xml_command_index_();
+  if (first_index >= XML_COMMAND_COUNT) {
+    ESP_LOGW(TAG, "XML Polling übersprungen - kein Mapping aktiv");
+    this->xml_cycle_.reset();
+    this->xml_next_poll_ = now + this->xml_poll_interval_ms_;
+    return;
+  }
+  this->xml_cycle_.command_index = first_index;
+  const char *command = xml_command_for_index_(first_index);
   ESP_LOGD(TAG, "TX_DB \"%s\"", command);
   this->coffee_maker_->connection->reset_all_rx_buffers();
   this->coffee_maker_->connection->tx_db_command(command);
@@ -696,8 +726,8 @@ void JuraComponent::handle_xml_cycle_(uint32_t now) {
           static_cast<int32_t>(now - this->xml_cycle_.next_action_ms) < 0) {
         return;
       }
-      size_t next_index = this->xml_cycle_.command_index + 1;
-      if (next_index >= 3) {
+      size_t next_index = this->next_mapped_xml_command_index_(this->xml_cycle_.command_index);
+      if (next_index >= XML_COMMAND_COUNT) {
         this->finish_xml_cycle_(now, true);
         return;
       }
@@ -733,6 +763,9 @@ void JuraComponent::finish_xml_cycle_(uint32_t now, bool success) {
   bool any_value = false;
 
   auto handle_response = [&](size_t index, bool (*parser)(const std::vector<uint8_t> &, Stats &)) {
+    if (!this->xml_command_has_mapping_(index)) {
+      return;
+    }
     const auto &response = this->xml_cycle_.responses[index];
     const char *label = xml_log_label_for_index_(index);
     if (response.empty()) {
@@ -817,6 +850,41 @@ const char *JuraComponent::xml_log_label_for_index_(size_t index) {
     return "?";
   }
   return LABELS[index];
+}
+
+bool JuraComponent::xml_command_has_mapping_(size_t index) const {
+  switch (index) {
+    case 0:
+      return !this->xml_mapping_.tr32.empty();
+    case 1:
+      return !this->xml_mapping_.tg43.empty();
+    case 2:
+      return !this->xml_mapping_.tgc0.empty();
+    default:
+      break;
+  }
+  return false;
+}
+
+size_t JuraComponent::first_mapped_xml_command_index_() const {
+  for (size_t i = 0; i < XML_COMMAND_COUNT; ++i) {
+    if (this->xml_command_has_mapping_(i)) {
+      return i;
+    }
+  }
+  return XML_COMMAND_COUNT;
+}
+
+size_t JuraComponent::next_mapped_xml_command_index_(size_t index) const {
+  if (index >= XML_COMMAND_COUNT) {
+    return XML_COMMAND_COUNT;
+  }
+  for (size_t i = index + 1; i < XML_COMMAND_COUNT; ++i) {
+    if (this->xml_command_has_mapping_(i)) {
+      return i;
+    }
+  }
+  return XML_COMMAND_COUNT;
 }
 
 void JuraComponent::XmlCycleState::reset() {

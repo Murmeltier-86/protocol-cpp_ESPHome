@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <initializer_list>
+#include <sstream>
 #include <unordered_map>
 
 #include "esphome/core/log.h"
@@ -14,6 +15,17 @@ namespace jutta_component {
 
 namespace {
 static const char *const TAG = "jutta_proto.xml";
+
+constexpr std::size_t DEFAULT_TR32_COUNT = 10;
+constexpr std::size_t DEFAULT_TG43_COUNT = 6;
+constexpr std::size_t DEFAULT_TGC0_COUNT = 3;
+
+constexpr std::size_t MAX_TR32_COUNT = 64;
+constexpr std::size_t MAX_TG43_COUNT = 16;
+constexpr std::size_t MAX_TGC0_COUNT = 16;
+
+constexpr std::size_t FIELD_WIDTH_16BIT = 2;
+constexpr std::size_t FIELD_WIDTH_32BIT = 4;
 
 std::string to_lower_copy(const std::string &input) {
   std::string result = input;
@@ -30,6 +42,31 @@ void trim(std::string &value) {
     return;
   }
   value = value.substr(begin, end - begin + 1);
+}
+
+std::string tidy_label(std::string value) {
+  std::string result;
+  result.reserve(value.size() * 2);
+  char prev = 0;
+  for (char ch : value) {
+    if (ch == '_' || ch == '-') {
+      if (!result.empty() && result.back() != ' ') {
+        result.push_back(' ');
+      }
+      prev = ' ';
+      continue;
+    }
+    if (std::isupper(static_cast<unsigned char>(ch)) != 0 && prev != 0 &&
+        std::islower(static_cast<unsigned char>(prev)) != 0) {
+      if (!result.empty() && result.back() != ' ') {
+        result.push_back(' ');
+      }
+    }
+    result.push_back(ch);
+    prev = ch;
+  }
+  trim(result);
+  return result;
 }
 
 struct AttributeMap {
@@ -229,6 +266,156 @@ bool parse_command_block(const std::string &content, const std::string &target_i
   return found;
 }
 
+std::string extract_block(const std::string &xml, const std::string &lower_xml, const std::string &tag) {
+  std::string tag_lower = "<" + tag;
+  std::size_t begin = lower_xml.find(tag_lower);
+  if (begin == std::string::npos) {
+    return {};
+  }
+  std::size_t open_end = lower_xml.find('>', begin);
+  if (open_end == std::string::npos) {
+    return {};
+  }
+  std::string close_tag = "</" + tag + ">";
+  std::size_t close_pos = lower_xml.find(close_tag, open_end);
+  if (close_pos == std::string::npos) {
+    return {};
+  }
+  return xml.substr(open_end + 1, close_pos - open_end - 1);
+}
+
+std::vector<std::string> collect_tag_values(const std::string &content, const std::string &tag,
+                                            std::initializer_list<const char *> attribute_priority) {
+  std::vector<std::string> values;
+  std::string lower = to_lower_copy(content);
+  std::string needle = "<" + tag;
+  std::size_t pos = 0;
+  while (true) {
+    std::size_t tag_pos = lower.find(needle, pos);
+    if (tag_pos == std::string::npos) {
+      break;
+    }
+    std::size_t tag_end = lower.find('>', tag_pos);
+    if (tag_end == std::string::npos) {
+      break;
+    }
+    std::string tag_text = content.substr(tag_pos, tag_end - tag_pos + 1);
+    auto attrs = parse_attributes(tag_text);
+    std::string chosen;
+    for (const char *key : attribute_priority) {
+      chosen = attrs.get(key);
+      trim(chosen);
+      if (!chosen.empty()) {
+        break;
+      }
+    }
+    if (!chosen.empty()) {
+      values.push_back(tidy_label(chosen));
+    }
+    pos = tag_end + 1;
+  }
+  return values;
+}
+
+std::string extract_bank_block(const std::string &xml, const std::string &lower_xml, const std::string &command) {
+  std::string lowered_command = to_lower_copy(command);
+  std::size_t pos = 0;
+  while (true) {
+    std::size_t bank_pos = lower_xml.find("<bank", pos);
+    if (bank_pos == std::string::npos) {
+      break;
+    }
+    std::size_t tag_end = lower_xml.find('>', bank_pos);
+    if (tag_end == std::string::npos) {
+      break;
+    }
+    std::string tag_text = xml.substr(bank_pos, tag_end - bank_pos + 1);
+    auto attrs = parse_attributes(tag_text);
+    std::string cmd = to_lower_copy(attrs.get("command"));
+    if (cmd == lowered_command) {
+      if (tag_end > bank_pos && lower_xml[tag_end - 1] == '/') {
+        return {};
+      }
+      std::size_t close_pos = lower_xml.find("</bank", tag_end);
+      if (close_pos == std::string::npos) {
+        return {};
+      }
+      return xml.substr(tag_end + 1, close_pos - tag_end - 1);
+    }
+    pos = tag_end + 1;
+  }
+  return {};
+}
+
+std::vector<std::string> collect_tr32_labels(const std::string &xml) {
+  std::vector<std::string> labels;
+  std::string lower_xml = to_lower_copy(xml);
+
+  auto total_values = collect_tag_values(xml, "totalcounter", {"name", "text"});
+  if (!total_values.empty()) {
+    labels.push_back(total_values.front());
+  }
+
+  std::string products_block = extract_block(xml, lower_xml, "products");
+  if (!products_block.empty()) {
+    auto product_values = collect_tag_values(products_block, "product", {"name", "text"});
+    labels.insert(labels.end(), product_values.begin(), product_values.end());
+  }
+
+  return labels;
+}
+
+std::vector<std::string> collect_textitem_labels(const std::string &xml, const std::string &command) {
+  std::string lower_xml = to_lower_copy(xml);
+  std::string bank_block = extract_bank_block(xml, lower_xml, command);
+  if (bank_block.empty()) {
+    return {};
+  }
+  return collect_tag_values(bank_block, "textitem", {"label", "type", "name", "text"});
+}
+
+std::string default_label_for_index(const std::string &display_prefix, std::size_t index) {
+  std::ostringstream stream;
+  stream << display_prefix << ' ' << (index + 1);
+  return stream.str();
+}
+
+XmlCommandMapping build_sequential_mapping(const std::string &name_prefix, const std::string &display_prefix,
+                                           std::size_t field_width, std::size_t count,
+                                           const std::vector<std::string> &labels) {
+  XmlCommandMapping mapping;
+  if (count == 0) {
+    return mapping;
+  }
+  mapping.fields.reserve(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    XmlField field;
+    std::ostringstream name_stream;
+    name_stream << name_prefix << '_' << (i + 1);
+    field.name = name_stream.str();
+    if (i < labels.size() && !labels[i].empty()) {
+      field.label = labels[i];
+    } else {
+      field.label = default_label_for_index(display_prefix, i);
+    }
+    field.offset = i * field_width;
+    field.size = field_width;
+    field.little_endian = false;
+    field.scale = 1.0;
+    mapping.fields.push_back(field);
+  }
+  return mapping;
+}
+
+XmlMapping build_default_mapping() {
+  XmlMapping mapping;
+  mapping.tr32 = build_sequential_mapping("tr32", "TR32", FIELD_WIDTH_16BIT, DEFAULT_TR32_COUNT, {});
+  mapping.tg43 = build_sequential_mapping("tg43", "TG43", FIELD_WIDTH_16BIT, DEFAULT_TG43_COUNT, {});
+  mapping.tgc0 = build_sequential_mapping("tgc0", "TGC0", FIELD_WIDTH_32BIT, DEFAULT_TGC0_COUNT, {});
+  mapping.valid = true;
+  return mapping;
+}
+
 XmlMapping g_mapping;
 bool g_mapping_loaded = false;
 
@@ -279,23 +466,76 @@ const std::unordered_map<std::string, StatValue> &Stats::values() const { return
 
 bool load_mapping_from_string(const std::string &xml) {
   g_mapping = XmlMapping{};
-  bool tr32_found = parse_command_block(xml, "@tr:32", g_mapping.tr32);
-  bool tg43_found = parse_command_block(xml, "@tg:43", g_mapping.tg43);
-  bool tgc0_found = parse_command_block(xml, "@tg:c0", g_mapping.tgc0);
 
-  g_mapping.valid = tr32_found && tg43_found && tgc0_found && !g_mapping.tr32.empty() && !g_mapping.tg43.empty() &&
-                    !g_mapping.tgc0.empty();
+  bool tr32_cmd_found = parse_command_block(xml, "@tr:32", g_mapping.tr32);
+  bool tg43_cmd_found = parse_command_block(xml, "@tg:43", g_mapping.tg43);
+  bool tgc0_cmd_found = parse_command_block(xml, "@tg:c0", g_mapping.tgc0);
+
+  std::string lower_xml = to_lower_copy(xml);
+  bool has_tr32 = lower_xml.find("@tr:32") != std::string::npos;
+  bool has_tg43 = lower_xml.find("@tg:43") != std::string::npos;
+  bool has_tgc0 = lower_xml.find("@tg:c0") != std::string::npos;
+
+  if ((!tr32_cmd_found || g_mapping.tr32.empty()) && has_tr32) {
+    auto tr32_labels = collect_tr32_labels(xml);
+    if (tr32_labels.size() > MAX_TR32_COUNT) {
+      ESP_LOGW(TAG, "XML Mapping @TR:32 enthält %u Einträge, auf %u gekürzt",
+               static_cast<unsigned>(tr32_labels.size()), static_cast<unsigned>(MAX_TR32_COUNT));
+      tr32_labels.resize(MAX_TR32_COUNT);
+    }
+    std::size_t tr32_count = !tr32_labels.empty() ? tr32_labels.size() : DEFAULT_TR32_COUNT;
+    if (tr32_count > MAX_TR32_COUNT) {
+      tr32_count = MAX_TR32_COUNT;
+    }
+    g_mapping.tr32 = build_sequential_mapping("tr32", "TR32", FIELD_WIDTH_16BIT, tr32_count, tr32_labels);
+  }
+  if ((!tg43_cmd_found || g_mapping.tg43.empty()) && has_tg43) {
+    auto tg43_labels = collect_textitem_labels(xml, "@tg:43");
+    if (tg43_labels.size() > MAX_TG43_COUNT) {
+      ESP_LOGW(TAG, "XML Mapping @TG:43 enthält %u Einträge, auf %u gekürzt",
+               static_cast<unsigned>(tg43_labels.size()), static_cast<unsigned>(MAX_TG43_COUNT));
+      tg43_labels.resize(MAX_TG43_COUNT);
+    }
+    std::size_t tg43_count = !tg43_labels.empty() ? tg43_labels.size() : DEFAULT_TG43_COUNT;
+    if (tg43_count > MAX_TG43_COUNT) {
+      tg43_count = MAX_TG43_COUNT;
+    }
+    g_mapping.tg43 = build_sequential_mapping("tg43", "TG43", FIELD_WIDTH_16BIT, tg43_count, tg43_labels);
+  }
+  if ((!tgc0_cmd_found || g_mapping.tgc0.empty()) && has_tgc0) {
+    auto tgc0_labels = collect_textitem_labels(xml, "@tg:c0");
+    if (tgc0_labels.size() > MAX_TGC0_COUNT) {
+      ESP_LOGW(TAG, "XML Mapping @TG:C0 enthält %u Einträge, auf %u gekürzt",
+               static_cast<unsigned>(tgc0_labels.size()), static_cast<unsigned>(MAX_TGC0_COUNT));
+      tgc0_labels.resize(MAX_TGC0_COUNT);
+    }
+    std::size_t tgc0_count = !tgc0_labels.empty() ? tgc0_labels.size() : DEFAULT_TGC0_COUNT;
+    if (tgc0_count > MAX_TGC0_COUNT) {
+      tgc0_count = MAX_TGC0_COUNT;
+    }
+    g_mapping.tgc0 = build_sequential_mapping("tgc0", "TGC0", FIELD_WIDTH_32BIT, tgc0_count, tgc0_labels);
+  }
+
+  if (!has_tr32 && !has_tg43 && !has_tgc0) {
+    ESP_LOGW(TAG, "XML Mapping enthält keine bekannten Kommandos, verwende Standardzuordnung");
+    g_mapping = build_default_mapping();
+  } else {
+    if (has_tr32 && g_mapping.tr32.empty()) {
+      ESP_LOGW(TAG, "XML Mapping @TR:32 ohne Felder, verwende Standardzuordnung");
+      g_mapping.tr32 = build_sequential_mapping("tr32", "TR32", FIELD_WIDTH_16BIT, DEFAULT_TR32_COUNT, {});
+    }
+    if (has_tg43 && g_mapping.tg43.empty()) {
+      ESP_LOGW(TAG, "XML Mapping @TG:43 ohne Felder, verwende Standardzuordnung");
+      g_mapping.tg43 = build_sequential_mapping("tg43", "TG43", FIELD_WIDTH_16BIT, DEFAULT_TG43_COUNT, {});
+    }
+    if (has_tgc0 && g_mapping.tgc0.empty()) {
+      ESP_LOGW(TAG, "XML Mapping @TG:C0 ohne Felder, verwende Standardzuordnung");
+      g_mapping.tgc0 = build_sequential_mapping("tgc0", "TGC0", FIELD_WIDTH_32BIT, DEFAULT_TGC0_COUNT, {});
+    }
+  }
+
+  g_mapping.valid = !g_mapping.tr32.empty() || !g_mapping.tg43.empty() || !g_mapping.tgc0.empty();
   g_mapping_loaded = true;
-
-  if (!tr32_found || g_mapping.tr32.empty()) {
-    ESP_LOGW(TAG, "XML Mapping enthält keine Felder für @TR:32");
-  }
-  if (!tg43_found || g_mapping.tg43.empty()) {
-    ESP_LOGW(TAG, "XML Mapping enthält keine Felder für @TG:43");
-  }
-  if (!tgc0_found || g_mapping.tgc0.empty()) {
-    ESP_LOGW(TAG, "XML Mapping enthält keine Felder für @TG:C0");
-  }
   return g_mapping.valid;
 }
 
