@@ -245,9 +245,10 @@ std::string make_identifier(const std::string &prefix, const std::string &value,
 }
 
 void add_fields_from_labels(XmlCommandMapping &mapping, const std::vector<std::string> &labels,
-                            const std::string &prefix, std::size_t field_size) {
+                            const std::string &prefix, std::size_t field_size,
+                            std::size_t base_offset = 0) {
   std::unordered_set<std::string> used;
-  std::size_t offset = 0;
+  std::size_t offset = base_offset;
   for (std::size_t i = 0; i < labels.size(); ++i) {
     XmlField field;
     field.label = labels[i];
@@ -460,7 +461,7 @@ bool parse_tr32_mapping(const std::string &xml, XmlCommandMapping &mapping) {
       labels.push_back("TR32 " + std::to_string(i + 1));
     }
   }
-  add_fields_from_labels(mapping, labels, "tr32", 2);
+  add_fields_from_labels(mapping, labels, "tr32", 2, 1);
   return true;
 }
 
@@ -498,7 +499,7 @@ bool parse_textitem_mapping(const std::string &xml, const std::string &command, 
       labels.push_back(prefix + " " + std::to_string(i + 1));
     }
   }
-  add_fields_from_labels(mapping, labels, to_lower_copy(prefix), field_size);
+  add_fields_from_labels(mapping, labels, to_lower_copy(prefix), field_size, 1);
   return true;
 }
 

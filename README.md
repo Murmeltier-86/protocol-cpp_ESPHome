@@ -43,6 +43,14 @@ jutta_proto:
 - Die Datei muss nicht angepasst werden – einfach die unveränderte App-Exportdatei referenzieren.
 - Der tatsächlich genutzte Pfad wird in der Konfigurationsausgabe als `XML mapping Quelle` protokolliert.
 
+#### CODEX-Anweisung (J.O.E.-XML ohne `includes`)
+
+1. J.O.E.-XML in der App exportieren und unverändert ins ESPHome-Projekt legen.
+2. In der YAML `xml_mapping_path: <dateiname>.xml` setzen. Relativpfade beziehen sich auf den YAML-Ordner.
+3. Keine `esphome: includes:` und keine Laufzeit-Dateisysteme verwenden – die Komponente konvertiert die Datei beim Build automatisch in einen PROGMEM-String.
+4. Beim Start werden ausschließlich die Statistik-Banks `@TR:32`, `@TG:43` und `@TG:C0` geladen; Produkt-Kommandos aus der XML bleiben unberührt, damit bestehende Legacy-Abläufe unverändert weiterlaufen.
+5. Details zum C-/C#-Bundle und zur manuellen Abfrage findest du im Ordner `jura_joe_xml_bundle_final` (README & Beispiele).
+
 **Kurz-Dokumentation**
 
 1. XML in der J.O.E.-App exportieren.
