@@ -115,7 +115,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void publish_machine_data_(const std::string &response);
   void process_xml_polling();
   bool ensure_xml_mapping_loaded_();
-  void log_xml_mapping_status_();
+  void log_xml_mapping_status_(bool force = false);
   void ensure_xml_sensors_created_();
   void reset_xml_cycle_state_();
   void start_xml_cycle_(uint32_t now);
@@ -127,6 +127,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   sensor::Sensor *get_or_create_sensor_(const std::string &name, const std::string &label);
   static const char *xml_command_for_index_(size_t index);
   static const char *xml_log_label_for_index_(size_t index);
+  bool xml_command_has_mapping_(size_t index) const;
+  size_t first_mapped_xml_command_index_() const;
+  size_t next_mapped_xml_command_index_(size_t index) const;
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
   std::unique_ptr<::jutta_proto::CoffeeMaker> coffee_maker_;
