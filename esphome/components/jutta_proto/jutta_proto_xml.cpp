@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
-#include <cstdlib>
-#include <initializer_list>
+#include <functional>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "esphome/core/log.h"
 
@@ -30,6 +30,11 @@ void trim(std::string &value) {
     return;
   }
   value = value.substr(begin, end - begin + 1);
+}
+
+std::string trim_copy(std::string value) {
+  trim(value);
+  return value;
 }
 
 struct AttributeMap {
@@ -94,139 +99,262 @@ AttributeMap parse_attributes(const std::string &tag) {
   return map;
 }
 
-bool parse_size_t_attr(const AttributeMap &attrs, std::initializer_list<const char *> keys, std::size_t &out) {
-  for (const char *key : keys) {
-    std::string value = attrs.get(key);
-    if (!value.empty()) {
-      char *end = nullptr;
-      auto parsed = std::strtoul(value.c_str(), &end, 0);
-      if (end != value.c_str()) {
-        out = static_cast<std::size_t>(parsed);
-        return true;
-      }
-    }
+bool is_self_closing_tag(const std::string &tag_text) {
+  std::string trimmed = trim_copy(tag_text);
+  if (trimmed.size() < 2) {
+    return false;
   }
-  return false;
+  return trimmed[trimmed.size() - 2] == '/' && trimmed.back() == '>';
 }
 
-bool parse_double_attr(const AttributeMap &attrs, std::initializer_list<const char *> keys, double &out) {
-  for (const char *key : keys) {
-    std::string value = attrs.get(key);
-    if (!value.empty()) {
-      char *end = nullptr;
-      auto parsed = std::strtod(value.c_str(), &end);
-      if (end != value.c_str()) {
-        out = parsed;
-        return true;
-      }
-    }
+bool extract_section_content(const std::string &xml, const std::string &tag_name, std::string &out) {
+  std::string lower_xml = to_lower_copy(xml);
+  std::string open = "<" + to_lower_copy(tag_name);
+  std::size_t start = lower_xml.find(open);
+  if (start == std::string::npos) {
+    return false;
   }
-  return false;
-}
-
-bool contains_percent_hint(const std::string &value) {
-  if (value.find('%') != std::string::npos) {
+  std::size_t open_end = lower_xml.find('>', start);
+  if (open_end == std::string::npos) {
+    return false;
+  }
+  if (is_self_closing_tag(xml.substr(start, open_end - start + 1))) {
+    out.clear();
     return true;
   }
-  std::string lower = to_lower_copy(value);
-  return lower.find("percent") != std::string::npos || lower.find("prozent") != std::string::npos ||
-         lower.find("pct") != std::string::npos;
-}
-
-bool parse_field_tag(const std::string &tag_text, XmlCommandMapping &mapping) {
-  auto attrs = parse_attributes(tag_text);
-  XmlField field;
-  field.name = attrs.get("name");
-  trim(field.name);
-  if (field.name.empty()) {
-    ESP_LOGW(TAG, "XML Feld ohne 'name' ignoriert");
+  std::string close = "</" + to_lower_copy(tag_name);
+  std::size_t close_pos = lower_xml.find(close, open_end);
+  if (close_pos == std::string::npos) {
     return false;
   }
-  field.label = attrs.get("label");
-  trim(field.label);
-  if (field.label.empty()) {
-    field.label = field.name;
-  }
-  parse_size_t_attr(attrs, {"offset", "byte", "start"}, field.offset);
-  if (!parse_size_t_attr(attrs, {"size", "bytes", "length"}, field.size)) {
-    ESP_LOGW(TAG, "XML Feld %s ohne gültige 'size'-Angabe ignoriert", field.name.c_str());
-    return false;
-  }
-  if (field.size != 1 && field.size != 2 && field.size != 4) {
-    ESP_LOGW(TAG, "XML Feld %s verwendet nicht unterstützte Größe %u", field.name.c_str(),
-             static_cast<unsigned>(field.size));
-    return false;
-  }
-  std::string endian = to_lower_copy(attrs.get("endian"));
-  if (endian == "le" || endian == "little") {
-    field.little_endian = true;
-  }
-  double scale = field.scale;
-  if (parse_double_attr(attrs, {"scale"}, scale)) {
-    field.scale = scale;
-  } else if (contains_percent_hint(field.name) || contains_percent_hint(field.label)) {
-    field.scale = 0.01;
-  }
-  mapping.fields.push_back(field);
+  out = xml.substr(open_end + 1, close_pos - open_end - 1);
   return true;
 }
 
-bool parse_fields_block(const std::string &content, XmlCommandMapping &mapping) {
-  bool any = false;
-  std::string lower = to_lower_copy(content);
-  std::size_t search_pos = 0;
+void for_each_tag(const std::string &block, const std::string &tag_name,
+                  const std::function<void(const std::string &)> &callback) {
+  std::string lower = to_lower_copy(block);
+  std::string needle = "<" + to_lower_copy(tag_name);
+  std::size_t pos = 0;
   while (true) {
-    std::size_t field_pos = lower.find("<field", search_pos);
-    if (field_pos == std::string::npos) {
+    std::size_t tag_pos = lower.find(needle, pos);
+    if (tag_pos == std::string::npos) {
       break;
     }
-    std::size_t tag_end = lower.find('>', field_pos);
+    std::size_t check_pos = tag_pos + needle.size();
+    if (check_pos < lower.size()) {
+      char next = lower[check_pos];
+      if (!(next == '>' || next == '/' || std::isspace(static_cast<unsigned char>(next)))) {
+        pos = tag_pos + 1;
+        continue;
+      }
+    }
+    std::size_t tag_end = lower.find('>', tag_pos);
     if (tag_end == std::string::npos) {
       break;
     }
-    std::string tag_text = content.substr(field_pos, tag_end - field_pos + 1);
-    if (parse_field_tag(tag_text, mapping)) {
-      any = true;
+    std::string tag_text = block.substr(tag_pos, tag_end - tag_pos + 1);
+    callback(tag_text);
+    pos = tag_end + 1;
+  }
+}
+
+std::string make_identifier(const std::string &prefix, const std::string &value, std::size_t index,
+                            std::unordered_set<std::string> &used) {
+  std::string sanitized;
+  bool last_was_underscore = false;
+  for (char c : value) {
+    unsigned char uc = static_cast<unsigned char>(c);
+    if (std::isalnum(uc)) {
+      sanitized.push_back(static_cast<char>(std::tolower(uc)));
+      last_was_underscore = false;
+    } else {
+      if (!last_was_underscore) {
+        sanitized.push_back('_');
+        last_was_underscore = true;
+      }
+    }
+  }
+  if (!sanitized.empty() && sanitized.front() == '_') {
+    sanitized.erase(sanitized.begin());
+  }
+  while (!sanitized.empty() && sanitized.back() == '_') {
+    sanitized.pop_back();
+  }
+  if (sanitized.empty()) {
+    sanitized = prefix + "_" + std::to_string(index + 1);
+  } else {
+    sanitized = prefix + "_" + sanitized;
+  }
+  std::string candidate = sanitized;
+  std::size_t suffix = 2;
+  while (used.find(candidate) != used.end()) {
+    candidate = sanitized + "_" + std::to_string(suffix++);
+  }
+  used.insert(candidate);
+  return candidate;
+}
+
+void add_fields_from_labels(XmlCommandMapping &mapping, const std::vector<std::string> &labels,
+                            const std::string &prefix, std::size_t field_size) {
+  std::unordered_set<std::string> used;
+  std::size_t offset = 0;
+  for (std::size_t i = 0; i < labels.size(); ++i) {
+    XmlField field;
+    field.label = labels[i];
+    field.name = make_identifier(prefix, field.label, i, used);
+    field.offset = offset;
+    field.size = field_size;
+    mapping.fields.push_back(field);
+    offset += field_size;
+  }
+}
+
+bool find_bank_block(const std::string &xml, const std::string &command, std::string &content, AttributeMap *attrs_out) {
+  std::string lower_xml = to_lower_copy(xml);
+  std::string needle = "<bank";
+  std::string lowered_command = to_lower_copy(command);
+  std::size_t search_pos = 0;
+  while (true) {
+    std::size_t pos = lower_xml.find(needle, search_pos);
+    if (pos == std::string::npos) {
+      return false;
+    }
+    std::size_t tag_end = lower_xml.find('>', pos);
+    if (tag_end == std::string::npos) {
+      return false;
+    }
+    std::string tag_text = xml.substr(pos, tag_end - pos + 1);
+    auto attrs = parse_attributes(tag_text);
+    std::string cmd_attr = to_lower_copy(attrs.get("command"));
+    trim(cmd_attr);
+    if (cmd_attr == lowered_command) {
+      if (attrs_out != nullptr) {
+        *attrs_out = attrs;
+      }
+      if (is_self_closing_tag(tag_text)) {
+        content.clear();
+        return true;
+      }
+      std::size_t close_pos = lower_xml.find("</bank", tag_end);
+      if (close_pos == std::string::npos) {
+        return false;
+      }
+      content = xml.substr(tag_end + 1, close_pos - tag_end - 1);
+      return true;
     }
     search_pos = tag_end + 1;
   }
-  return any;
 }
 
-bool parse_command_block(const std::string &content, const std::string &target_id, XmlCommandMapping &mapping) {
-  std::string lower = to_lower_copy(content);
-  std::string lowered_id = to_lower_copy(target_id);
-  std::size_t search_pos = 0;
-  bool found = false;
-  while (true) {
-    std::size_t cmd_pos = lower.find("<cmd", search_pos);
-    if (cmd_pos == std::string::npos) {
-      break;
-    }
-    std::size_t tag_end = lower.find('>', cmd_pos);
-    if (tag_end == std::string::npos) {
-      break;
-    }
-    std::string tag_text = content.substr(cmd_pos, tag_end - cmd_pos + 1);
-    auto attrs = parse_attributes(tag_text);
-    std::string id = attrs.get("id");
-    trim(id);
-    if (to_lower_copy(id) != lowered_id) {
-      search_pos = tag_end + 1;
-      continue;
-    }
-    std::size_t close_pos = lower.find("</cmd", tag_end);
-    if (close_pos == std::string::npos) {
-      ESP_LOGW(TAG, "XML CMD %s ohne schließendes </CMD>", id.c_str());
-      break;
-    }
-    std::string inner = content.substr(tag_end + 1, close_pos - tag_end - 1);
-    parse_fields_block(inner, mapping);
-    found = true;
-    search_pos = close_pos + 5;
-    break;
+std::vector<std::string> build_tr32_labels(const std::string &xml) {
+  const std::size_t desired = 10;
+  std::vector<std::string> labels;
+  std::string products_block;
+  if (!extract_section_content(xml, "products", products_block)) {
+    return labels;
   }
-  return found;
+  for_each_tag(products_block, "totalcounter", [&](const std::string &tag_text) {
+    auto attrs = parse_attributes(tag_text);
+    std::string name = attrs.get("name");
+    trim(name);
+    if (!name.empty() && labels.size() < desired) {
+      labels.push_back(name);
+    }
+  });
+
+  std::vector<std::string> singles;
+  std::vector<std::string> doubles;
+  for_each_tag(products_block, "product", [&](const std::string &tag_text) {
+    auto attrs = parse_attributes(tag_text);
+    std::string name = attrs.get("name");
+    trim(name);
+    if (name.empty()) {
+      return;
+    }
+    std::string double_flag = to_lower_copy(attrs.get("doubleproduct"));
+    trim(double_flag);
+    if (double_flag == "true" || double_flag == "1" || double_flag == "yes") {
+      doubles.push_back(name);
+    } else {
+      singles.push_back(name);
+    }
+  });
+
+  for (const auto &name : singles) {
+    if (labels.size() >= desired) {
+      break;
+    }
+    labels.push_back(name);
+  }
+  for (const auto &name : doubles) {
+    if (labels.size() >= desired) {
+      break;
+    }
+    labels.push_back(name);
+  }
+
+  while (labels.size() < desired) {
+    labels.push_back("TR32 " + std::to_string(labels.size() + 1));
+  }
+  if (labels.size() > desired) {
+    labels.resize(desired);
+  }
+  return labels;
+}
+
+bool parse_tr32_mapping(const std::string &xml, XmlCommandMapping &mapping) {
+  mapping.fields.clear();
+  std::string content;
+  if (!find_bank_block(xml, "@tr:32", content, nullptr)) {
+    return false;
+  }
+  auto labels = build_tr32_labels(xml);
+  if (labels.empty()) {
+    for (std::size_t i = 0; i < 10; ++i) {
+      labels.push_back("TR32 " + std::to_string(i + 1));
+    }
+  }
+  add_fields_from_labels(mapping, labels, "tr32", 2);
+  return true;
+}
+
+std::vector<std::string> parse_textitem_labels(const std::string &block) {
+  std::vector<std::string> labels;
+  for_each_tag(block, "textitem", [&](const std::string &tag_text) {
+    auto attrs = parse_attributes(tag_text);
+    std::string label = attrs.get("type");
+    trim(label);
+    if (label.empty()) {
+      label = attrs.get("name");
+      trim(label);
+    }
+    if (label.empty()) {
+      label = attrs.get("text");
+      trim(label);
+    }
+    if (!label.empty()) {
+      labels.push_back(label);
+    }
+  });
+  return labels;
+}
+
+bool parse_textitem_mapping(const std::string &xml, const std::string &command, const std::string &prefix,
+                            std::size_t field_size, std::size_t fallback_count, XmlCommandMapping &mapping) {
+  mapping.fields.clear();
+  std::string content;
+  if (!find_bank_block(xml, command, content, nullptr)) {
+    return false;
+  }
+  auto labels = parse_textitem_labels(content);
+  if (labels.empty()) {
+    for (std::size_t i = 0; i < fallback_count; ++i) {
+      labels.push_back(prefix + " " + std::to_string(i + 1));
+    }
+  }
+  add_fields_from_labels(mapping, labels, to_lower_copy(prefix), field_size);
+  return true;
 }
 
 XmlMapping g_mapping;
@@ -279,9 +407,9 @@ const std::unordered_map<std::string, StatValue> &Stats::values() const { return
 
 bool load_mapping_from_string(const std::string &xml) {
   g_mapping = XmlMapping{};
-  bool tr32_found = parse_command_block(xml, "@tr:32", g_mapping.tr32);
-  bool tg43_found = parse_command_block(xml, "@tg:43", g_mapping.tg43);
-  bool tgc0_found = parse_command_block(xml, "@tg:c0", g_mapping.tgc0);
+  bool tr32_found = parse_tr32_mapping(xml, g_mapping.tr32);
+  bool tg43_found = parse_textitem_mapping(xml, "@tg:43", "TG43", 2, 6, g_mapping.tg43);
+  bool tgc0_found = parse_textitem_mapping(xml, "@tg:c0", "TGC0", 4, 3, g_mapping.tgc0);
 
   bool tr32_has_fields = tr32_found && !g_mapping.tr32.empty();
   bool tg43_has_fields = tg43_found && !g_mapping.tg43.empty();
