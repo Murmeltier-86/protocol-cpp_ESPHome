@@ -2,12 +2,16 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdint>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
-#include <initializer_list>
-#include <unordered_map>
+#include <fstream>
+#include <sstream>
 
 #include "esphome/core/log.h"
+#ifdef USE_FILESYSTEM
+#include "esphome/components/filesystem/filesystem.h"
+#endif
 
 namespace esphome {
 namespace jutta_component {
@@ -15,28 +19,11 @@ namespace jutta_component {
 namespace {
 static const char *const TAG = "jutta_proto.xml";
 
-std::string to_lower_copy(const std::string &input) {
-  std::string result = input;
-  std::transform(result.begin(), result.end(), result.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return result;
-}
-
-void trim(std::string &value) {
-  auto begin = value.find_first_not_of(" \t\r\n");
-  auto end = value.find_last_not_of(" \t\r\n");
-  if (begin == std::string::npos || end == std::string::npos) {
-    value.clear();
-    return;
-  }
-  value = value.substr(begin, end - begin + 1);
-}
-
 struct AttributeMap {
   std::unordered_map<std::string, std::string> values;
 
   std::string get(const std::string &key) const {
-    auto it = this->values.find(to_lower_copy(key));
+    auto it = this->values.find(key);
     if (it != this->values.end()) {
       return it->second;
     }
@@ -44,23 +31,26 @@ struct AttributeMap {
   }
 };
 
+inline std::string to_lower(const std::string &input) {
+  std::string result = input;
+  std::transform(result.begin(), result.end(), result.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return result;
+}
+
 AttributeMap parse_attributes(const std::string &tag) {
   AttributeMap map;
   std::size_t pos = 0;
   while (pos < tag.size()) {
-    pos = tag.find_first_not_of(" \t\r\n</", pos);
-    if (pos == std::string::npos) {
+    std::size_t name_start = tag.find_first_not_of(" \t\r\n<", pos);
+    if (name_start == std::string::npos) {
       break;
     }
-    if (tag[pos] == '>' || tag[pos] == '/') {
-      break;
-    }
-    std::size_t name_end = tag.find_first_of("= \t\r\n/>", pos);
+    std::size_t name_end = tag.find_first_of("= \t\r\n>", name_start);
     if (name_end == std::string::npos) {
       break;
     }
-    std::string key = tag.substr(pos, name_end - pos);
-    key = to_lower_copy(key);
+    std::string key = to_lower(tag.substr(name_start, name_end - name_start));
     pos = tag.find('=', name_end);
     if (pos == std::string::npos) {
       break;
@@ -71,32 +61,30 @@ AttributeMap parse_attributes(const std::string &tag) {
       break;
     }
     char quote = tag[pos];
-    std::size_t value_begin = pos;
-    std::size_t value_end;
     if (quote == '\"' || quote == '\'') {
-      ++value_begin;
-      value_end = tag.find(quote, value_begin);
-      if (value_end == std::string::npos) {
-        value_end = tag.size();
-      }
-      pos = value_end + 1;
+      ++pos;
     } else {
-      value_end = tag.find_first_of(" \t\r\n/>", value_begin);
-      if (value_end == std::string::npos) {
-        value_end = tag.size();
-      }
-      pos = value_end;
+      quote = ' ';
     }
-    std::string value = tag.substr(value_begin, value_end - value_begin);
-    trim(value);
+    std::size_t value_end;
+    if (quote == ' ') {
+      value_end = tag.find_first_of(" \t\r\n>", pos);
+    } else {
+      value_end = tag.find(quote, pos);
+    }
+    if (value_end == std::string::npos) {
+      break;
+    }
+    std::string value = tag.substr(pos, value_end - pos);
     map.values[key] = value;
+    pos = value_end + 1;
   }
   return map;
 }
 
-bool parse_size_t_attr(const AttributeMap &attrs, std::initializer_list<const char *> keys, std::size_t &out) {
+bool parse_size_t(const AttributeMap &attrs, std::initializer_list<const char *> keys, std::size_t &out) {
   for (const char *key : keys) {
-    std::string value = attrs.get(key);
+    std::string value = attrs.get(to_lower(key));
     if (!value.empty()) {
       char *end = nullptr;
       auto parsed = std::strtoul(value.c_str(), &end, 0);
@@ -109,9 +97,9 @@ bool parse_size_t_attr(const AttributeMap &attrs, std::initializer_list<const ch
   return false;
 }
 
-bool parse_double_attr(const AttributeMap &attrs, std::initializer_list<const char *> keys, double &out) {
+bool parse_double(const AttributeMap &attrs, std::initializer_list<const char *> keys, double &out) {
   for (const char *key : keys) {
-    std::string value = attrs.get(key);
+    std::string value = attrs.get(to_lower(key));
     if (!value.empty()) {
       char *end = nullptr;
       auto parsed = std::strtod(value.c_str(), &end);
@@ -124,56 +112,117 @@ bool parse_double_attr(const AttributeMap &attrs, std::initializer_list<const ch
   return false;
 }
 
-bool contains_percent_hint(const std::string &value) {
-  if (value.find('%') != std::string::npos) {
-    return true;
+bool load_file_content(const std::string &path, std::string &content) {
+#ifdef USE_FILESYSTEM
+  if (auto *fs = esphome::filesystem::global_filesystem; fs != nullptr) {
+    auto file = fs->open(path.c_str(), "r");
+    if (file) {
+      std::ostringstream stream;
+      while (file.available()) {
+        stream << static_cast<char>(file.read());
+      }
+      content = stream.str();
+      return true;
+    }
   }
-  std::string lower = to_lower_copy(value);
-  return lower.find("percent") != std::string::npos || lower.find("prozent") != std::string::npos ||
-         lower.find("pct") != std::string::npos;
-}
-
-bool parse_field_tag(const std::string &tag_text, XmlCommandMapping &mapping) {
-  auto attrs = parse_attributes(tag_text);
-  XmlField field;
-  field.name = attrs.get("name");
-  trim(field.name);
-  if (field.name.empty()) {
-    ESP_LOGW(TAG, "XML Feld ohne 'name' ignoriert");
+#endif
+  std::ifstream file(path, std::ios::binary);
+  if (!file.is_open()) {
     return false;
   }
-  field.label = attrs.get("label");
-  trim(field.label);
-  if (field.label.empty()) {
-    field.label = field.name;
-  }
-  parse_size_t_attr(attrs, {"offset", "byte", "start"}, field.offset);
-  if (!parse_size_t_attr(attrs, {"size", "bytes", "length"}, field.size)) {
-    ESP_LOGW(TAG, "XML Feld %s ohne gültige 'size'-Angabe ignoriert", field.name.c_str());
-    return false;
-  }
-  if (field.size != 1 && field.size != 2 && field.size != 4) {
-    ESP_LOGW(TAG, "XML Feld %s verwendet nicht unterstützte Größe %u", field.name.c_str(),
-             static_cast<unsigned>(field.size));
-    return false;
-  }
-  std::string endian = to_lower_copy(attrs.get("endian"));
-  if (endian == "le" || endian == "little") {
-    field.little_endian = true;
-  }
-  double scale = field.scale;
-  if (parse_double_attr(attrs, {"scale"}, scale)) {
-    field.scale = scale;
-  } else if (contains_percent_hint(field.name) || contains_percent_hint(field.label)) {
-    field.scale = 0.01;
-  }
-  mapping.fields.push_back(field);
+  std::ostringstream stream;
+  stream << file.rdbuf();
+  content = stream.str();
   return true;
 }
 
-bool parse_fields_block(const std::string &content, XmlCommandMapping &mapping) {
+void trim(std::string &value) {
+  auto begin = value.find_first_not_of(" \t\r\n");
+  auto end = value.find_last_not_of(" \t\r\n");
+  if (begin == std::string::npos || end == std::string::npos) {
+    value.clear();
+  } else {
+    value = value.substr(begin, end - begin + 1);
+  }
+}
+
+bool decode_field_value(const XmlField &field, const std::vector<uint8_t> &decoded, double &value) {
+  if (field.byte_length == 0) {
+    return false;
+  }
+  std::size_t required = field.byte_offset + field.byte_length;
+  if (decoded.size() < required) {
+    return false;
+  }
+  std::uint64_t raw = 0;
+  for (std::size_t i = 0; i < field.byte_length; ++i) {
+    std::size_t index = field.little_endian ? (field.byte_offset + field.byte_length - 1 - i)
+                                           : (field.byte_offset + i);
+    raw = (raw << 8) | static_cast<std::uint64_t>(decoded[index]);
+  }
+  if (field.bit_length > 0) {
+    std::size_t shift = field.bit_offset;
+    raw >>= shift;
+    if (field.bit_length < 64U) {
+      std::uint64_t mask = (static_cast<std::uint64_t>(1) << field.bit_length) - 1ULL;
+      raw &= mask;
+    }
+  }
+  value = static_cast<double>(raw) * field.scale;
+  return true;
+}
+
+bool map_fields(const std::vector<uint8_t> &decoded, const XmlCommandMapping &mapping,
+                MachineStats &out, const char *label) {
   bool any = false;
-  std::string lower = to_lower_copy(content);
+  for (const auto &field : mapping.fields) {
+    double numeric = 0.0;
+    if (!decode_field_value(field, decoded, numeric)) {
+      ESP_LOGW(TAG, "XML %s Feld %s konnte nicht gelesen werden (Offset=%u, Bytes=%u, Daten=%u)", label,
+               field.name.c_str(), static_cast<unsigned>(field.byte_offset),
+               static_cast<unsigned>(field.byte_length), static_cast<unsigned>(decoded.size()));
+      continue;
+    }
+    out.set_value(field.name, numeric, field.label);
+    any = true;
+  }
+  return any;
+}
+
+XmlCommandMapping *mapping_for_id(XmlMapping &mapping, const std::string &id) {
+  std::string lowered = to_lower(id);
+  if (lowered == "tr32") {
+    return &mapping.tr32_fields;
+  }
+  if (lowered == "tg43") {
+    return &mapping.tg43_fields;
+  }
+  if (lowered == "tgc0") {
+    return &mapping.tgc0_fields;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+void MachineStats::clear() { this->values_.clear(); }
+
+bool MachineStats::empty() const { return this->values_.empty(); }
+
+void MachineStats::set_value(const std::string &name, double value, const std::string &label) {
+  this->values_[name] = StatValue{value, label};
+}
+
+bool MachineStats::has_value(const std::string &name) const {
+  return this->values_.find(name) != this->values_.end();
+}
+
+const std::unordered_map<std::string, StatValue> &MachineStats::values() const { return this->values_; }
+
+namespace {
+
+bool parse_fields(const std::string &content, XmlCommandMapping &mapping) {
+  std::string lower = to_lower(content);
   std::size_t search_pos = 0;
   while (true) {
     std::size_t field_pos = lower.find("<field", search_pos);
@@ -185,144 +234,167 @@ bool parse_fields_block(const std::string &content, XmlCommandMapping &mapping) 
       break;
     }
     std::string tag_text = content.substr(field_pos, tag_end - field_pos + 1);
-    if (parse_field_tag(tag_text, mapping)) {
-      any = true;
-    }
-    search_pos = tag_end + 1;
-  }
-  return any;
-}
-
-bool parse_command_block(const std::string &content, const std::string &target_id, XmlCommandMapping &mapping) {
-  std::string lower = to_lower_copy(content);
-  std::string lowered_id = to_lower_copy(target_id);
-  std::size_t search_pos = 0;
-  bool found = false;
-  while (true) {
-    std::size_t cmd_pos = lower.find("<cmd", search_pos);
-    if (cmd_pos == std::string::npos) {
-      break;
-    }
-    std::size_t tag_end = lower.find('>', cmd_pos);
-    if (tag_end == std::string::npos) {
-      break;
-    }
-    std::string tag_text = content.substr(cmd_pos, tag_end - cmd_pos + 1);
     auto attrs = parse_attributes(tag_text);
-    std::string id = attrs.get("id");
-    trim(id);
-    if (to_lower_copy(id) != lowered_id) {
+    XmlField field;
+    field.name = attrs.get("name");
+    trim(field.name);
+    if (field.name.empty()) {
+      ESP_LOGW(TAG, "XML Feld ohne Namen ignoriert");
       search_pos = tag_end + 1;
       continue;
     }
-    std::size_t close_pos = lower.find("</cmd", tag_end);
-    if (close_pos == std::string::npos) {
-      ESP_LOGW(TAG, "XML CMD %s ohne schließendes </CMD>", id.c_str());
-      break;
+    field.label = attrs.get("label");
+    trim(field.label);
+    if (field.label.empty()) {
+      field.label = field.name;
     }
-    std::string inner = content.substr(tag_end + 1, close_pos - tag_end - 1);
-    parse_fields_block(inner, mapping);
-    found = true;
-    search_pos = close_pos + 5;
-    break;
+    parse_size_t(attrs, {"byte", "offset", "start", "index"}, field.byte_offset);
+    parse_size_t(attrs, {"bits", "bit_length"}, field.bit_length);
+    parse_size_t(attrs, {"bit", "bit_offset"}, field.bit_offset);
+    if (!parse_size_t(attrs, {"bytes", "length", "size"}, field.byte_length)) {
+      if (field.bit_length > 0) {
+        field.byte_length = (field.bit_offset + field.bit_length + 7) / 8;
+      } else {
+        std::string type = to_lower(attrs.get("type"));
+        if (type.find("32") != std::string::npos) {
+          field.byte_length = 4;
+        } else if (type.find("16") != std::string::npos) {
+          field.byte_length = 2;
+        } else if (type.find("8") != std::string::npos || type == "u8") {
+          field.byte_length = 1;
+        }
+      }
+    }
+    if (field.byte_length == 0) {
+      field.byte_length = 2;
+    }
+    std::string endian = to_lower(attrs.get("endian"));
+    if (endian == "little" || attrs.get("little_endian") == "1") {
+      field.little_endian = true;
+    }
+    double scale = field.scale;
+    if (parse_double(attrs, {"scale", "factor", "multiplier"}, scale)) {
+      field.scale = scale;
+    }
+    double divisor = 0.0;
+    if (parse_double(attrs, {"divisor"}, divisor) && divisor != 0.0) {
+      field.scale /= divisor;
+    }
+    mapping.fields.push_back(field);
+    search_pos = tag_end + 1;
   }
-  return found;
+  return !mapping.fields.empty();
 }
 
-XmlMapping g_mapping;
-bool g_mapping_loaded = false;
-
-bool parse_payload(const std::vector<uint8_t> &decoded, const XmlCommandMapping &mapping, Stats &out,
-                   const char *log_label) {
-  if (mapping.empty()) {
-    ESP_LOGW(TAG, "XML %s: kein Mapping vorhanden", log_label);
-    return false;
-  }
-  bool any = false;
-  for (const auto &field : mapping.fields) {
-    if (field.offset + field.size > decoded.size()) {
-      ESP_LOGW(TAG, "XML %s Feld %s überläuft Frame (Offset=%u, Bytes=%u, Frame=%u)", log_label,
-               field.name.c_str(), static_cast<unsigned>(field.offset), static_cast<unsigned>(field.size),
-               static_cast<unsigned>(decoded.size()));
+bool parse_xml_mapping_content(const std::string &content, XmlMapping &mapping) {
+  std::string lower = to_lower(content);
+  std::size_t search_pos = 0;
+  bool any_fields = false;
+  while (true) {
+    std::size_t frame_pos = lower.find("<frame", search_pos);
+    if (frame_pos == std::string::npos) {
+      break;
+    }
+    std::size_t tag_end = lower.find('>', frame_pos);
+    if (tag_end == std::string::npos) {
+      break;
+    }
+    std::size_t close_pos = lower.find("</frame", tag_end);
+    if (close_pos == std::string::npos) {
+      break;
+    }
+    std::string tag_text = content.substr(frame_pos, tag_end - frame_pos + 1);
+    auto attrs = parse_attributes(tag_text);
+    std::string id = attrs.get("id");
+    trim(id);
+    auto *command = mapping_for_id(mapping, id);
+    if (command == nullptr) {
+      ESP_LOGW(TAG, "Unbekannter Frame-Typ '%s'", id.c_str());
+      search_pos = close_pos + 7;
       continue;
     }
-    std::uint64_t raw = 0;
-    if (field.little_endian) {
-      for (std::size_t i = 0; i < field.size; ++i) {
-        raw |= static_cast<std::uint64_t>(decoded[field.offset + i]) << (8U * i);
-      }
-    } else {
-      for (std::size_t i = 0; i < field.size; ++i) {
-        raw = (raw << 8U) | static_cast<std::uint64_t>(decoded[field.offset + i]);
-      }
+    std::string inner = content.substr(tag_end + 1, close_pos - tag_end - 1);
+    if (parse_fields(inner, *command)) {
+      any_fields = true;
     }
-    double value = static_cast<double>(raw) * field.scale;
-    out.set_value(field.name, value, field.label);
-    any = true;
+    search_pos = close_pos + 7;
   }
-  return any;
+  mapping.valid = any_fields;
+  return mapping.valid;
 }
 
 }  // namespace
 
-void Stats::clear() { this->values_.clear(); }
-
-bool Stats::empty() const { return this->values_.empty(); }
-
-void Stats::set_value(const std::string &name, double value, const std::string &label) {
-  this->values_[name] = StatValue{value, label};
-}
-
-bool Stats::has_value(const std::string &name) const { return this->values_.find(name) != this->values_.end(); }
-
-const std::unordered_map<std::string, StatValue> &Stats::values() const { return this->values_; }
-
-bool load_mapping_from_string(const std::string &xml) {
-  g_mapping = XmlMapping{};
-  bool tr32_found = parse_command_block(xml, "@tr:32", g_mapping.tr32);
-  bool tg43_found = parse_command_block(xml, "@tg:43", g_mapping.tg43);
-  bool tgc0_found = parse_command_block(xml, "@tg:c0", g_mapping.tgc0);
-
-  g_mapping.valid = tr32_found && tg43_found && tgc0_found && !g_mapping.tr32.empty() && !g_mapping.tg43.empty() &&
-                    !g_mapping.tgc0.empty();
-  g_mapping_loaded = true;
-
-  if (!tr32_found || g_mapping.tr32.empty()) {
-    ESP_LOGW(TAG, "XML Mapping enthält keine Felder für @TR:32");
-  }
-  if (!tg43_found || g_mapping.tg43.empty()) {
-    ESP_LOGW(TAG, "XML Mapping enthält keine Felder für @TG:43");
-  }
-  if (!tgc0_found || g_mapping.tgc0.empty()) {
-    ESP_LOGW(TAG, "XML Mapping enthält keine Felder für @TG:C0");
-  }
-  return g_mapping.valid;
-}
-
-const XmlMapping &get_xml_mapping() { return g_mapping; }
-
-bool parse_TR32(const std::vector<uint8_t> &decoded, Stats &out) {
-  if (!g_mapping_loaded) {
-    ESP_LOGW(TAG, "XML Mapping wurde nicht geladen");
+bool load_xml_mapping(const std::string &path, XmlMapping &mapping) {
+  std::string content;
+  if (!load_file_content(path, content)) {
+    ESP_LOGW(TAG, "XML Mapping %s konnte nicht geladen werden", path.c_str());
+    mapping.valid = false;
     return false;
   }
-  return parse_payload(decoded, g_mapping.tr32, out, "TR32");
-}
-
-bool parse_TG43(const std::vector<uint8_t> &decoded, Stats &out) {
-  if (!g_mapping_loaded) {
-    ESP_LOGW(TAG, "XML Mapping wurde nicht geladen");
+  mapping = XmlMapping{};
+  mapping.source_path = path;
+  if (!parse_xml_mapping_content(content, mapping)) {
+    ESP_LOGW(TAG, "XML Mapping %s enthält keine bekannten Felder", path.c_str());
+    mapping.valid = false;
     return false;
   }
-  return parse_payload(decoded, g_mapping.tg43, out, "TG43");
+  return true;
 }
 
-bool parse_TGC0(const std::vector<uint8_t> &decoded, Stats &out) {
-  if (!g_mapping_loaded) {
-    ESP_LOGW(TAG, "XML Mapping wurde nicht geladen");
+namespace {
+XmlMapping g_current_mapping{};
+bool g_has_mapping = false;
+}
+
+bool load_xml_mapping(const std::string &path) {
+  XmlMapping mapping;
+  if (!load_xml_mapping(path, mapping)) {
+    g_has_mapping = false;
+    g_current_mapping = XmlMapping{};
     return false;
   }
-  return parse_payload(decoded, g_mapping.tgc0, out, "TGC0");
+  g_current_mapping = mapping;
+  g_has_mapping = mapping.valid;
+  return g_has_mapping;
+}
+
+const XmlMapping &get_loaded_xml_mapping() { return g_current_mapping; }
+
+bool map_tr32(const std::vector<uint8_t> &decoded, const XmlMapping &mapping, MachineStats &out) {
+  return map_fields(decoded, mapping.tr32_fields, out, "TR32");
+}
+
+bool map_tg43(const std::vector<uint8_t> &decoded, const XmlMapping &mapping, MachineStats &out) {
+  return map_fields(decoded, mapping.tg43_fields, out, "TG43");
+}
+
+bool map_tgc0(const std::vector<uint8_t> &decoded, const XmlMapping &mapping, MachineStats &out) {
+  return map_fields(decoded, mapping.tgc0_fields, out, "TGC0");
+}
+
+bool map_tr32(const std::vector<uint8_t> &decoded, MachineStats &out) {
+  if (!g_has_mapping) {
+    ESP_LOGW(TAG, "Kein XML-Mapping geladen");
+    return false;
+  }
+  return map_tr32(decoded, g_current_mapping, out);
+}
+
+bool map_tg43(const std::vector<uint8_t> &decoded, MachineStats &out) {
+  if (!g_has_mapping) {
+    ESP_LOGW(TAG, "Kein XML-Mapping geladen");
+    return false;
+  }
+  return map_tg43(decoded, g_current_mapping, out);
+}
+
+bool map_tgc0(const std::vector<uint8_t> &decoded, MachineStats &out) {
+  if (!g_has_mapping) {
+    ESP_LOGW(TAG, "Kein XML-Mapping geladen");
+    return false;
+  }
+  return map_tgc0(decoded, g_current_mapping, out);
 }
 
 }  // namespace jutta_component

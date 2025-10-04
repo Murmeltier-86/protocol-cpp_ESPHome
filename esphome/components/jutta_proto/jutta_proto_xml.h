@@ -12,22 +12,24 @@ namespace jutta_component {
 struct XmlField {
   std::string name;
   std::string label;
-  std::size_t offset{0};
-  std::size_t size{0};
+  std::size_t byte_offset{0};
+  std::size_t byte_length{0};
+  std::size_t bit_offset{0};
+  std::size_t bit_length{0};
   bool little_endian{false};
   double scale{1.0};
 };
 
 struct XmlCommandMapping {
   std::vector<XmlField> fields;
-  bool empty() const { return this->fields.empty(); }
 };
 
 struct XmlMapping {
   bool valid{false};
-  XmlCommandMapping tr32;
-  XmlCommandMapping tg43;
-  XmlCommandMapping tgc0;
+  std::string source_path;
+  XmlCommandMapping tr32_fields;
+  XmlCommandMapping tg43_fields;
+  XmlCommandMapping tgc0_fields;
 };
 
 struct StatValue {
@@ -35,7 +37,7 @@ struct StatValue {
   std::string label;
 };
 
-class Stats {
+class MachineStats {
  public:
   void clear();
   bool empty() const;
@@ -47,12 +49,17 @@ class Stats {
   std::unordered_map<std::string, StatValue> values_{};
 };
 
-bool load_mapping_from_string(const std::string &xml);
-const XmlMapping &get_xml_mapping();
+bool load_xml_mapping(const std::string &path, XmlMapping &mapping);
+bool load_xml_mapping(const std::string &path);
+const XmlMapping &get_loaded_xml_mapping();
 
-bool parse_TR32(const std::vector<uint8_t> &decoded, Stats &out);
-bool parse_TG43(const std::vector<uint8_t> &decoded, Stats &out);
-bool parse_TGC0(const std::vector<uint8_t> &decoded, Stats &out);
+bool map_tr32(const std::vector<uint8_t> &decoded, const XmlMapping &mapping, MachineStats &out);
+bool map_tg43(const std::vector<uint8_t> &decoded, const XmlMapping &mapping, MachineStats &out);
+bool map_tgc0(const std::vector<uint8_t> &decoded, const XmlMapping &mapping, MachineStats &out);
+
+bool map_tr32(const std::vector<uint8_t> &decoded, MachineStats &out);
+bool map_tg43(const std::vector<uint8_t> &decoded, MachineStats &out);
+bool map_tgc0(const std::vector<uint8_t> &decoded, MachineStats &out);
 
 }  // namespace jutta_component
 }  // namespace esphome

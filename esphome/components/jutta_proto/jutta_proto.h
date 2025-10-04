@@ -142,12 +142,12 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
 
   bool enable_xml_poll_{false};
   uint32_t xml_poll_interval_ms_{30000};
-  std::string xml_mapping_path_{"embedded"};
+  std::string xml_mapping_path_{"/config/esphome/e6.xml"};
   uint32_t xml_next_poll_{0};
   bool xml_mapping_logged_{false};
   bool xml_mapping_loaded_{false};
   XmlMapping xml_mapping_{};
-  Stats xml_stats_{};
+  MachineStats xml_stats_{};
   std::unordered_map<std::string, sensor::Sensor *> xml_sensors_{};
   std::unordered_map<std::string, std::string> xml_sensor_labels_{};
 
