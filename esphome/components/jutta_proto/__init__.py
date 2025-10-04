@@ -1,8 +1,13 @@
+import os
+
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
 from esphome.components import text_sensor, uart
 from esphome.const import CONF_ID
+from esphome.core import CORE
+
+COMPONENT_DIR = os.path.dirname(__file__)
 
 DEPENDENCIES = ["uart"]
 AUTO_LOAD = ["uart"]
@@ -95,7 +100,7 @@ CONFIG_SCHEMA = (
             cv.GenerateID(): cv.declare_id(JuraComponent),
             cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
-            cv.Optional(CONF_XML_MAPPING_PATH, default="/config/esphome/e6.xml"): cv.string,
+            cv.Optional(CONF_XML_MAPPING_PATH, default="embedded"): cv.string,
             cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=30000): cv.All(
                 cv.positive_int, cv.Range(min=25000)
             ),
@@ -235,6 +240,13 @@ def _normalize_sequence(value):
     )(value)
 
 
+def _make_raw_string_literal(text):
+    delimiter = "JUTTA_XML"
+    while f"){delimiter}\"" in text:
+        delimiter += "_X"
+    return 'R"' + delimiter + '(' + text + ')' + delimiter + '"'
+
+
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     JURA_COMPONENT_IDS.append(config[CONF_ID])
@@ -242,7 +254,50 @@ async def to_code(config):
     await uart.register_uart_device(var, config)
 
     cg.add(var.set_enable_xml_poll(config[CONF_ENABLE_XML_POLL]))
-    cg.add(var.set_xml_mapping_path(cg.std_string(config[CONF_XML_MAPPING_PATH])))
+    mapping_path = config[CONF_XML_MAPPING_PATH]
+    if mapping_path == "embedded":
+        resolved_path = os.path.join(COMPONENT_DIR, "jura_mapping_embed.xml")
+    else:
+        resolved_path = mapping_path
+        if not os.path.isabs(resolved_path):
+            resolved_path = os.path.join(CORE.relative_config_path, resolved_path)
+
+    if not os.path.exists(resolved_path):
+        raise cv.Invalid(
+            "Die angegebene XML-Datei '{}' (aufgelöst zu '{}') wurde nicht gefunden".format(
+                mapping_path, resolved_path
+            )
+        )
+
+    try:
+        with open(resolved_path, "r", encoding="utf-8") as xml_file:
+            xml_content = xml_file.read()
+    except OSError as err:
+        raise cv.Invalid(
+            "XML-Datei '{}' konnte nicht gelesen werden: {}".format(
+                resolved_path, err
+            )
+        ) from err
+
+    cg.add(var.set_xml_mapping_path(cg.std_string(resolved_path)))
+
+    component_index = len(JURA_COMPONENT_IDS)
+    symbol_base = f"jutta_proto_xml_blob_{component_index}"
+    raw_literal = _make_raw_string_literal(xml_content)
+    cg.add_global(
+        cg.RawExpression(
+            "namespace esphome {\nnamespace jutta_component {\n"
+            f"constexpr char {symbol_base}[] = {raw_literal};\n"
+            f"constexpr size_t {symbol_base}_len = sizeof({symbol_base}) - 1;\n"
+            "}\n}\n"
+        )
+    )
+    cg.add(
+        var.set_xml_mapping_source(
+            cg.RawExpression(f"::esphome::jutta_component::{symbol_base}"),
+            cg.RawExpression(f"::esphome::jutta_component::{symbol_base}_len")
+        )
+    )
     cg.add(var.set_xml_poll_interval(config[CONF_XML_POLL_INTERVAL_MS]))
 
     if CONF_MACHINE_DATA in config:

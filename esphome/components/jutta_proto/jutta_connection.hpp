@@ -119,6 +119,11 @@ class JuttaConnection {
     void tx_db_command(const std::string& ascii);
     bool read_db_frame(std::vector<uint8_t>& decoded, uint32_t timeout_ms);
 
+    /** Spült ausschließlich den DB-Puffer, um vor einem neuen Frame altes Echo zu verwerfen. */
+    void reset_db_rx_buffer();
+    /** Leert alle Empfangspuffer (Legacy- und DB-Teil). */
+    void reset_all_rx_buffers();
+
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
      * [Thread Safe]
@@ -220,6 +225,8 @@ class JuttaConnection {
     [[nodiscard]] bool read_decoded_unsafe(std::vector<uint8_t>& data) const;
 
     void flush_serial_input() const;
+    void flush_db_rx_queue();
+    void flush_all_rx();
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
