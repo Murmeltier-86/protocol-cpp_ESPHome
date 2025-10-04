@@ -1,8 +1,13 @@
+import os
+
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
 from esphome.components import text_sensor, uart
 from esphome.const import CONF_ID
+from esphome.core import CORE
+
+COMPONENT_DIR = os.path.dirname(__file__)
 
 DEPENDENCIES = ["uart"]
 AUTO_LOAD = ["uart"]
@@ -95,7 +100,7 @@ CONFIG_SCHEMA = (
             cv.GenerateID(): cv.declare_id(JuraComponent),
             cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
-            cv.Optional(CONF_XML_MAPPING_PATH, default="/config/esphome/e6.xml"): cv.string,
+            cv.Optional(CONF_XML_MAPPING_PATH, default="embedded"): cv.string,
             cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=30000): cv.All(
                 cv.positive_int, cv.Range(min=25000)
             ),
@@ -242,7 +247,16 @@ async def to_code(config):
     await uart.register_uart_device(var, config)
 
     cg.add(var.set_enable_xml_poll(config[CONF_ENABLE_XML_POLL]))
-    cg.add(var.set_xml_mapping_path(cg.std_string(config[CONF_XML_MAPPING_PATH])))
+    mapping_path = config[CONF_XML_MAPPING_PATH]
+    if mapping_path == "embedded":
+        resolved_path = os.path.join(COMPONENT_DIR, "jura_mapping_embed.xml")
+    else:
+        resolved_path = mapping_path
+        if not os.path.isabs(resolved_path):
+            resolved_path = os.path.join(CORE.relative_config_path, resolved_path)
+    cg.add(var.set_xml_mapping_path(cg.std_string(resolved_path)))
+    normalized_path = resolved_path.replace("\\", "\\\\")
+    cg.add_build_flag('-DJURA_XML_MAPPING_INCLUDE="{}"'.format(normalized_path))
     cg.add(var.set_xml_poll_interval(config[CONF_XML_POLL_INTERVAL_MS]))
 
     if CONF_MACHINE_DATA in config:
