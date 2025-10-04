@@ -1,4 +1,5 @@
 #include "esphome/components/jutta_proto/jutta_proto.h"
+#include "esphome/components/jutta_proto/jura_mapping_embed.h"
 
 #include <algorithm>
 #include <array>
@@ -22,7 +23,7 @@ constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
 constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
 const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
-constexpr uint32_t XML_RESPONSE_TIMEOUT_MS = 1000;
+constexpr uint32_t XML_RESPONSE_TIMEOUT_MS = 1400;
 constexpr uint32_t XML_INTER_COMMAND_DELAY_MS = 180;
 
 template<typename AppT>
@@ -193,6 +194,9 @@ void JuraComponent::setup() {
 
   this->reset_xml_cycle_state_();
   this->xml_next_poll_ = esphome::millis();
+  if (this->xml_mapping_path_ == "embedded") {
+    this->xml_mapping_path_ = get_joe_xml_include_path();
+  }
   if (this->enable_xml_poll_) {
     this->ensure_xml_mapping_loaded_();
     this->ensure_xml_sensors_created_();
@@ -279,7 +283,7 @@ void JuraComponent::dump_config() {
   }
 
   ESP_LOGCONFIG(TAG, "  XML polling: %s", this->enable_xml_poll_ ? "enabled" : "disabled");
-  ESP_LOGCONFIG(TAG, "  XML mapping path: %s", this->xml_mapping_path_.c_str());
+  ESP_LOGCONFIG(TAG, "  XML mapping include: %s", this->xml_mapping_path_.c_str());
   ESP_LOGCONFIG(TAG, "  XML poll interval: %u ms", static_cast<unsigned>(this->xml_poll_interval_ms_));
   ESP_LOGCONFIG(TAG, "  XML mapping loaded: %s",
                 YESNO(this->xml_mapping_loaded_ && this->xml_mapping_.valid));
@@ -439,6 +443,9 @@ void JuraComponent::process_handshake() {
         this->handshake_stage_ = HandshakeStage::DONE;
         this->handshake_buffer_.clear();
         this->handshake_deadline_ = 0;
+        if (this->enable_xml_poll_) {
+          this->ensure_xml_mapping_loaded_();
+        }
       } else {
         this->restart_handshake("failed to send @t3");
       }
@@ -569,18 +576,14 @@ void JuraComponent::ensure_xml_sensors_created_() {
   if (!this->enable_xml_poll_ || !this->xml_mapping_.valid) {
     return;
   }
-  auto ensure_field = [&](const XmlField &field) {
-    this->get_or_create_sensor_(field.name, field.label);
+  auto ensure_block = [&](const XmlCommandMapping &mapping) {
+    for (const auto &field : mapping.fields) {
+      this->get_or_create_sensor_(field.name, field.label);
+    }
   };
-  for (const auto &field : this->xml_mapping_.tr32_fields.fields) {
-    ensure_field(field);
-  }
-  for (const auto &field : this->xml_mapping_.tg43_fields.fields) {
-    ensure_field(field);
-  }
-  for (const auto &field : this->xml_mapping_.tgc0_fields.fields) {
-    ensure_field(field);
-  }
+  ensure_block(this->xml_mapping_.tr32);
+  ensure_block(this->xml_mapping_.tg43);
+  ensure_block(this->xml_mapping_.tgc0);
 }
 
 bool JuraComponent::ensure_xml_mapping_loaded_() {
@@ -590,21 +593,31 @@ bool JuraComponent::ensure_xml_mapping_loaded_() {
   if (this->xml_mapping_loaded_) {
     return this->xml_mapping_.valid;
   }
-  XmlMapping mapping;
-  if (!load_xml_mapping(this->xml_mapping_path_, mapping)) {
-    ESP_LOGW(TAG, "Failed to load XML mapping at %s", this->xml_mapping_path_.c_str());
-    this->xml_mapping_loaded_ = false;
+
+  auto *xml_ptr = get_joe_xml_data();
+  std::size_t xml_len = get_joe_xml_length();
+  if (xml_ptr == nullptr || xml_len == 0) {
+    ESP_LOGW(TAG, "Kein eingebettetes XML-Mapping vorhanden");
+    this->xml_mapping_loaded_ = true;
     this->xml_mapping_.valid = false;
-    this->xml_mapping_logged_ = false;
     this->xml_stats_.clear();
     this->log_xml_mapping_status_();
     return false;
   }
-  this->xml_mapping_ = std::move(mapping);
-  this->xml_mapping_loaded_ = this->xml_mapping_.valid;
+
+  std::string xml_source(xml_ptr, xml_len);
+  bool valid = load_mapping_from_string(xml_source);
+  this->xml_mapping_ = get_xml_mapping();
+  this->xml_mapping_loaded_ = true;
   this->xml_mapping_logged_ = false;
   this->xml_stats_.clear();
+  if (!valid) {
+    this->xml_mapping_.valid = false;
+  }
   this->log_xml_mapping_status_();
+  if (this->xml_mapping_.valid) {
+    this->ensure_xml_sensors_created_();
+  }
   return this->xml_mapping_.valid;
 }
 
@@ -612,11 +625,8 @@ void JuraComponent::log_xml_mapping_status_() {
   if (this->xml_mapping_logged_) {
     return;
   }
-  ESP_LOGI(TAG, "XML mapping loaded from %s (valid=%d, fields=%u/%u/%u)",
-           this->xml_mapping_path_.c_str(), static_cast<int>(this->xml_mapping_.valid),
-           static_cast<unsigned>(this->xml_mapping_.tr32_fields.fields.size()),
-           static_cast<unsigned>(this->xml_mapping_.tg43_fields.fields.size()),
-           static_cast<unsigned>(this->xml_mapping_.tgc0_fields.fields.size()));
+  ESP_LOGI(TAG, "XML mapping valid=%d, cmds=<@TR:32, @TG:43, @TG:C0>",
+           static_cast<int>(this->xml_mapping_.valid));
   this->xml_mapping_logged_ = true;
 }
 
@@ -657,6 +667,7 @@ void JuraComponent::start_xml_cycle_(uint32_t now) {
   this->xml_cycle_.command_index = 0;
   const char *command = xml_command_for_index_(0);
   ESP_LOGD(TAG, "TX_DB \"%s\"", command);
+  this->coffee_maker_->connection->flush_all_rx();
   this->coffee_maker_->connection->tx_db_command(command);
   this->xml_cycle_.deadline_ms = now + XML_RESPONSE_TIMEOUT_MS;
   this->xml_cycle_.next_action_ms = 0;
@@ -697,6 +708,7 @@ void JuraComponent::handle_xml_cycle_(uint32_t now) {
       }
       const char *command = xml_command_for_index_(next_index);
       ESP_LOGD(TAG, "TX_DB \"%s\"", command);
+      this->coffee_maker_->connection->flush_db_rx_queue();
       this->coffee_maker_->connection->tx_db_command(command);
       this->xml_cycle_.command_index = next_index;
       this->xml_cycle_.phase = XmlCycleState::Phase::WaitingForFrame;
@@ -725,27 +737,21 @@ bool JuraComponent::try_receive_xml_frame_(uint32_t now) {
 void JuraComponent::finish_xml_cycle_(uint32_t now, bool success) {
   bool any_value = false;
 
-  auto handle_response = [&](size_t index, auto mapper) {
+  auto handle_response = [&](size_t index, bool (*parser)(const std::vector<uint8_t> &, Stats &)) {
     const auto &response = this->xml_cycle_.responses[index];
     const char *label = xml_log_label_for_index_(index);
     if (response.empty()) {
       ESP_LOGW(TAG, "XML %s: keine Daten empfangen", label);
       return;
     }
-    if (mapper(response, this->xml_mapping_, this->xml_stats_)) {
+    if (parser(response, this->xml_stats_)) {
       any_value = true;
     }
   };
 
-  handle_response(0,
-                   static_cast<bool (*)(const std::vector<uint8_t> &, const XmlMapping &, MachineStats &)>(
-                       map_tr32));
-  handle_response(1,
-                   static_cast<bool (*)(const std::vector<uint8_t> &, const XmlMapping &, MachineStats &)>(
-                       map_tg43));
-  handle_response(2,
-                   static_cast<bool (*)(const std::vector<uint8_t> &, const XmlMapping &, MachineStats &)>(
-                       map_tgc0));
+  handle_response(0, parse_TR32);
+  handle_response(1, parse_TG43);
+  handle_response(2, parse_TGC0);
 
   if (any_value) {
     this->publish_xml_stats_();

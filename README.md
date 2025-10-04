@@ -18,7 +18,6 @@ Since newer models **do not use** this old V1-Protocol any more I started this p
 ### Aktivierung des XML-Pollings
 
 - `enable_xml_poll`: Schaltet den zusätzlichen XML-Pfad frei (Standard `false`).
-- `xml_mapping_path`: Dateipfad zum J.O.E.-Mapping (Standard `"/config/esphome/e6.xml"`).
 - `xml_poll_interval_ms`: Abstand zwischen zwei Abfragen in Millisekunden (Standard `30000`).
 
 Beispiel-Konfiguration in ESPHome:
@@ -32,15 +31,25 @@ jutta_proto:
   id: jura_e6
   uart_id: uart_bus
   enable_xml_poll: true
-  xml_mapping_path: "/config/esphome/e6.xml"
+  xml_mapping_path: joe_export.xml  # Pfad zur exportierten J.O.E.-XML
   xml_poll_interval_ms: 30000
 ```
 
 ### Mapping-Datei
 
-- Das Mapping folgt der Struktur der veröffentlichten `jura_joe_xml_bundle_final`-Dateien.
-- Bei erfolgreichem Laden erscheint im Log eine Zeile wie `XML mapping loaded from /config/esphome/e6.xml (valid=1, fields=...)`.
-- Ist die Datei nicht vorhanden oder fehlerhaft, läuft die Komponente weiter – lediglich das XML-Polling bleibt inaktiv.
+- Die Komponente bindet die exportierte J.O.E.-XML-Datei direkt per `incbin` in die Firmware ein.
+- Standardmäßig wird `esphome/components/jutta_proto/jura_mapping_embed.xml` genutzt (enthält eine unveränderte Original-Exportdatei).
+- Über den YAML-Parameter `xml_mapping_path` kann ein alternativer Pfad angegeben werden; der Codegenerator setzt daraus automatisch das Build-Flag `-DJURA_XML_MAPPING_INCLUDE="<Pfad>"`.
+- Pfadangaben können absolut oder relativ zum Projektverzeichnis erfolgen (bei Leerzeichen bitte durch Anführungszeichen schützen); relative Pfade werden zum YAML-Verzeichnis aufgelöst.
+- Es ist keine manuelle Anpassung der XML nötig – einfach die aus der App exportierte Datei referenzieren.
+- Der konfigurierte Pfad erscheint zusätzlich im Log (`XML mapping include`).
+
+**Kurz-Dokumentation**
+
+1. XML in der J.O.E.-App exportieren.
+2. Datei ins ESPHome-Projekt kopieren (oder absoluten Pfad merken).
+3. Im YAML `xml_mapping_path` auf diese Datei verweisen – fertig.
+4. Beim Kompilieren wird die Datei automatisch eingebunden, vom Parser ausgewertet und anschließend als numerische Sensorwerte veröffentlicht.
 
 ### Automatisch erzeugte Sensoren
 
@@ -290,41 +299,25 @@ ESPHome handles dependency management, compilation, and flashing of the firmware
 
 ### XML-Zähler automatisch bereitstellen
 
-Die Firmware kann die JURA-internen XML-Zähler zyklisch abfragen und als numerische Sensoren in Home Assistant zur Verfügung
-stellen. Dafür ist keine zusätzliche YAML-Konfiguration nötig – alle Sensorinstanzen werden während `setup()` angelegt,
-registriert und bleiben dauerhaft sichtbar.
+Die Firmware kann die JURA-internen XML-Zähler zyklisch abfragen und als numerische Sensoren in Home Assistant zur Verfügung stellen. Dafür ist keine zusätzliche YAML-Konfiguration nötig – alle Sensorinstanzen werden während `setup()` angelegt, registriert und bleiben dauerhaft sichtbar.
 
-1. **Feature aktivieren:** Die Standardwerte werden über `esphome/components/jutta_proto/jutta_config.h` gesteuert. Dort
-   können `JUTTA_XML_ENABLE`, `JUTTA_XML_POLL_MS` und `JUTTA_XML_RX_TIMEOUT_MS` bei Bedarf angepasst werden. Voreinstellung ist
-   `JUTTA_XML_ENABLE 1`, sodass der XML-Pfad ohne weitere Änderungen aktiv ist.
-2. **XML-Mapping bereitstellen:** Exportiere in der J.O.E.-App die Maschinen-XML und kopiere die Datei als
-   `/data/jura_machine.xml` auf das ESPHome-Gerät. Falls die Datei fehlt oder unvollständig ist, werden Standardbefehle und
-   generische Labels verwendet.
-3. **Zyklische Abfrage beobachten:** Nach erfolgreichem Legacy-Handshake erscheinen im Log Einträge wie `XML poll start`,
-   `TX_DB "@TR:32"`, `RX_DB decoded_len=21 expected=21` sowie `publish TR32=[…]`. Bei einem Timeout wird `RX_DB timeout`
-   ausgegeben. Nur wenn alle drei Blöcke korrekt gelesen werden, werden neue Werte veröffentlicht.
+**Konfiguration**
 
-#### XML-Pfad konfigurieren
+* Die J.O.E.-XML (nur `@TR:32`, `@TG:43`, `@TG:C0`) wird automatisch als Binärressource eingebettet.
+* In der ESPHome-YAML muss lediglich `xml_mapping_path` auf die exportierte Datei zeigen.
+* Keine Dateisysteme erforderlich.
 
-* Standardpfad für das Mapping ist `/data/jura_machine.xml`.
-* Über die YAML-Option `xml_path` kann ein alternativer Speicherort angegeben werden:
+**Ablauf**
 
-  ```yaml
-  jutta_proto:
-    id: jura1
-    xml_path: "/data/my_mapping/jura_map.xml"
-  ```
+* Nach Legacy-Handshake wird das Mapping aus dem eingebetteten String geladen.
+* Alle 30 s werden die drei DB-Kommandos gepollt; Frames werden ohne feste Länge gelesen (CRLF oder Gap).
+* Die numerischen Felder werden gemäß Mapping (offset/size/endian/scale) extrahiert und als Sensoren veröffentlicht.
 
-* Die referenzierte Datei muss vorab mit `uploadfs` oder über das ESPHome Dashboard auf das Gerät kopiert werden.
+**Troubleshooting**
 
-#### Fehlersuche
-
-* **Sensoren tauchen nicht auf:** Prüfe, ob das Feature aktiviert ist und ob beim Start Meldungen zur Sensorregistrierung
-  erscheinen. Sensorinstanzen werden vor dem ersten Home-Assistant-Connect erstellt und mit `set_internal(false)` sichtbar
-  gemacht.
-* **Keine Werteaktualisierung:** Achte auf Logzeilen zu `RX_DB timeout` oder `decoded_len=… expected=…`. Bei laufenden
-  XML-Polls sollten andere Aufgaben den UART nicht nutzen; der Code setzt während eines Polls ein internes Busy-Flag und
-  blockiert konkurrierende Leser.
+* Log sollte **keine** „expected length“-Warnungen mehr enthalten.
+* Bei „RX_DB timeout @TG:43/@TG:C0“: `xml_poll_interval_ms` erhöhen und inter-Command-Delay (150–200 ms) prüfen.
+* Wenn Sensoren in HA fehlen: prüfen, ob `publish_state` nach Parse wirklich aufgerufen wird (Log hinzufügen).
 
 #### Datenrahmen-Handling
 
