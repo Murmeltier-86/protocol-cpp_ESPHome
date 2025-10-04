@@ -283,8 +283,11 @@ bool load_mapping_from_string(const std::string &xml) {
   bool tg43_found = parse_command_block(xml, "@tg:43", g_mapping.tg43);
   bool tgc0_found = parse_command_block(xml, "@tg:c0", g_mapping.tgc0);
 
-  g_mapping.valid = tr32_found && tg43_found && tgc0_found && !g_mapping.tr32.empty() && !g_mapping.tg43.empty() &&
-                    !g_mapping.tgc0.empty();
+  bool tr32_has_fields = tr32_found && !g_mapping.tr32.empty();
+  bool tg43_has_fields = tg43_found && !g_mapping.tg43.empty();
+  bool tgc0_has_fields = tgc0_found && !g_mapping.tgc0.empty();
+
+  g_mapping.valid = tr32_has_fields || tg43_has_fields || tgc0_has_fields;
   g_mapping_loaded = true;
 
   if (!tr32_found || g_mapping.tr32.empty()) {
