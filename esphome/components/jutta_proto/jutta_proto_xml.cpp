@@ -68,11 +68,19 @@ AttributeMap parse_attributes(const std::string &tag) {
     }
     std::string key = tag.substr(pos, name_end - pos);
     key = to_lower_copy(key);
-    pos = tag.find('=', name_end);
-    if (pos == std::string::npos) {
+    std::size_t equal_pos = tag.find('=', name_end);
+    if (equal_pos == std::string::npos) {
       break;
     }
-    ++pos;
+    std::size_t next_non_space = tag.find_first_not_of(" \t\r\n", name_end);
+    if (next_non_space == std::string::npos) {
+      break;
+    }
+    if (tag[next_non_space] != '=') {
+      pos = next_non_space;
+      continue;
+    }
+    pos = equal_pos + 1;
     pos = tag.find_first_not_of(" \t\r\n", pos);
     if (pos == std::string::npos) {
       break;

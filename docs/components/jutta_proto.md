@@ -170,3 +170,15 @@ auf älteren Toolchains fehlerfrei kompilieren.
 Zusätzlich wurde die Hilfsfunktion zur Formatierung druckbarer Zeichen so angepasst, dass sie ohne nicht genutzten Template-Parameter
 auskommt. Damit bleibt die Ausgabe in den ESPHome-Logs (z. B. beim UART-Handshaking) unverändert, gleichzeitig verhindert die Änderung
 jedoch, dass GCC oder Clang bei der Vorlagendeduktion scheitern.
+
+### XML-Mapping der J.O.E.-Exporte
+
+**Symptom.** Im Log erscheint dauerhaft `XML mapping valid: NO`, obwohl die J.O.E.-XML-Datei korrekt geladen wurde. Alle Sensoren für
+`@TR:32`, `@TG:43` und `@TG:C0` bleiben inaktiv.
+
+**Ursache.** Der XML-Parser hat das erste Wort eines Tags irrtümlich als Attribut behandelt. Bei Exporten, die Großbuchstaben für
+`<BANK Command="…">` verwenden, wurde daher das `Command`-Attribut nicht erkannt und der zugehörige Block übersprungen.
+
+**Lösung.** Die Attribut-Erkennung ignoriert nun das Tag-Präfix, sobald hinter dem Tag-Namen kein `=` folgt. Dadurch werden auch J.O.E.-
+Exporte mit vollständig großgeschriebenen `BANK`-Tags korrekt ausgewertet, die Sensorfelder werden wieder angelegt und der Status
+wechselt auf `XML mapping valid: YES`.
