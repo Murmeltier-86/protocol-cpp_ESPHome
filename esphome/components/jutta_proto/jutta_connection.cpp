@@ -459,6 +459,38 @@ void JuttaConnection::flush_serial_input() const {
     }
 }
 
+void JuttaConnection::flush_db_rx_queue() {
+    if (!this->db_rx_queue_.empty()) {
+        ESP_LOGD(TAG, "Clearing %zu gepufferte DB-Byte%s.", this->db_rx_queue_.size(),
+                 this->db_rx_queue_.size() == 1 ? "" : "s");
+        this->db_rx_queue_.clear();
+    }
+
+    std::array<uint8_t, 4> discard{};
+    while (true) {
+        size_t read = this->serial.read_serial(discard);
+        if (read == 0) {
+            break;
+        }
+        std::vector<uint8_t> filtered;
+        filtered.reserve(read);
+        size_t dropped = this->filter_tx_echo_(discard.data(), read, filtered);
+        if (dropped > 0) {
+            ESP_LOGVV(TAG, "During DB flush dropped %zu echo byte%s.", dropped,
+                      dropped == 1 ? "" : "s");
+        }
+        if (!filtered.empty()) {
+            ESP_LOGVV(TAG, "Discarded %zu DB byte%s while flushing.", filtered.size(),
+                      filtered.size() == 1 ? "" : "s");
+        }
+    }
+}
+
+void JuttaConnection::flush_all_rx() {
+    this->flush_serial_input();
+    this->flush_db_rx_queue();
+}
+
 void JuttaConnection::reinject_decoded_front(const std::string& data) const {
     if (data.empty()) {
         return;
@@ -549,7 +581,7 @@ void JuttaConnection::tx_db_command(const std::string& ascii) {
 bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t timeout_ms) {
     decoded.clear();
 
-    constexpr uint32_t GAP_MS = 20;
+    constexpr uint32_t GAP_MS = 25;
     enum class FrameEnd { None, Gap, Terminator, Timeout };
 
     FrameEnd end_reason = FrameEnd::None;
@@ -670,6 +702,14 @@ bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t time
 
     ESP_LOGD(TAG, "RX_DB decoded_len=%u reason=%s", static_cast<unsigned>(decoded.size()), reason);
     return true;
+}
+
+void JuttaConnection::reset_db_rx_buffer() {
+    this->flush_db_rx_queue();
+}
+
+void JuttaConnection::reset_all_rx_buffers() {
+    this->flush_all_rx();
 }
 
 void JuttaConnection::activate_tx_echo_suppressor_(const std::vector<uint8_t>& frame) {
