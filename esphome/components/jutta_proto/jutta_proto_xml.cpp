@@ -641,12 +641,20 @@ bool parse_payload(const std::vector<uint8_t> &decoded, const XmlCommandMapping 
     std::string payload_ascii = format_ascii_string(decoded);
     ESP_LOGD(TAG, "XML %s payload ASCII: %s", command_label, payload_ascii.c_str());
   }
+  if (decoded.empty() || decoded[0] != 0x26) {
+    ESP_LOGW(TAG, "XML %s: unerwarteter Startmarker (decoded_len=%u)", command_label,
+             static_cast<unsigned>(decoded.size()));
+    return false;
+  }
+  if (expected_len != 0 && decoded.size() < expected_len) {
+    ESP_LOGW(TAG, "XML %s: decoded_len (%u) < expected_len (%u)", command_label,
+             static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len));
+    return false;
+  }
   if (expected_len != 0 && decoded.size() != expected_len) {
     std::string mismatch_head = format_hex_head(decoded, 32);
-    ESP_LOGW(TAG,
-             "XML %s: decoded_len (%u) != expected_len (%u), head32=%s",
-             command_label, static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len),
-             mismatch_head.c_str());
+    ESP_LOGD(TAG, "XML %s: decoded_len (%u) != expected_len (%u), head32=%s", command_label,
+             static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len), mismatch_head.c_str());
   }
   for (const auto &field : mapping.fields) {
     if (field.offset + field.size > decoded.size()) {
@@ -671,10 +679,6 @@ bool parse_payload(const std::vector<uint8_t> &decoded, const XmlCommandMapping 
              field.name.c_str(), static_cast<unsigned>(field.offset), static_cast<unsigned>(field.size),
              field.little_endian ? "LE" : "BE", raw_hex.c_str(),
              static_cast<unsigned long long>(raw));
-    if ((field.size <= 2 && raw > 0xFFFFULL) || raw > 100000ULL) {
-      ESP_LOGW(TAG, "XML %s Feld %s plausibility warning: value=%llu", command_label, field.name.c_str(),
-               static_cast<unsigned long long>(raw));
-    }
     double value = static_cast<double>(raw) * field.scale;
     out.set_value(field.name, value, field.label);
     ESP_LOGD(TAG, "XML field %s value_staged=%.3f", field.name.c_str(), value);
