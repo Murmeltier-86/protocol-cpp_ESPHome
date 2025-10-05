@@ -99,35 +99,6 @@ auto try_register_sensor(AppT &app, sensor::Sensor *sensor, double)
   app.register_entity(sensor);
 }
 
-template<typename AppT>
-void try_register_sensor(AppT &, sensor::Sensor *, ...) {}
-
-inline void register_sensor_with_app(sensor::Sensor *sensor) {
-  if (sensor == nullptr) {
-    return;
-  }
-#ifdef __GXX_RTTI
-  if (auto *component = dynamic_cast<Component *>(sensor)) {
-    App.register_component(component);
-  }
-#else
-  // Ohne RTTI können wir keinen sicheren Cross-Cast durchführen. In diesem Fall
-  // verzichten wir lediglich darauf, die Komponente bei App zu registrieren.
-  // Dies entspricht dem Verhalten, das auch mit dem Stub-Sensortyp greift, der
-  // nicht von Component erbt.
-#endif
-  try_register_sensor(App, sensor, 0L);
-}
-
-template<typename SensorT>
-auto try_set_parent(SensorT *sensor, Component *parent, int)
-    -> decltype(sensor->set_parent(parent), void()) {
-  sensor->set_parent(parent);
-}
-
-template<typename SensorT>
-void try_set_parent(SensorT *, Component *, ...) {}
-
 std::string format_printable_char(uint8_t byte) {
   switch (byte) {
     case '\r':
@@ -233,12 +204,7 @@ const char *JuraComponent::handshake_stage_name(JuraComponent::HandshakeStage st
   return "unknown";
 }
 
-JuraComponent::~JuraComponent() {
-  for (auto &entry : this->xml_sensors_) {
-    delete entry.second;
-  }
-  this->xml_sensors_.clear();
-}
+JuraComponent::~JuraComponent() { this->xml_sensors_.clear(); }
 
 void JuraComponent::setup() {
   if (this->parent_ == nullptr) {
@@ -817,6 +783,17 @@ bool JuraComponent::process_tgc0_response_(const std::vector<uint8_t> &decoded) 
   return any_value;
 }
 
+void JuraComponent::add_configured_xml_sensor(const std::string &field, sensor::Sensor *sensor) {
+  if (field.empty() || sensor == nullptr) {
+    return;
+  }
+  this->xml_sensors_[field] = sensor;
+  this->xml_unconfigured_sensor_logged_.erase(field);
+  if (this->xml_sensor_meta_.find(field) != this->xml_sensor_meta_.end()) {
+    this->get_or_create_sensor_(field, field);
+  }
+}
+
 void JuraComponent::register_xml_sensor_(const XmlField &field, XmlSensorKind kind) {
   auto &meta = this->xml_sensor_meta_[field.name];
   meta.kind = kind;
@@ -854,6 +831,17 @@ void JuraComponent::ensure_xml_sensors_created_() {
   ensure_block(this->xml_mapping_.tr32, XmlSensorKind::Counter);
   ensure_block(this->xml_mapping_.tg43, XmlSensorKind::Counter);
   ensure_block(this->xml_mapping_.tgc0, XmlSensorKind::Measurement);
+
+  for (const auto &entry : this->xml_sensors_) {
+    if (this->xml_sensor_meta_.find(entry.first) != this->xml_sensor_meta_.end()) {
+      continue;
+    }
+    if (this->xml_missing_sensor_logged_[entry.first]) {
+      continue;
+    }
+    ESP_LOGW(TAG, "XML Sensor %s ist im aktuellen Mapping nicht vorhanden", entry.first.c_str());
+    this->xml_missing_sensor_logged_[entry.first] = true;
+  }
 }
 
 bool JuraComponent::ensure_xml_mapping_loaded_() {
@@ -870,6 +858,7 @@ bool JuraComponent::ensure_xml_mapping_loaded_() {
     this->xml_mapping_loaded_ = true;
     this->xml_mapping_ = {};
     this->xml_stats_.clear();
+    this->xml_missing_sensor_logged_.clear();
     this->log_xml_mapping_status_();
     return false;
   }
@@ -882,6 +871,7 @@ bool JuraComponent::ensure_xml_mapping_loaded_() {
   this->xml_stats_.clear();
   this->xml_sensor_meta_.clear();
   this->tgc0_filters_.clear();
+  this->xml_missing_sensor_logged_.clear();
   this->log_xml_mapping_status_();
   if (this->xml_mapping_.valid) {
     this->ensure_xml_sensors_created_();
@@ -1097,7 +1087,12 @@ void JuraComponent::publish_single_stat_(const std::string &name, double value, 
   auto &meta = meta_it->second;
   auto *sensor = this->get_or_create_sensor_(name, label);
   if (sensor == nullptr) {
-    ESP_LOGW(TAG, "XML field %s konnte nicht veröffentlicht werden", name.c_str());
+    auto logged_it = this->xml_unconfigured_sensor_logged_.find(name);
+    bool already_logged = logged_it != this->xml_unconfigured_sensor_logged_.end() && logged_it->second;
+    if (!already_logged) {
+      ESP_LOGD(TAG, "XML Feld %s ist nicht in der YAML als Sensor verlinkt – Wert wird verworfen", name.c_str());
+      this->xml_unconfigured_sensor_logged_[name] = true;
+    }
     return;
   }
   double min_value = meta.min_value;
@@ -1136,54 +1131,32 @@ void JuraComponent::publish_single_stat_(const std::string &name, double value, 
 }
 
 sensor::Sensor *JuraComponent::get_or_create_sensor_(const std::string &name, const std::string &label) {
-  std::string effective_label = label.empty() ? name : label;
-  auto meta_it = this->xml_sensor_meta_.find(name);
-  const XmlSensorMeta *meta = meta_it != this->xml_sensor_meta_.end() ? &meta_it->second : nullptr;
-  int accuracy = meta != nullptr ? meta->accuracy_decimals : 0;
-  sensor::StateClass state_class = sensor::StateClass::STATE_CLASS_NONE;
-  if (meta != nullptr) {
-    state_class = meta->kind == XmlSensorKind::Counter
-                      ? sensor::StateClass::STATE_CLASS_TOTAL_INCREASING
-                      : sensor::StateClass::STATE_CLASS_MEASUREMENT;
-  }
-  std::string unique_id = std::string("Jura E6 ") + effective_label;
-
+  (void) label;
   auto it = this->xml_sensors_.find(name);
-  if (it != this->xml_sensors_.end()) {
-    auto *sensor_obj = it->second;
-    sensor_obj->set_unique_id(unique_id);
-    sensor_obj->set_accuracy_decimals(accuracy);
-    sensor_obj->set_state_class(state_class);
-    if (meta != nullptr && meta->has_unit) {
-      sensor_obj->set_unit_of_measurement(meta->unit_of_measurement);
-    }
-    if (meta != nullptr && meta->has_icon) {
-      sensor_obj->set_icon(meta->icon);
-    }
-    auto label_it = this->xml_sensor_labels_.find(name);
-    if (label_it == this->xml_sensor_labels_.end() || label_it->second != effective_label) {
-      sensor_obj->set_name(effective_label);
-      this->xml_sensor_labels_[name] = effective_label;
-    }
-    return sensor_obj;
+  if (it == this->xml_sensors_.end()) {
+    return nullptr;
+  }
+  auto *sensor_obj = it->second;
+  if (sensor_obj == nullptr) {
+    return nullptr;
   }
 
-  auto *sensor_obj = new sensor::Sensor();
-  sensor_obj->set_accuracy_decimals(accuracy);
-  sensor_obj->set_state_class(state_class);
-  sensor_obj->set_internal(false);
-  sensor_obj->set_unique_id(unique_id);
-  if (meta != nullptr && meta->has_unit) {
-    sensor_obj->set_unit_of_measurement(meta->unit_of_measurement);
+  auto meta_it = this->xml_sensor_meta_.find(name);
+  if (meta_it != this->xml_sensor_meta_.end()) {
+    const auto &meta = meta_it->second;
+    sensor_obj->set_accuracy_decimals(meta.accuracy_decimals);
+    sensor::StateClass state_class = meta.kind == XmlSensorKind::Counter
+                                         ? sensor::StateClass::STATE_CLASS_TOTAL_INCREASING
+                                         : sensor::StateClass::STATE_CLASS_MEASUREMENT;
+    sensor_obj->set_state_class(state_class);
+    if (meta.has_unit) {
+      sensor_obj->set_unit_of_measurement(meta.unit_of_measurement);
+    }
+    if (meta.has_icon) {
+      sensor_obj->set_icon(meta.icon);
+    }
   }
-  if (meta != nullptr && meta->has_icon) {
-    sensor_obj->set_icon(meta->icon);
-  }
-  try_set_parent(sensor_obj, this, 0);
-  register_sensor_with_app(sensor_obj);
-  sensor_obj->set_name(effective_label);
-  this->xml_sensor_labels_[name] = effective_label;
-  this->xml_sensors_[name] = sensor_obj;
+
   return sensor_obj;
 }
 
