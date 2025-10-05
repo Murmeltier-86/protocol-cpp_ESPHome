@@ -20,6 +20,15 @@ jutta_proto:
   enable_xml_poll: true            # optional, default false
   xml_mapping_path: embedded       # optional, "embedded" nutzt die mitgelieferte XML
   xml_poll_interval_ms: 30000      # optional, Pollintervall in ms (min. 25000)
+  xml_sensors:                     # optional – verknüpft YAML-Sensoren mit XML-Feldern
+    - field: tr32_total_products
+      name: "Gesamtbezüge"
+      unit_of_measurement: "Bezüge"
+      accuracy_decimals: 0
+    - field: tgc0_bean_container
+      name: "Füllstand Bohnen"
+      icon: "mdi:coffee"
+      accuracy_decimals: 1
 ```
 
 The component takes care of the handshake during startup. Once the handshake finishes, all brewing actions become available.
@@ -88,6 +97,38 @@ verarbeiten kann, gelten die folgenden Eckpunkte:
 
 Lieferte die XML sprechende Labels, ersetzen diese automatisch die Standardnamen. Die Sensoren behalten ihre eindeutigen
 IDs auch dann, wenn die Bezeichnung in der XML nachträglich angepasst wird.
+
+#### YAML-Verknüpfung der XML-Werte
+
+Damit die Messwerte auch als Entitäten in Home Assistant auftauchen, muss jeder gewünschte Zähler explizit in der YAML
+angelegt werden. Das geschieht über die neue Liste `xml_sensors` innerhalb des `jutta_proto`-Blocks. Jeder Eintrag
+benötigt den Schlüssel `field`, der exakt dem Feldnamen aus dem XML-Mapping entsprechen muss (z. B.
+`tr32_total_products`, `tg43_filter`, `tgc0_bean_container`). Die Feldnamen leiten sich aus den XML-Labels ab und werden
+im ESPHome-Log beim Laden des Mappings ausgegeben. Zusätzlich lassen sich wie gewohnt `name`, `icon`,
+`unit_of_measurement` oder `accuracy_decimals` setzen.
+
+Beispiel:
+
+```yaml
+jutta_proto:
+  id: jura
+  uart_id: jura_uart
+  enable_xml_poll: true
+  xml_sensors:
+    - field: tr32_total_products
+      name: "Bezüge gesamt"
+    - field: tg43_filter
+      name: "Filterwechsel"
+      unit_of_measurement: "Zyklen"
+    - field: tgc0_bean_container
+      name: "Bohnenfüllstand"
+      unit_of_measurement: "%"
+      accuracy_decimals: 1
+```
+
+Wenn ein konfigurierter Feldname im Mapping fehlt, meldet der Logger dies einmalig beim Start. Ist ein Feld vorhanden,
+aber kein Sensor in `xml_sensors` hinterlegt, bleibt der Wert intern und wird protokolliert, jedoch nicht an Home
+Assistant übergeben – Legacy-Funktionen sind davon unberührt.
 
 ### Robuste XML-Frames (CODEX)
 
