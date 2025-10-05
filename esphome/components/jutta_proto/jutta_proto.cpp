@@ -6,7 +6,6 @@
 #include <cmath>
 #include <cstdio>
 #include <iomanip>
-#include <limits>
 #include <sstream>
 #include <utility>
 
@@ -24,9 +23,31 @@ constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
 constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
 const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
-constexpr uint32_t XML_RESPONSE_TIMEOUT_MS = 1400;
-constexpr uint32_t XML_INTER_COMMAND_DELAY_MS = 180;
+constexpr uint32_t XML_RESPONSE_TIMEOUT_MS = 1000;
+constexpr uint32_t XML_INTER_COMMAND_DELAY_MS = 25;
 constexpr size_t XML_COMMAND_COUNT = 3;
+
+constexpr double XML_COUNTER_MIN = 0.0;
+constexpr double XML_COUNTER_MAX = 1'000'000.0;
+constexpr double XML_MEASUREMENT_MIN = 0.0;
+constexpr double XML_MEASUREMENT_MAX = 250.0;
+constexpr float XML_COUNTER_TOLERANCE = 0.5f;
+constexpr float XML_MEASUREMENT_TOLERANCE = 0.01f;
+
+int determine_accuracy(XmlSensorKind kind, double scale) {
+  if (kind == XmlSensorKind::Counter) {
+    return 0;
+  }
+  double abs_scale = std::fabs(scale);
+  constexpr double EPSILON = 1e-6;
+  if (abs_scale <= 0.01 + EPSILON) {
+    return 2;
+  }
+  if (abs_scale < 1.0 - EPSILON) {
+    return 1;
+  }
+  return 0;
+}
 
 template<typename AppT>
 auto try_register_sensor(AppT &app, sensor::Sensor *sensor, long)
@@ -590,21 +611,31 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
   }
 }
 
+void JuraComponent::register_xml_sensor_(const XmlField &field, XmlSensorKind kind) {
+  auto &meta = this->xml_sensor_meta_[field.name];
+  meta.kind = kind;
+  meta.min_value = (kind == XmlSensorKind::Counter) ? XML_COUNTER_MIN : XML_MEASUREMENT_MIN;
+  meta.max_value = (kind == XmlSensorKind::Counter) ? XML_COUNTER_MAX : XML_MEASUREMENT_MAX;
+  meta.accuracy_decimals = determine_accuracy(kind, field.scale);
+  meta.configured = true;
+  this->get_or_create_sensor_(field.name, field.label);
+}
+
 void JuraComponent::ensure_xml_sensors_created_() {
   if (!this->enable_xml_poll_) {
     return;
   }
-  auto ensure_block = [&](const XmlCommandMapping &mapping) {
+  auto ensure_block = [&](const XmlCommandMapping &mapping, XmlSensorKind kind) {
     if (mapping.empty()) {
       return;
     }
     for (const auto &field : mapping.fields) {
-      this->get_or_create_sensor_(field.name, field.label);
+      this->register_xml_sensor_(field, kind);
     }
   };
-  ensure_block(this->xml_mapping_.tr32);
-  ensure_block(this->xml_mapping_.tg43);
-  ensure_block(this->xml_mapping_.tgc0);
+  ensure_block(this->xml_mapping_.tr32, XmlSensorKind::Counter);
+  ensure_block(this->xml_mapping_.tg43, XmlSensorKind::Counter);
+  ensure_block(this->xml_mapping_.tgc0, XmlSensorKind::Measurement);
 }
 
 bool JuraComponent::ensure_xml_mapping_loaded_() {
@@ -631,6 +662,7 @@ bool JuraComponent::ensure_xml_mapping_loaded_() {
   this->xml_mapping_loaded_ = true;
   this->xml_mapping_logged_ = false;
   this->xml_stats_.clear();
+  this->xml_sensor_meta_.clear();
   this->log_xml_mapping_status_();
   if (this->xml_mapping_.valid) {
     this->ensure_xml_sensors_created_();
@@ -808,49 +840,91 @@ void JuraComponent::publish_xml_stats_() {
 }
 
 void JuraComponent::publish_single_stat_(const std::string &name, double value, const std::string &label) {
+  auto meta_it = this->xml_sensor_meta_.find(name);
+  if (meta_it == this->xml_sensor_meta_.end()) {
+    XmlSensorMeta fallback_meta;
+    fallback_meta.kind = XmlSensorKind::Measurement;
+    fallback_meta.min_value = XML_MEASUREMENT_MIN;
+    fallback_meta.max_value = XML_MEASUREMENT_MAX;
+    fallback_meta.accuracy_decimals = 2;
+    fallback_meta.configured = true;
+    meta_it = this->xml_sensor_meta_.emplace(name, fallback_meta).first;
+  }
+  auto &meta = meta_it->second;
   auto *sensor = this->get_or_create_sensor_(name, label);
   if (sensor == nullptr) {
     ESP_LOGW(TAG, "XML field %s konnte nicht veröffentlicht werden", name.c_str());
     return;
   }
+  double min_value = meta.min_value;
+  double max_value = meta.max_value;
+  if (value < min_value || value > max_value) {
+    ESP_LOGD(TAG, "XML publish_state unterdrückt: %s=%.3f außerhalb %.3f..%.3f", name.c_str(), value, min_value,
+             max_value);
+    return;
+  }
   float publish_value = static_cast<float>(value);
-  double rounded = std::round(value);
-  bool is_integer = std::fabs(value - rounded) < 0.0005;
-  uint32_t published_uint = 0;
-  if (is_integer) {
-    if (rounded < 0.0) {
-      rounded = 0.0;
+  if (meta.kind == XmlSensorKind::Counter) {
+    publish_value = static_cast<float>(std::round(value));
+  } else if (meta.accuracy_decimals > 0) {
+    double factor = std::pow(10.0, static_cast<double>(meta.accuracy_decimals));
+    publish_value = static_cast<float>(std::round(value * factor) / factor);
+  }
+  float tolerance = (meta.kind == XmlSensorKind::Counter) ? XML_COUNTER_TOLERANCE : XML_MEASUREMENT_TOLERANCE;
+  if (meta.kind == XmlSensorKind::Measurement && meta.accuracy_decimals > 0) {
+    float factor = std::pow(10.0f, static_cast<float>(meta.accuracy_decimals));
+    if (factor > 0.0f) {
+      tolerance = 0.5f / factor;
     }
-    if (rounded > static_cast<double>(std::numeric_limits<uint32_t>::max())) {
-      rounded = static_cast<double>(std::numeric_limits<uint32_t>::max());
-    }
-    published_uint = static_cast<uint32_t>(rounded);
-    publish_value = static_cast<float>(published_uint);
+  }
+  if (meta.has_last_value && std::fabs(publish_value - meta.last_value) < tolerance) {
+    return;
   }
   sensor->publish_state(publish_value);
-  if (is_integer) {
+  meta.last_value = publish_value;
+  meta.has_last_value = true;
+  if (meta.kind == XmlSensorKind::Counter) {
     ESP_LOGD(TAG, "XML publish_state: %s=%u", name.c_str(),
-             static_cast<unsigned>(published_uint));
+             static_cast<unsigned>(std::lround(static_cast<double>(publish_value))));
   } else {
     ESP_LOGD(TAG, "XML publish_state: %s=%.3f", name.c_str(), static_cast<double>(publish_value));
   }
 }
 
 sensor::Sensor *JuraComponent::get_or_create_sensor_(const std::string &name, const std::string &label) {
+  std::string effective_label = label.empty() ? name : label;
+  auto meta_it = this->xml_sensor_meta_.find(name);
+  const XmlSensorMeta *meta = meta_it != this->xml_sensor_meta_.end() ? &meta_it->second : nullptr;
+  int accuracy = meta != nullptr ? meta->accuracy_decimals : 0;
+  sensor::StateClass state_class = sensor::StateClass::STATE_CLASS_NONE;
+  if (meta != nullptr) {
+    state_class = meta->kind == XmlSensorKind::Counter
+                      ? sensor::StateClass::STATE_CLASS_TOTAL_INCREASING
+                      : sensor::StateClass::STATE_CLASS_MEASUREMENT;
+  }
+  std::string unique_id = std::string("Jura E6 ") + effective_label;
+
   auto it = this->xml_sensors_.find(name);
   if (it != this->xml_sensors_.end()) {
-    if (!label.empty() && this->xml_sensor_labels_[name] != label) {
-      it->second->set_name(label);
-      this->xml_sensor_labels_[name] = label;
+    auto *sensor_obj = it->second;
+    sensor_obj->set_unique_id(unique_id);
+    sensor_obj->set_accuracy_decimals(accuracy);
+    sensor_obj->set_state_class(state_class);
+    auto label_it = this->xml_sensor_labels_.find(name);
+    if (label_it == this->xml_sensor_labels_.end() || label_it->second != effective_label) {
+      sensor_obj->set_name(effective_label);
+      this->xml_sensor_labels_[name] = effective_label;
     }
-    return it->second;
+    return sensor_obj;
   }
+
   auto *sensor_obj = new sensor::Sensor();
-  sensor_obj->set_accuracy_decimals(0);
+  sensor_obj->set_accuracy_decimals(accuracy);
+  sensor_obj->set_state_class(state_class);
   sensor_obj->set_internal(false);
+  sensor_obj->set_unique_id(unique_id);
   try_set_parent(sensor_obj, this, 0);
   register_sensor_with_app(sensor_obj);
-  std::string effective_label = label.empty() ? name : label;
   sensor_obj->set_name(effective_label);
   this->xml_sensor_labels_[name] = effective_label;
   this->xml_sensors_[name] = sensor_obj;

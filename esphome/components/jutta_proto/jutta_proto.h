@@ -26,6 +26,12 @@
 namespace esphome {
 namespace sensor {
 
+enum class StateClass {
+  STATE_CLASS_NONE,
+  STATE_CLASS_MEASUREMENT,
+  STATE_CLASS_TOTAL_INCREASING,
+};
+
 class Sensor {
  public:
   virtual ~Sensor() = default;
@@ -33,6 +39,8 @@ class Sensor {
   virtual void set_accuracy_decimals(int) {}
   virtual void set_name(const std::string &) {}
   virtual void set_internal(bool) {}
+  virtual void set_unique_id(const std::string &) {}
+  virtual void set_state_class(StateClass) {}
 };
 
 }  // namespace sensor
@@ -75,6 +83,18 @@ class TextSensor {
 
 namespace esphome {
 namespace jutta_component {
+
+enum class XmlSensorKind { Measurement, Counter };
+
+struct XmlSensorMeta {
+  XmlSensorKind kind{XmlSensorKind::Measurement};
+  double min_value{0.0};
+  double max_value{0.0};
+  int accuracy_decimals{0};
+  bool configured{false};
+  bool has_last_value{false};
+  float last_value{0.0f};
+};
 
 class JuraComponent : public esphome::Component, public esphome::uart::UARTDevice {
  public:
@@ -124,6 +144,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void finish_xml_cycle_(uint32_t now, bool success);
   void publish_xml_stats_();
   void publish_single_stat_(const std::string &name, double value, const std::string &label);
+  void register_xml_sensor_(const XmlField &field, XmlSensorKind kind);
   sensor::Sensor *get_or_create_sensor_(const std::string &name, const std::string &label);
   static const char *xml_command_for_index_(size_t index);
   static const char *xml_log_label_for_index_(size_t index);
@@ -159,6 +180,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   Stats xml_stats_{};
   std::unordered_map<std::string, sensor::Sensor *> xml_sensors_{};
   std::unordered_map<std::string, std::string> xml_sensor_labels_{};
+  std::unordered_map<std::string, XmlSensorMeta> xml_sensor_meta_{};
 
   struct XmlCycleState {
     enum class Phase { Idle, WaitingForFrame, DelayBeforeNext };

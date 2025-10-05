@@ -42,52 +42,50 @@ generic names.
 5. Beim Booten wertet der Parser nur die Statistik-Banks (`@TR:32`, `@TG:43`, `@TG:C0`) aus. Produkt-Befehle aus der XML
    bleiben unangetastet, damit Legacy-Flows unverändert bleiben.
 
-### XML statistics sensors
+### XML-Statistiksensoren
 
-Enabling XML polling registers fixed pools of numeric sensors that Home Assistant can consume directly. Every value is
-published only after a complete, valid DB frame was received for the respective block; failed cycles publish nothing.
+Die zyklische XML-Abfrage liest zusätzlich zu den Legacy-Kommandos die Status- und Zählerwerte aus den Blöcken
+`@TR:32`, `@TG:43` und `@TG:C0` aus und stellt sie als numerische Sensoren bereit. Damit Home Assistant die Werte stabil
+verarbeiten kann, gelten die folgenden Eckpunkte:
 
-| Block  | Sensor count | Value width | Default names     |
-| ------ | ------------- | ----------- | ----------------- |
-| TR32   | 10            | 16-bit      | `TR32 1` … `TR32 10` |
-| TG43   | 6             | 16-bit      | `TG43 1` … `TG43 6`  |
-| TG:C0  | 3             | 32-bit      | `TGC0 1` … `TGC0 3`  |
+- **Ziel.** Die J.O.E.-XML liefert Wartungszähler und Füllstände; diese werden zyklisch dekodiert und als Sensoren mit
+  eindeutiger `unique_id` im Schema `Jura E6 <Label>` veröffentlicht. Legacy-Handshake und klassische UART-Befehle bleiben
+  unverändert.
+- **XML-Quelle.** Die Mapping-Datei wird wie bisher per YAML in das Firmware-Image eingebunden und zur Laufzeit aus
+  `/config/esphome/e6.xml` gelesen. Zusätzliche Dateisystem- oder `include`-Schritte sind nicht nötig.
+- **Sensoraufbau.** Für jedes aktivierte Feld legt die Firmware beim Start einen numerischen Sensor an. Zähler verwenden
+  `state_class: total_increasing`, Prozent- und Messwerte `state_class: measurement`. Die Genauigkeit richtet sich nach dem
+  Skalierungsfaktor der XML, Prozentwerte erscheinen beispielsweise mit zwei Nachkommastellen.
+- **Plausibilität & Änderungserkennung.** Jeder Messwert wird nur veröffentlicht, wenn er sich seit der letzten Meldung
+  geändert hat und innerhalb plausibler Grenzen liegt. Zähler werden auf den Bereich `0…1.000.000` begrenzt, Prozent- und
+  Statuswerte auf `0,0…250,0`. Ausreißer (z. B. `2121187790`) werden im DEBUG-Log dokumentiert und verworfen.
+- **Logging.** Die Initialisierung protokolliert das geladene Mapping und die Anzahl der Sensoren. Für jeden veröffentlichen
+  Wert bleibt die bestehende DEBUG-Zeile mit Feldname und Wert erhalten; Längenabweichungen der Rohframes erscheinen nur
+  noch auf DEBUG-Level.
 
-If the XML mapping provides labels for a block, those replace the defaults in the same order. All sensors report integers
-with `accuracy_decimals: 0`, so no templating is required on the ESPHome side.
+#### Sensoraufbau im Detail
 
-#### TG43 Maintenance counter decoding
+| Block  | Sensoranzahl | Datenbreite | Standardnamen         | State-Class                |
+| ------ | ------------- | ----------- | --------------------- | -------------------------- |
+| TR32   | 10            | 16 Bit      | `TR32 1` … `TR32 10`  | `total_increasing`         |
+| TG43   | 6             | 16 Bit      | `TG43 1` … `TG43 6`   | `total_increasing`         |
+| TG:C0  | 3             | 32 Bit      | `TGC0 1` … `TGC0 3`   | `measurement`              |
 
-**Zusammenfassung.** Die TG43-Wartungszähler werden jetzt exakt anhand der Offsets, Breiten und Endianness-Angaben der
-bereitgestellten J.O.E.-XML ausgewertet. Jeder Zähler landet als numerischer Sensor in Home Assistant; zusätzliche
-Diagnose-Logs zeigen zu jedem Frame die dekodierten Bytes, das genutzte Mapping und den veröffentlichten Wert.
+Lieferte die XML sprechende Labels, ersetzen diese automatisch die Standardnamen. Die Sensoren behalten ihre eindeutigen
+IDs auch dann, wenn die Bezeichnung in der XML nachträglich angepasst wird.
 
-**Konfiguration.** Nutze weiterhin das XML aus `jura_joe_xml_bundle_final` oder einen eigenen Export. Optionale Attribute
-wie `offset`, `size` und `endian="le"` können pro Feld gesetzt werden und überschreiben die Standardwerte (Offset=1,
-Breite=2, Big-Endian). Änderungen an der XML-Datei erfordern keinen Eingriff am Legacy-Handshake.
+### Robuste XML-Frames (CODEX)
 
-**Troubleshooting.** Bei unplausiblen Zählerständen (<0 oder >100000) meldet das Log eine Warnung inklusive Offsets und
-Rohdaten. Stimmen erwartete und empfangene Länge nicht überein, zeigt die Warnung die ersten 32 dekodierten Bytes
-hexadezimal an – so lassen sich Offsets und Endianness im XML schnell nachjustieren, ohne den Ablauf der Polling-Logik zu
-ändern.
-
-### DB frame handling
-
-The XML transport uses escaped DB frames. Some legacy Wi-Fi bridges reply with an ASCII echo of the `@TR:32`, `@TG:43`, or
-`@TG:C0` command before the actual data frame arrives. The component drains the UART briefly before the first command in a
-poll cycle, filters those echoed bytes strictly, and validates the decoded payload length (21/13/13 bytes) per block. Frames
-that are too short or too long are treated as unrelated telemetry and dropped without touching the timeout budget. The
-per-command timeout starts once the first non-echo byte was received (otherwise after the TX) and defaults to 1.5 seconds.
-Keep the poll interval at or above 25 seconds so the telemetry stream does not collide with the XML polling.
-
-**Problem.** Encodierte TX-Bytes wurden wieder in den RX-Strom eingespeist. Der Framer erhielt dadurch Mischdaten,
-die nicht zur erwarteten Nutzlastlänge passten und regelmäßig in `frame decode failed` bzw. Timeouts mündeten.
-
-**Lösung.** Ein Echo-Suppressor verwirft jetzt die encodierten TX-Bytes zeitlich begrenzt, bevor sie den Framer erreichen.
-Der Framer schneidet Frames am Terminator, de-stufft nur den einzelnen Block und prüft anschließend die Soll-Länge. Die
-Timeout-Logik startet erst bei den ersten echten RX-Bytes, wodurch robuste Antworten ohne zusätzliche Verzögerung
-ausgewertet werden können. Die Unterdrückung der Echo-Frames bleibt bis zu 200 ms aktiv und verlängert sich mit jedem
-erkannten Byte, sodass auch träge Legacy-Bridges keine halben Kommandos mehr in den Puffer drücken können.
+- **Tolerante Länge.** Frames werden weiterhin bis zum CRLF-Terminator eingelesen. Abweichungen zwischen erwarteter und
+  tatsächlicher Länge führen nur noch zu einem DEBUG-Hinweis. Warnungen erscheinen ausschließlich dann, wenn der
+  Startmarker `0x26` fehlt oder der Frame kürzer als das benötigte Minimum ist.
+- **Offset-gesteuertes Parsing.** Die dekodierten Bytes werden strikt anhand der im Mapping hinterlegten Offsets, Breiten
+  und Endianness interpretiert; überstehende Bytes am Frameende werden ignoriert.
+- **Stabiles Timing.** Vor jedem XML-Kommando wird der UART-Puffer komplett geleert. Zwischen den drei Abfragen liegt eine
+  nicht-blockierende Pause von 25 ms, das Einzelkommando-Timeout beträgt rund 1 s. Der globale Poll-Takt aus der YAML bleibt
+  unverändert.
+- **RX-Puffer.** Der bestehende Empfangspuffer (≥256 Byte) bleibt erhalten und verhindert, dass zusammenhängende Frames
+  verloren gehen.
 
 ## Automation Actions
 
