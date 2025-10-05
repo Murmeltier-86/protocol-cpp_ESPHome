@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <initializer_list>
@@ -50,6 +51,66 @@ struct AttributeMap {
     return {};
   }
 };
+
+struct TextItemSpec {
+  std::string label;
+  std::string name_hint;
+  bool has_offset{false};
+  std::size_t offset{0};
+  bool has_size{false};
+  std::size_t size{0};
+  bool has_endian{false};
+  bool little_endian{false};
+};
+
+std::string format_hex_string(const uint8_t *data, std::size_t length, bool spaced = true) {
+  if (data == nullptr || length == 0) {
+    return {};
+  }
+  std::string out;
+  out.reserve(length * (spaced ? 3U : 2U));
+  char buf[4];
+  for (std::size_t i = 0; i < length; ++i) {
+    if (spaced && i > 0) {
+      out.push_back(' ');
+    }
+    std::snprintf(buf, sizeof(buf), "%02X", static_cast<unsigned>(data[i]));
+    out.append(buf);
+  }
+  return out;
+}
+
+std::string format_hex_string(const std::vector<uint8_t> &data) {
+  if (data.empty()) {
+    return {};
+  }
+  return format_hex_string(data.data(), data.size(), true);
+}
+
+std::string format_hex_head(const std::vector<uint8_t> &data, std::size_t max_bytes) {
+  if (data.empty() || max_bytes == 0) {
+    return {};
+  }
+  std::size_t count = std::min<std::size_t>(data.size(), max_bytes);
+  return format_hex_string(data.data(), count, true);
+}
+
+std::string format_ascii_string(const std::vector<uint8_t> &data) {
+  if (data.empty()) {
+    return {};
+  }
+  std::string out;
+  out.reserve(data.size());
+  for (uint8_t byte : data) {
+    unsigned char c = static_cast<unsigned char>(byte);
+    if (c >= 0x20 && c <= 0x7E) {
+      out.push_back(static_cast<char>(c));
+    } else {
+      out.push_back('.');
+    }
+  }
+  return out;
+}
 
 AttributeMap parse_attributes(const std::string &tag) {
   AttributeMap map;
@@ -465,25 +526,47 @@ bool parse_tr32_mapping(const std::string &xml, XmlCommandMapping &mapping) {
   return true;
 }
 
-std::vector<std::string> parse_textitem_labels(const std::string &block) {
-  std::vector<std::string> labels;
+std::vector<TextItemSpec> parse_textitem_specs(const std::string &block) {
+  std::vector<TextItemSpec> specs;
   for_each_tag(block, "textitem", [&](const std::string &tag_text) {
     auto attrs = parse_attributes(tag_text);
-    std::string label = attrs.get("type");
+    TextItemSpec spec;
+    spec.name_hint = attrs.get("type");
+    trim(spec.name_hint);
+    if (spec.name_hint.empty()) {
+      spec.name_hint = attrs.get("name");
+      trim(spec.name_hint);
+    }
+    std::string label = attrs.get("text");
     trim(label);
     if (label.empty()) {
-      label = attrs.get("name");
-      trim(label);
+      label = spec.name_hint;
     }
-    if (label.empty()) {
-      label = attrs.get("text");
-      trim(label);
+    spec.label = label;
+
+    std::size_t value = 0;
+    if (parse_size_t_attr(attrs, {"offset", "byte", "start"}, value)) {
+      spec.has_offset = true;
+      spec.offset = value;
     }
-    if (!label.empty()) {
-      labels.push_back(label);
+    value = 0;
+    if (parse_size_t_attr(attrs, {"size", "bytes", "length"}, value)) {
+      spec.has_size = true;
+      spec.size = value;
+    }
+    std::string endian = to_lower_copy(attrs.get("endian"));
+    if (endian == "le" || endian == "little") {
+      spec.has_endian = true;
+      spec.little_endian = true;
+    } else if (endian == "be" || endian == "big") {
+      spec.has_endian = true;
+      spec.little_endian = false;
+    }
+    if (!spec.label.empty() || !spec.name_hint.empty()) {
+      specs.push_back(spec);
     }
   });
-  return labels;
+  return specs;
 }
 
 bool parse_textitem_mapping(const std::string &xml, const std::string &command, const std::string &prefix,
@@ -493,13 +576,45 @@ bool parse_textitem_mapping(const std::string &xml, const std::string &command, 
   if (!find_bank_block(xml, command, content, nullptr)) {
     return false;
   }
-  auto labels = parse_textitem_labels(content);
-  if (labels.empty()) {
+  auto specs = parse_textitem_specs(content);
+  if (specs.empty()) {
+    std::vector<std::string> labels;
     for (std::size_t i = 0; i < fallback_count; ++i) {
       labels.push_back(prefix + " " + std::to_string(i + 1));
     }
+    add_fields_from_labels(mapping, labels, to_lower_copy(prefix), field_size, 1);
+    return true;
   }
-  add_fields_from_labels(mapping, labels, to_lower_copy(prefix), field_size, 1);
+
+  std::unordered_set<std::string> used_names;
+  std::size_t running_offset = 1;
+  for (std::size_t i = 0; i < specs.size(); ++i) {
+    const auto &spec = specs[i];
+    XmlField field;
+    field.label = spec.label.empty() ? spec.name_hint : spec.label;
+    field.name = make_identifier(to_lower_copy(prefix), field.label, i, used_names);
+    if (spec.has_offset) {
+      field.offset = spec.offset;
+      running_offset = spec.offset;
+    } else {
+      field.offset = running_offset;
+    }
+    if (spec.has_size) {
+      field.size = spec.size;
+    } else {
+      field.size = field_size;
+    }
+    if (!(field.size == 1 || field.size == 2 || field.size == 4)) {
+      ESP_LOGW(TAG, "XML %s Feld %s ignoriert (nicht unterstützte Größe %u)",
+               command, field.name.c_str(), static_cast<unsigned>(field.size));
+      continue;
+    }
+    running_offset = field.offset + field.size;
+    if (spec.has_endian) {
+      field.little_endian = spec.little_endian;
+    }
+    mapping.fields.push_back(field);
+  }
   return true;
 }
 
@@ -507,15 +622,35 @@ XmlMapping g_mapping;
 bool g_mapping_loaded = false;
 
 bool parse_payload(const std::vector<uint8_t> &decoded, const XmlCommandMapping &mapping, Stats &out,
-                   const char *log_label) {
+                   const char *command_label) {
   if (mapping.empty()) {
-    ESP_LOGW(TAG, "XML %s: kein Mapping vorhanden", log_label);
+    ESP_LOGW(TAG, "XML %s: kein Mapping vorhanden", command_label);
     return false;
   }
   bool any = false;
+  std::size_t expected_len = 0;
+  for (const auto &field : mapping.fields) {
+    expected_len = std::max(expected_len, field.offset + field.size);
+  }
+  std::string hex_head = format_hex_head(decoded, 32);
+  ESP_LOGD(TAG, "XML frame: cmd=%s decoded_len=%u expected_len=%u hex_head=%s", command_label,
+           static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len), hex_head.c_str());
+  std::string payload_hex = format_hex_string(decoded);
+  if (!payload_hex.empty()) {
+    ESP_LOGD(TAG, "XML %s payload HEX: %s", command_label, payload_hex.c_str());
+    std::string payload_ascii = format_ascii_string(decoded);
+    ESP_LOGD(TAG, "XML %s payload ASCII: %s", command_label, payload_ascii.c_str());
+  }
+  if (expected_len != 0 && decoded.size() != expected_len) {
+    std::string mismatch_head = format_hex_head(decoded, 32);
+    ESP_LOGW(TAG,
+             "XML %s: decoded_len (%u) != expected_len (%u), head32=%s",
+             command_label, static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len),
+             mismatch_head.c_str());
+  }
   for (const auto &field : mapping.fields) {
     if (field.offset + field.size > decoded.size()) {
-      ESP_LOGW(TAG, "XML %s Feld %s überläuft Frame (Offset=%u, Bytes=%u, Frame=%u)", log_label,
+      ESP_LOGW(TAG, "XML %s Feld %s überläuft Frame (Offset=%u, Bytes=%u, Frame=%u)", command_label,
                field.name.c_str(), static_cast<unsigned>(field.offset), static_cast<unsigned>(field.size),
                static_cast<unsigned>(decoded.size()));
       continue;
@@ -530,8 +665,19 @@ bool parse_payload(const std::vector<uint8_t> &decoded, const XmlCommandMapping 
         raw = (raw << 8U) | static_cast<std::uint64_t>(decoded[field.offset + i]);
       }
     }
+    std::string raw_hex = format_hex_string(decoded.data() + field.offset, field.size, false);
+    ESP_LOGD(TAG,
+             "XML field %s offset=%u size=%u endian=%s raw=%s parsed_uint=%llu",
+             field.name.c_str(), static_cast<unsigned>(field.offset), static_cast<unsigned>(field.size),
+             field.little_endian ? "LE" : "BE", raw_hex.c_str(),
+             static_cast<unsigned long long>(raw));
+    if ((field.size <= 2 && raw > 0xFFFFULL) || raw > 100000ULL) {
+      ESP_LOGW(TAG, "XML %s Feld %s plausibility warning: value=%llu", command_label, field.name.c_str(),
+               static_cast<unsigned long long>(raw));
+    }
     double value = static_cast<double>(raw) * field.scale;
     out.set_value(field.name, value, field.label);
+    ESP_LOGD(TAG, "XML field %s value_staged=%.3f", field.name.c_str(), value);
     any = true;
   }
   return any;
@@ -602,7 +748,7 @@ bool parse_TR32(const std::vector<uint8_t> &decoded, Stats &out) {
     ESP_LOGW(TAG, "XML Mapping wurde nicht geladen");
     return false;
   }
-  return parse_payload(decoded, g_mapping.tr32, out, "TR32");
+  return parse_payload(decoded, g_mapping.tr32, out, "@TR:32");
 }
 
 bool parse_TG43(const std::vector<uint8_t> &decoded, Stats &out) {
@@ -610,7 +756,7 @@ bool parse_TG43(const std::vector<uint8_t> &decoded, Stats &out) {
     ESP_LOGW(TAG, "XML Mapping wurde nicht geladen");
     return false;
   }
-  return parse_payload(decoded, g_mapping.tg43, out, "TG43");
+  return parse_payload(decoded, g_mapping.tg43, out, "@TG:43");
 }
 
 bool parse_TGC0(const std::vector<uint8_t> &decoded, Stats &out) {
@@ -618,7 +764,7 @@ bool parse_TGC0(const std::vector<uint8_t> &decoded, Stats &out) {
     ESP_LOGW(TAG, "XML Mapping wurde nicht geladen");
     return false;
   }
-  return parse_payload(decoded, g_mapping.tgc0, out, "TGC0");
+  return parse_payload(decoded, g_mapping.tgc0, out, "@TG:C0");
 }
 
 }  // namespace jutta_component

@@ -56,6 +56,21 @@ published only after a complete, valid DB frame was received for the respective 
 If the XML mapping provides labels for a block, those replace the defaults in the same order. All sensors report integers
 with `accuracy_decimals: 0`, so no templating is required on the ESPHome side.
 
+#### TG43 Maintenance counter decoding
+
+**Zusammenfassung.** Die TG43-Wartungszähler werden jetzt exakt anhand der Offsets, Breiten und Endianness-Angaben der
+bereitgestellten J.O.E.-XML ausgewertet. Jeder Zähler landet als numerischer Sensor in Home Assistant; zusätzliche
+Diagnose-Logs zeigen zu jedem Frame die dekodierten Bytes, das genutzte Mapping und den veröffentlichten Wert.
+
+**Konfiguration.** Nutze weiterhin das XML aus `jura_joe_xml_bundle_final` oder einen eigenen Export. Optionale Attribute
+wie `offset`, `size` und `endian="le"` können pro Feld gesetzt werden und überschreiben die Standardwerte (Offset=1,
+Breite=2, Big-Endian). Änderungen an der XML-Datei erfordern keinen Eingriff am Legacy-Handshake.
+
+**Troubleshooting.** Bei unplausiblen Zählerständen (<0 oder >100000) meldet das Log eine Warnung inklusive Offsets und
+Rohdaten. Stimmen erwartete und empfangene Länge nicht überein, zeigt die Warnung die ersten 32 dekodierten Bytes
+hexadezimal an – so lassen sich Offsets und Endianness im XML schnell nachjustieren, ohne den Ablauf der Polling-Logik zu
+ändern.
+
 ### DB frame handling
 
 The XML transport uses escaped DB frames. Some legacy Wi-Fi bridges reply with an ASCII echo of the `@TR:32`, `@TG:43`, or

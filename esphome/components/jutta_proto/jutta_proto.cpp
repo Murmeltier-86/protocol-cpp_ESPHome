@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <utility>
 
@@ -811,8 +813,27 @@ void JuraComponent::publish_single_stat_(const std::string &name, double value, 
     ESP_LOGW(TAG, "XML field %s konnte nicht veröffentlicht werden", name.c_str());
     return;
   }
-  sensor->publish_state(static_cast<float>(value));
-  ESP_LOGD(TAG, "XML publish: %s=%.3f", name.c_str(), value);
+  float publish_value = static_cast<float>(value);
+  double rounded = std::round(value);
+  bool is_integer = std::fabs(value - rounded) < 0.0005;
+  uint32_t published_uint = 0;
+  if (is_integer) {
+    if (rounded < 0.0) {
+      rounded = 0.0;
+    }
+    if (rounded > static_cast<double>(std::numeric_limits<uint32_t>::max())) {
+      rounded = static_cast<double>(std::numeric_limits<uint32_t>::max());
+    }
+    published_uint = static_cast<uint32_t>(rounded);
+    publish_value = static_cast<float>(published_uint);
+  }
+  sensor->publish_state(publish_value);
+  if (is_integer) {
+    ESP_LOGD(TAG, "XML publish_state: %s=%u", name.c_str(),
+             static_cast<unsigned>(published_uint));
+  } else {
+    ESP_LOGD(TAG, "XML publish_state: %s=%.3f", name.c_str(), static_cast<double>(publish_value));
+  }
 }
 
 sensor::Sensor *JuraComponent::get_or_create_sensor_(const std::string &name, const std::string &label) {
