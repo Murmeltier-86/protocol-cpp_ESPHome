@@ -129,6 +129,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     this->xml_mapping_length_ = length;
   }
   void set_xml_poll_interval(uint32_t interval_ms) { this->xml_poll_interval_ms_ = interval_ms; }
+  void add_configured_xml_sensor(const std::string &field, sensor::Sensor *sensor);
 
  protected:
   enum class HandshakeStage { IDLE, HELLO, SEND_T1, WAIT_T2, SEND_T2, WAIT_T3, SEND_T3, DONE, FAILED };
@@ -192,7 +193,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   XmlMapping xml_mapping_{};
   Stats xml_stats_{};
   std::unordered_map<std::string, sensor::Sensor *> xml_sensors_{};
-  std::unordered_map<std::string, std::string> xml_sensor_labels_{};
   struct Tgc0FilterState {
     std::deque<float> window;
     uint8_t consecutive_valid{0};
@@ -200,6 +200,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   };
   std::unordered_map<std::string, Tgc0FilterState> tgc0_filters_{};
   std::unordered_map<std::string, XmlSensorMeta> xml_sensor_meta_{};
+  std::unordered_map<std::string, bool> xml_missing_sensor_logged_{};
+  std::unordered_map<std::string, bool> xml_unconfigured_sensor_logged_{};
 
   struct XmlCycleState {
     enum class Phase { Idle, WaitingForFrame, DelayBeforeNext };
