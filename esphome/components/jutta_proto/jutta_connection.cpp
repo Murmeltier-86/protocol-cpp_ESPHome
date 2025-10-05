@@ -723,6 +723,10 @@ void JuttaConnection::reset_all_rx_buffers() {
     this->flush_all_rx();
 }
 
+void JuttaConnection::drain_serial_input_nonblocking() {
+    this->flush_serial_input();
+}
+
 void JuttaConnection::activate_tx_echo_suppressor_(const std::vector<uint8_t>& frame) {
     this->last_tx_frame_ = frame;
     this->last_tx_echo_progress_ = 0;

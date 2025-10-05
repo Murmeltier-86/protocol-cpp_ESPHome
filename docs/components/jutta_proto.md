@@ -55,6 +55,19 @@ generic names.
   stabile Prozentwerte im Bereich `0` bis `250`, vermeidet Ausreißer und taucht als numerische Entität in Home Assistant
   auf.
 
+#### Update: TGC0 Timeout & HA-Sensoren (CODEX)
+
+- **Was wurde getan?** Nach jedem erfolgreichen `@TG:43`-Frame wartet der XML-Poller jetzt ~75 ms, leert den UART-Empfang
+  inklusive Decoderpuffer und sendet erst danach `@TG:C0`. Der Empfang lässt einmalig ein kurzes Extend-Fenster von 25 ms
+  zu, bevor bei Bedarf exakt ein Retry mit identischer Pause ausgelöst wird. `@TG:C0` akzeptiert variable Nutzlastlängen
+  solange ein CRLF-terminierter Block vorliegt; bei Mehrfachblöcken wird der letzte vollständige Frame ausgewertet. Alle
+  TR32-, TG43- und TGC0-Felder werden als numerische Sensoren mit `state_class` (`total_increasing` bzw. `measurement`),
+  Einheiten und Änderungsschwelle (`Δ>0` bzw. `Δ≥0,1`) veröffentlicht.
+- **Was bleibt?** Legacy-Handshakes, Kommandofolge und die Verarbeitung von `@TR:32`/`@TG:43` bleiben unverändert; nur der
+  TGC0-Zweig erhält die zusätzliche Pause, Pufferpflege und Retry-Logik.
+- **Erwartetes Ergebnis:** `RX_DB timeout TGC0` verschwindet im Normalbetrieb, der erste gültige Prozent-Frame wird einmalig
+  mit Länge, CRLF-Erkennung und Byteorder geloggt und die Werte erscheinen stabil als sichtbare Home-Assistant-Sensoren.
+
 ### CODEX: J.O.E.-XML ohne `includes`
 
 1. Exportiere die gewünschte XML über die J.O.E.-App.

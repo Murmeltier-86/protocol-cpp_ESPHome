@@ -199,6 +199,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     bool logged_once{false};
   };
   std::unordered_map<std::string, Tgc0FilterState> tgc0_filters_{};
+  bool tgc0_first_frame_logged_{false};
   std::unordered_map<std::string, XmlSensorMeta> xml_sensor_meta_{};
   std::unordered_map<std::string, bool> xml_missing_sensor_logged_{};
   std::unordered_map<std::string, bool> xml_unconfigured_sensor_logged_{};
@@ -213,7 +214,19 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     uint32_t deadline_ms{0};
     uint32_t next_action_ms{0};
     std::array<std::vector<uint8_t>, 3> responses{};
+    bool tgc0_extend_window_active{false};
+    bool tgc0_extend_used{false};
+    bool tgc0_retry_used{false};
+    bool tgc0_pending_retry{false};
+    bool tgc0_timeout_logged{false};
+    uint8_t tgc0_attempt{0};
+    std::size_t tgc0_last_raw_len{0};
+    std::size_t tgc0_last_payload_len{0};
+    bool tgc0_last_frame_trimmed{false};
+    bool tgc0_last_frame_had_crlf{false};
   } xml_cycle_{};
+
+  void prepare_tgc0_request_();
 };
 
 class StartBrewAction : public esphome::Action<> {

@@ -26,6 +26,9 @@ constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
 const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
 constexpr uint32_t XML_RESPONSE_TIMEOUT_MS = 1000;
 constexpr uint32_t XML_INTER_COMMAND_DELAY_MS = 25;
+constexpr uint32_t XML_TGC0_POST_TG43_DELAY_MS = 75;
+constexpr uint32_t XML_TGC0_EXTEND_WINDOW_MS = 25;
+constexpr uint32_t XML_TGC0_RETRY_DELAY_MS = XML_TGC0_POST_TG43_DELAY_MS;
 constexpr size_t XML_COMMAND_COUNT = 3;
 
 constexpr double XML_COUNTER_MIN = 0.0;
@@ -676,6 +679,12 @@ bool JuraComponent::process_tgc0_response_(const std::vector<uint8_t> &decoded) 
     ESP_LOGW(TAG, "XML TGC0: kein Mapping aktiv");
     return false;
   }
+  bool first_frame_debug = !this->tgc0_first_frame_logged_;
+  std::size_t raw_len = this->xml_cycle_.tgc0_last_raw_len;
+  std::size_t payload_len = this->xml_cycle_.tgc0_last_payload_len;
+  bool trimmed = this->xml_cycle_.tgc0_last_frame_trimmed;
+  bool had_crlf = this->xml_cycle_.tgc0_last_frame_had_crlf;
+  std::vector<std::string> first_frame_logs;
   std::size_t expected_len = 0;
   for (const auto &field : mapping.fields) {
     expected_len = std::max(expected_len, field.offset + field.size);
@@ -725,6 +734,7 @@ bool JuraComponent::process_tgc0_response_(const std::vector<uint8_t> &decoded) 
     raw_field.size = 2;
     std::uint64_t raw_value = 0;
     bool little_endian = raw_field.has_endian ? raw_field.little_endian : TGC0_TRY_LITTLE_ENDIAN_FIRST;
+    bool little_endian_used = little_endian;
     if (!this->decode_field_value_(decoded, raw_field, little_endian, raw_value)) {
       continue;
     }
@@ -749,6 +759,7 @@ bool JuraComponent::process_tgc0_response_(const std::vector<uint8_t> &decoded) 
         if (alt_percent <= XML_MEASUREMENT_MAX) {
           raw_value = alt_raw;
           percent = alt_percent;
+          little_endian_used = !little_endian;
         }
       }
     }
@@ -771,6 +782,12 @@ bool JuraComponent::process_tgc0_response_(const std::vector<uint8_t> &decoded) 
 
     had_valid_sample = true;
     float clamped_percent = static_cast<float>(std::clamp(percent, XML_MEASUREMENT_MIN, XML_MEASUREMENT_MAX));
+    if (first_frame_debug) {
+      char buffer[128];
+      std::snprintf(buffer, sizeof(buffer), "%s Byteorder=%s Wert=%.1f%%", field.name.c_str(),
+                    little_endian_used ? "LE" : "BE", static_cast<double>(clamped_percent));
+      first_frame_logs.emplace_back(buffer);
+    }
     if (this->stage_tgc0_value_(field.name, field.label, clamped_percent, header_value, encoded_value,
                                 static_cast<uint16_t>(raw_value & 0xFFFFu))) {
       any_value = true;
@@ -779,6 +796,15 @@ bool JuraComponent::process_tgc0_response_(const std::vector<uint8_t> &decoded) 
 
   if (!any_value && !had_valid_sample) {
     ESP_LOGW(TAG, "XML TGC0: keine Daten empfangen");
+  }
+  if (first_frame_debug && had_valid_sample) {
+    ESP_LOGD(TAG, "TGC0 Debug: raw_len=%u payload_len=%u crlf=%s trimmed=%s",
+             static_cast<unsigned>(raw_len), static_cast<unsigned>(payload_len), YESNO(had_crlf),
+             YESNO(trimmed));
+    for (const auto &entry : first_frame_logs) {
+      ESP_LOGD(TAG, "  %s", entry.c_str());
+    }
+    this->tgc0_first_frame_logged_ = true;
   }
   return any_value;
 }
@@ -871,6 +897,7 @@ bool JuraComponent::ensure_xml_mapping_loaded_() {
   this->xml_stats_.clear();
   this->xml_sensor_meta_.clear();
   this->tgc0_filters_.clear();
+  this->tgc0_first_frame_logged_ = false;
   this->xml_missing_sensor_logged_.clear();
   this->log_xml_mapping_status_();
   if (this->xml_mapping_.valid) {
@@ -894,6 +921,7 @@ void JuraComponent::log_xml_mapping_status_(bool force) {
 void JuraComponent::reset_xml_cycle_state_() {
   this->xml_cycle_.reset();
   this->xml_stats_.clear();
+  this->tgc0_first_frame_logged_ = false;
 }
 
 void JuraComponent::process_xml_polling() {
@@ -919,6 +947,19 @@ void JuraComponent::process_xml_polling() {
   this->handle_xml_cycle_(now);
 }
 
+void JuraComponent::prepare_tgc0_request_() {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return;
+  }
+  auto *connection = this->coffee_maker_->connection.get();
+  connection->drain_serial_input_nonblocking();
+  connection->reset_db_rx_buffer();
+  this->xml_cycle_.tgc0_last_raw_len = 0;
+  this->xml_cycle_.tgc0_last_payload_len = 0;
+  this->xml_cycle_.tgc0_last_frame_trimmed = false;
+  this->xml_cycle_.tgc0_last_frame_had_crlf = false;
+}
+
 void JuraComponent::start_xml_cycle_(uint32_t now) {
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     return;
@@ -936,6 +977,14 @@ void JuraComponent::start_xml_cycle_(uint32_t now) {
   const char *command = xml_command_for_index_(first_index);
   ESP_LOGD(TAG, "TX_DB \"%s\"", command);
   this->coffee_maker_->connection->reset_all_rx_buffers();
+  if (first_index == 2) {
+    this->prepare_tgc0_request_();
+    this->xml_cycle_.tgc0_attempt = 1;
+    this->xml_cycle_.tgc0_retry_used = false;
+    this->xml_cycle_.tgc0_extend_used = false;
+    this->xml_cycle_.tgc0_extend_window_active = false;
+    this->xml_cycle_.tgc0_timeout_logged = false;
+  }
   this->coffee_maker_->connection->tx_db_command(command);
   this->xml_cycle_.deadline_ms = now + XML_RESPONSE_TIMEOUT_MS;
   this->xml_cycle_.next_action_ms = 0;
@@ -952,21 +1001,73 @@ void JuraComponent::handle_xml_cycle_(uint32_t now) {
       break;
     case XmlCycleState::Phase::WaitingForFrame: {
       if (this->try_receive_xml_frame_(now)) {
+        uint32_t delay = XML_INTER_COMMAND_DELAY_MS;
+        if (this->xml_cycle_.command_index == 1) {
+          size_t next_index = this->next_mapped_xml_command_index_(this->xml_cycle_.command_index);
+          if (next_index == 2) {
+            delay = XML_TGC0_POST_TG43_DELAY_MS;
+          }
+        }
         this->xml_cycle_.phase = XmlCycleState::Phase::DelayBeforeNext;
-        this->xml_cycle_.next_action_ms = now + XML_INTER_COMMAND_DELAY_MS;
+        this->xml_cycle_.next_action_ms = now + delay;
+        this->xml_cycle_.deadline_ms = 0;
+        this->xml_cycle_.tgc0_pending_retry = false;
         return;
       }
       if (this->xml_cycle_.deadline_ms != 0 &&
           static_cast<int32_t>(now - this->xml_cycle_.deadline_ms) >= 0) {
+        if (this->xml_cycle_.command_index == 2 && this->xml_command_has_mapping_(2) &&
+            this->xml_cycle_.tgc0_attempt > 0) {
+          if (!this->xml_cycle_.tgc0_extend_used) {
+            this->xml_cycle_.tgc0_extend_used = true;
+            this->xml_cycle_.tgc0_extend_window_active = true;
+            this->xml_cycle_.deadline_ms = now + XML_TGC0_EXTEND_WINDOW_MS;
+            return;
+          }
+          if (!this->xml_cycle_.tgc0_retry_used) {
+            this->xml_cycle_.tgc0_retry_used = true;
+            this->xml_cycle_.tgc0_pending_retry = true;
+            this->xml_cycle_.phase = XmlCycleState::Phase::DelayBeforeNext;
+            this->xml_cycle_.next_action_ms = now + XML_TGC0_RETRY_DELAY_MS;
+            return;
+          }
+          if (!this->xml_cycle_.tgc0_timeout_logged) {
+            ESP_LOGW(TAG, "TGC0: Timeout nach Retry");
+            this->xml_cycle_.tgc0_timeout_logged = true;
+          }
+        }
         ESP_LOGW(TAG, "RX_DB timeout %s", xml_log_label_for_index_(this->xml_cycle_.command_index));
         this->xml_cycle_.phase = XmlCycleState::Phase::DelayBeforeNext;
-        this->xml_cycle_.next_action_ms = now + XML_INTER_COMMAND_DELAY_MS;
+        uint32_t delay = XML_INTER_COMMAND_DELAY_MS;
+        if (this->xml_cycle_.command_index == 1) {
+          size_t next_index = this->next_mapped_xml_command_index_(this->xml_cycle_.command_index);
+          if (next_index == 2) {
+            delay = XML_TGC0_POST_TG43_DELAY_MS;
+          }
+        } else if (this->xml_cycle_.command_index == 2) {
+          delay = XML_TGC0_RETRY_DELAY_MS;
+        }
+        this->xml_cycle_.next_action_ms = now + delay;
       }
       break;
     }
     case XmlCycleState::Phase::DelayBeforeNext: {
       if (this->xml_cycle_.next_action_ms != 0 &&
           static_cast<int32_t>(now - this->xml_cycle_.next_action_ms) < 0) {
+        return;
+      }
+      if (this->xml_cycle_.tgc0_pending_retry) {
+        const char *command = xml_command_for_index_(this->xml_cycle_.command_index);
+        ESP_LOGD(TAG, "TX_DB \"%s\"", command);
+        this->prepare_tgc0_request_();
+        this->coffee_maker_->connection->tx_db_command(command);
+        this->xml_cycle_.phase = XmlCycleState::Phase::WaitingForFrame;
+        this->xml_cycle_.deadline_ms = now + XML_RESPONSE_TIMEOUT_MS;
+        this->xml_cycle_.tgc0_pending_retry = false;
+        this->xml_cycle_.tgc0_extend_window_active = false;
+        this->xml_cycle_.tgc0_extend_used = false;
+        this->xml_cycle_.tgc0_timeout_logged = false;
+        this->xml_cycle_.tgc0_attempt += 1;
         return;
       }
       size_t next_index = this->next_mapped_xml_command_index_(this->xml_cycle_.command_index);
@@ -976,7 +1077,16 @@ void JuraComponent::handle_xml_cycle_(uint32_t now) {
       }
       const char *command = xml_command_for_index_(next_index);
       ESP_LOGD(TAG, "TX_DB \"%s\"", command);
-      this->coffee_maker_->connection->reset_db_rx_buffer();
+      if (next_index == 2) {
+        this->prepare_tgc0_request_();
+        this->xml_cycle_.tgc0_attempt = 1;
+        this->xml_cycle_.tgc0_retry_used = false;
+        this->xml_cycle_.tgc0_extend_used = false;
+        this->xml_cycle_.tgc0_extend_window_active = false;
+        this->xml_cycle_.tgc0_timeout_logged = false;
+      } else {
+        this->coffee_maker_->connection->reset_db_rx_buffer();
+      }
       this->coffee_maker_->connection->tx_db_command(command);
       this->xml_cycle_.command_index = next_index;
       this->xml_cycle_.phase = XmlCycleState::Phase::WaitingForFrame;
@@ -992,27 +1102,41 @@ bool JuraComponent::try_receive_xml_frame_(uint32_t now) {
     return false;
   }
   std::vector<uint8_t> decoded;
+  if (this->xml_cycle_.command_index == 2 && this->xml_cycle_.tgc0_extend_window_active) {
+    this->xml_cycle_.tgc0_extend_window_active = false;
+  }
   if (!this->coffee_maker_->connection->read_db_frame(decoded, 0)) {
     return false;
   }
   size_t index = this->xml_cycle_.command_index;
   if (index == 2 && this->xml_command_has_mapping_(index)) {
-    std::size_t expected_len = 0;
-    for (const auto &field : this->xml_mapping_.tgc0.fields) {
-      expected_len = std::max(expected_len, field.offset + field.size);
-    }
-    if (expected_len != 0 && decoded.size() != expected_len) {
-      std::vector<uint8_t> retry;
-      if (this->coffee_maker_ != nullptr && this->coffee_maker_->connection != nullptr &&
-          this->coffee_maker_->connection->read_db_frame(retry, 10)) {
-        decoded = std::move(retry);
+    this->xml_cycle_.tgc0_last_raw_len = decoded.size();
+    this->xml_cycle_.tgc0_last_frame_trimmed = false;
+    this->xml_cycle_.tgc0_last_frame_had_crlf = false;
+    if (decoded.size() >= 2) {
+      std::size_t last_crlf = std::string::npos;
+      for (std::size_t i = 0; i + 1 < decoded.size(); ++i) {
+        if (decoded[i] == '\r' && decoded[i + 1] == '\n') {
+          last_crlf = i;
+        }
       }
-      if (expected_len != 0 && decoded.size() != expected_len) {
-        ESP_LOGD(TAG, "XML TGC0: decoded_len=%u bleibt ungleich expected_len=%u nach Retry",
-                 static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len));
+      if (last_crlf != std::string::npos) {
+        this->xml_cycle_.tgc0_last_frame_had_crlf = true;
+        std::size_t payload_offset = last_crlf + 2;
+        if (payload_offset < decoded.size()) {
+          decoded.erase(decoded.begin(), decoded.begin() + static_cast<std::ptrdiff_t>(payload_offset));
+          this->xml_cycle_.tgc0_last_frame_trimmed = payload_offset > 0;
+        } else {
+          decoded.clear();
+          this->xml_cycle_.tgc0_last_frame_trimmed = true;
+        }
+      } else {
         decoded.clear();
       }
+    } else {
+      decoded.clear();
     }
+    this->xml_cycle_.tgc0_last_payload_len = decoded.size();
   }
   this->xml_cycle_.responses[index] = std::move(decoded);
   ESP_LOGD(TAG, "RX_DB %s decoded_len=%u", xml_log_label_for_index_(index),
@@ -1141,6 +1265,8 @@ sensor::Sensor *JuraComponent::get_or_create_sensor_(const std::string &name, co
     return nullptr;
   }
 
+  sensor_obj->set_internal(false);
+
   auto meta_it = this->xml_sensor_meta_.find(name);
   if (meta_it != this->xml_sensor_meta_.end()) {
     const auto &meta = meta_it->second;
@@ -1219,6 +1345,16 @@ void JuraComponent::XmlCycleState::reset() {
   for (auto &response : this->responses) {
     response.clear();
   }
+  this->tgc0_extend_window_active = false;
+  this->tgc0_extend_used = false;
+  this->tgc0_retry_used = false;
+  this->tgc0_pending_retry = false;
+  this->tgc0_timeout_logged = false;
+  this->tgc0_attempt = 0;
+  this->tgc0_last_raw_len = 0;
+  this->tgc0_last_payload_len = 0;
+  this->tgc0_last_frame_trimmed = false;
+  this->tgc0_last_frame_had_crlf = false;
 }
 
 void JuraComponent::start_brew(::jutta_proto::CoffeeMaker::coffee_t coffee) {
