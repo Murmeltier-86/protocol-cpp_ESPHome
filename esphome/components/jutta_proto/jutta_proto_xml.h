@@ -14,8 +14,11 @@ struct XmlField {
   std::string label;
   std::size_t offset{0};
   std::size_t size{0};
+  bool has_endian{false};
   bool little_endian{false};
   double scale{1.0};
+  bool has_add{false};
+  double add{0.0};
 };
 
 struct XmlCommandMapping {

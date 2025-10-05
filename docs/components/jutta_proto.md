@@ -31,6 +31,21 @@ image and parsed during boot to discover the exact command strings and optional 
 If the XML is missing or malformed the defaults `@TR:32`, `@TG:43`, and `@TG:C0` are used and the sensors keep their
 generic names.
 
+### CODEX-Anpassung: Stabilisiertes `@TG:C0`
+
+- **Was wurde geändert?** Die Dekodierung von `@TG:C0` (Prozentwerte) nutzt jetzt strikt die Angaben aus der XML:
+  Header-, Encoded- und Rohbytes werden gemäß Endianness interpretiert, bei fehlender Angabe zunächst als Little-Endian
+  gelesen und bei Ausreißern auf Big-Endian gewechselt. Der Rohwert wird – abhängig von optionalen Faktor/Offset-Angaben –
+  entweder direkt skaliert oder ersatzweise durch `256` geteilt, anschließend auf `0…250 %` begrenzt, zweimal hintereinander
+  validiert und vor der Veröffentlichung über ein gleitendes Mittel (Fenstergröße drei gültige Samples) geglättet. Der
+  RX-Parser wartet bei Bedarf einmalig bis zu 10 ms auf fehlende Bytes und verwirft unvollständige Frames, sodass nur
+  vollständig dekodierte Messungen an Home Assistant weitergereicht werden.
+- **Was bleibt unverändert?** Legacy-Handshakes, sämtliche Nicht-XML-Kommandos sowie der bisherige Poll-Takt bleiben
+  unverändert bestehen.
+- **Erwartetes Ergebnis:** Die Zähler aus `@TR:32` und `@TG:43` behalten ihr etabliertes Verhalten. `@TG:C0` liefert jetzt
+  stabile Prozentwerte im Bereich `0` bis `250`, vermeidet Ausreißer und taucht als numerische Entität in Home Assistant
+  auf.
+
 ### CODEX: J.O.E.-XML ohne `includes`
 
 1. Exportiere die gewünschte XML über die J.O.E.-App.

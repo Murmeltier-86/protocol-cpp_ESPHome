@@ -347,13 +347,22 @@ bool parse_field_tag(const std::string &tag_text, XmlCommandMapping &mapping) {
   }
   std::string endian = to_lower_copy(attrs.get("endian"));
   if (endian == "le" || endian == "little") {
+    field.has_endian = true;
     field.little_endian = true;
+  } else if (endian == "be" || endian == "big") {
+    field.has_endian = true;
+    field.little_endian = false;
   }
   double scale = field.scale;
   if (parse_double_attr(attrs, {"scale"}, scale)) {
     field.scale = scale;
   } else if (contains_percent_hint(field.name) || contains_percent_hint(field.label)) {
     field.scale = 0.01;
+  }
+  double add = field.add;
+  if (parse_double_attr(attrs, {"offset_value", "bias", "add"}, add)) {
+    field.has_add = true;
+    field.add = add;
   }
   mapping.fields.push_back(field);
   return true;
@@ -611,6 +620,7 @@ bool parse_textitem_mapping(const std::string &xml, const std::string &command, 
     }
     running_offset = field.offset + field.size;
     if (spec.has_endian) {
+      field.has_endian = true;
       field.little_endian = spec.little_endian;
     }
     mapping.fields.push_back(field);
@@ -680,6 +690,9 @@ bool parse_payload(const std::vector<uint8_t> &decoded, const XmlCommandMapping 
              field.little_endian ? "LE" : "BE", raw_hex.c_str(),
              static_cast<unsigned long long>(raw));
     double value = static_cast<double>(raw) * field.scale;
+    if (field.has_add) {
+      value += field.add;
+    }
     out.set_value(field.name, value, field.label);
     ESP_LOGD(TAG, "XML field %s value_staged=%.3f", field.name.c_str(), value);
     any = true;
