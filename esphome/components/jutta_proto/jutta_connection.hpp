@@ -123,6 +123,8 @@ class JuttaConnection {
     void reset_db_rx_buffer();
     /** Leert alle Empfangspuffer (Legacy- und DB-Teil). */
     void reset_all_rx_buffers();
+    /** Verwirft nicht abgeholte Bytes aus dem UART-Puffer ohne zu blockieren. */
+    void drain_serial_input_nonblocking();
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
