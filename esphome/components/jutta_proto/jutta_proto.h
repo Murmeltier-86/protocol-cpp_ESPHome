@@ -8,7 +8,6 @@
 #include <string_view>
 #include <deque>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "esphome/core/automation.h"
@@ -103,8 +102,6 @@ struct XmlSensorMeta {
   bool has_icon{false};
   std::string icon;
   bool is_tgc0{false};
-  bool user_provided{false};
-  bool force_label{true};
 };
 
 class JuraComponent : public esphome::Component, public esphome::uart::UARTDevice {
@@ -156,7 +153,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void publish_xml_stats_();
   void publish_single_stat_(const std::string &name, double value, const std::string &label);
   void register_xml_sensor_(const XmlField &field, XmlSensorKind kind);
-  void add_configured_xml_sensor(const std::string &name, sensor::Sensor *sensor);
   sensor::Sensor *get_or_create_sensor_(const std::string &name, const std::string &label);
   static const char *xml_command_for_index_(size_t index);
   static const char *xml_log_label_for_index_(size_t index);
@@ -197,8 +193,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   Stats xml_stats_{};
   std::unordered_map<std::string, sensor::Sensor *> xml_sensors_{};
   std::unordered_map<std::string, std::string> xml_sensor_labels_{};
-  std::unordered_set<std::string> xml_user_configured_{};
-  std::unordered_set<sensor::Sensor *> xml_owned_sensors_{};
   struct Tgc0FilterState {
     std::deque<float> window;
     uint8_t consecutive_valid{0};
