@@ -3,7 +3,7 @@ import os
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
-from esphome.components import sensor, text_sensor, uart
+from esphome.components import text_sensor, uart
 from esphome.const import CONF_ID
 from esphome.core import CORE
 
@@ -27,8 +27,6 @@ CONF_MACHINE_DATA = "machine_data"
 CONF_ENABLE_XML_POLL = "enable_xml_poll"
 CONF_XML_MAPPING_PATH = "xml_mapping_path"
 CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
-CONF_XML_SENSORS = "xml_sensors"
-CONF_FIELD = "field"
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -96,9 +94,6 @@ SEQUENCE_COMMAND_EXPRESSIONS = {
 JURA_COMPONENT_IDS = []
 
 
-XML_SENSOR_SCHEMA = sensor.sensor_schema().extend({cv.Required(CONF_FIELD): cv.string})
-
-
 CONFIG_SCHEMA = (
     cv.Schema(
         {
@@ -109,7 +104,6 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=30000): cv.All(
                 cv.positive_int, cv.Range(min=25000)
             ),
-            cv.Optional(CONF_XML_SENSORS, default=[]): cv.ensure_list(XML_SENSOR_SCHEMA),
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
@@ -307,14 +301,8 @@ async def to_code(config):
     cg.add(var.set_xml_poll_interval(config[CONF_XML_POLL_INTERVAL_MS]))
 
     if CONF_MACHINE_DATA in config:
-        machine_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
-        cg.add(var.set_machine_data_sensor(machine_sensor))
-
-    for xml_sensor in config.get(CONF_XML_SENSORS, []):
-        sensor_conf = xml_sensor.copy()
-        field_name = sensor_conf.pop(CONF_FIELD)
-        sens = await sensor.new_sensor(sensor_conf)
-        cg.add(var.add_configured_xml_sensor(cg.std_string(field_name), sens))
+        sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
+        cg.add(var.set_machine_data_sensor(sensor))
 
 
 async def _get_parent(config):
