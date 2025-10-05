@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <deque>
 
 #include "serial_connection.hpp"
 
@@ -306,9 +307,7 @@ class JuttaConnection {
     void update_tx_echo_suppressor_();
     size_t filter_tx_echo_(const uint8_t* data, size_t length, std::vector<uint8_t>& filtered);
 
-    std::vector<uint8_t> db_rx_buffer_{};
-    uint32_t db_frame_last_activity_{0};
-    bool db_frame_active_{false};
+    std::deque<uint8_t> db_rx_queue_{};
     std::vector<uint8_t> last_tx_frame_{};
     size_t last_tx_echo_progress_{0};
     uint32_t last_tx_deadline_{0};

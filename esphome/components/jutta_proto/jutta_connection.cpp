@@ -460,14 +460,11 @@ void JuttaConnection::flush_serial_input() const {
 }
 
 void JuttaConnection::flush_db_rx_queue() {
-    if (!this->db_rx_buffer_.empty()) {
-        ESP_LOGD(TAG, "Clearing %zu gepufferte DB-Byte%s.", this->db_rx_buffer_.size(),
-                 this->db_rx_buffer_.size() == 1 ? "" : "s");
-        this->db_rx_buffer_.clear();
+    if (!this->db_rx_queue_.empty()) {
+        ESP_LOGD(TAG, "Clearing %zu gepufferte DB-Byte%s.", this->db_rx_queue_.size(),
+                 this->db_rx_queue_.size() == 1 ? "" : "s");
+        this->db_rx_queue_.clear();
     }
-
-    this->db_frame_active_ = false;
-    this->db_frame_last_activity_ = 0;
 
     std::array<uint8_t, 4> discard{};
     while (true) {
@@ -585,134 +582,126 @@ bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t time
     decoded.clear();
 
     constexpr uint32_t GAP_MS = 25;
-    static const std::array<uint8_t, 8> TERMINATOR{{0xDF, 0xFF, 0xDB, 0xDB, 0xFB, 0xFB, 0xDB, 0xDB}};
+    enum class FrameEnd { None, Gap, Terminator, Timeout };
 
-    auto now = esphome::millis();
-    auto start = now;
+    FrameEnd end_reason = FrameEnd::None;
+    uint32_t start = esphome::millis();
+    uint32_t last_activity = 0;
+    bool frame_started = false;
+    bool frame_complete = false;
+    uint8_t accumulator = 0;
+    int pair_count = 0;
 
-    auto has_terminator = [&]() -> bool {
-        if (this->db_rx_buffer_.size() < TERMINATOR.size()) {
-            return false;
+    auto decode_symbol = [&](uint8_t symbol) {
+        if ((symbol & 0xDBu) != 0xDBu) {
+            return;
         }
-        return std::equal(this->db_rx_buffer_.end() - TERMINATOR.size(), this->db_rx_buffer_.end(), TERMINATOR.begin());
-    };
-
-    auto finish_frame = [&](size_t payload_encoded_len, size_t consume_len, const char* reason) {
-        if (payload_encoded_len > 0) {
-            decoded.reserve(payload_encoded_len / 4 + 1);
-            uint8_t accumulator = 0;
-            int pair_count = 0;
-            for (size_t i = 0; i < payload_encoded_len; ++i) {
-                uint8_t symbol = this->db_rx_buffer_[i];
-                if ((symbol & 0xDBu) != 0xDBu) {
-                    continue;
-                }
-                accumulator >>= 2;
-                if ((symbol & 0x04u) != 0u) {
-                    accumulator |= 0x40u;
-                }
-                if ((symbol & 0x20u) != 0u) {
-                    accumulator |= 0x80u;
-                }
-                if (++pair_count == 4) {
-                    decoded.push_back(accumulator);
-                    pair_count = 0;
-                    accumulator = 0;
+        accumulator >>= 2;
+        if ((symbol & 0x04u) != 0u) {
+            accumulator |= 0x40u;
+        }
+        if ((symbol & 0x20u) != 0u) {
+            accumulator |= 0x80u;
+        }
+        if (++pair_count == 4) {
+            decoded.push_back(accumulator);
+            pair_count = 0;
+            accumulator = 0;
+            if (decoded.size() >= 2) {
+                size_t n = decoded.size();
+                if (decoded[n - 2] == '\r' && decoded[n - 1] == '\n') {
+                    decoded.resize(n - 2);
+                    frame_complete = true;
+                    end_reason = FrameEnd::Terminator;
                 }
             }
-            if (decoded.size() >= 2 && decoded[decoded.size() - 2] == '\r' && decoded.back() == '\n') {
-                decoded.resize(decoded.size() - 2);
-            }
         }
-
-        ESP_LOGD(TAG, "RX_DB decoded_len=%u reason=%s", static_cast<unsigned>(decoded.size()), reason);
-
-        if (consume_len > 0) {
-            auto erase_end = this->db_rx_buffer_.begin() + static_cast<std::ptrdiff_t>(consume_len);
-            this->db_rx_buffer_.erase(this->db_rx_buffer_.begin(), erase_end);
-        }
-        if (this->db_rx_buffer_.empty()) {
-            this->db_frame_active_ = false;
-            this->db_frame_last_activity_ = 0;
-        } else {
-            this->db_frame_active_ = true;
-            this->db_frame_last_activity_ = now;
-        }
-        return true;
     };
 
-    auto handle_gap_if_any = [&]() -> bool {
-        if (!this->db_frame_active_ || this->db_frame_last_activity_ == 0) {
-            return false;
+    auto process_queue = [&]() {
+        while (!this->db_rx_queue_.empty() && !frame_complete) {
+            uint8_t symbol = this->db_rx_queue_.front();
+            this->db_rx_queue_.pop_front();
+            decode_symbol(symbol);
+            frame_started = true;
+            last_activity = esphome::millis();
         }
-        now = esphome::millis();
-        if (static_cast<int32_t>(now - this->db_frame_last_activity_ - GAP_MS) < 0) {
-            return false;
-        }
-        if (this->db_rx_buffer_.empty()) {
-            this->db_frame_active_ = false;
-            return false;
-        }
-        return finish_frame(this->db_rx_buffer_.size(), this->db_rx_buffer_.size(), "gap");
     };
 
-    if (has_terminator()) {
-        size_t total = this->db_rx_buffer_.size();
-        size_t payload = total - TERMINATOR.size();
-        return finish_frame(payload, total, "CRLF");
-    }
-
-    if (handle_gap_if_any()) {
+    process_queue();
+    if (frame_complete) {
+        ESP_LOGD(TAG, "RX_DB decoded_len=%u reason=CRLF", static_cast<unsigned>(decoded.size()));
         return true;
     }
+    if (timeout_ms == 0 && !frame_started) {
+        return false;
+    }
 
-    std::array<uint8_t, 32> raw{};
-    while (true) {
+    while (!frame_complete) {
+        std::array<uint8_t, 4> raw{};
         size_t read = this->serial.read_serial(raw);
-        if (read == 0) {
-            break;
-        }
-        now = esphome::millis();
-        std::vector<uint8_t> filtered;
-        filtered.reserve(read);
-        size_t dropped = this->filter_tx_echo_(raw.data(), read, filtered);
-        if (dropped > 0) {
-            ESP_LOGV(TAG, "Dropped %zu echo byte%s while reading DB frame.", dropped,
-                     dropped == 1 ? "" : "s");
-        }
-        if (!filtered.empty()) {
-            this->db_rx_buffer_.insert(this->db_rx_buffer_.end(), filtered.begin(), filtered.end());
-            this->db_frame_active_ = true;
-            this->db_frame_last_activity_ = now;
-        }
-        if (has_terminator()) {
-            size_t total = this->db_rx_buffer_.size();
-            size_t payload = total - TERMINATOR.size();
-            return finish_frame(payload, total, "CRLF");
-        }
-        if (read < raw.size()) {
-            break;
-        }
-    }
-
-    if (handle_gap_if_any()) {
-        return true;
-    }
-
-    if (timeout_ms != 0) {
-        now = esphome::millis();
-        if (static_cast<int32_t>(now - start - timeout_ms) >= 0) {
-            if (this->db_rx_buffer_.empty()) {
-                ESP_LOGW(TAG, "RX_DB timeout (no data)");
-                this->db_frame_active_ = false;
-                this->db_frame_last_activity_ = 0;
-                return false;
+        if (read > 0) {
+            last_activity = esphome::millis();
+            std::vector<uint8_t> filtered;
+            filtered.reserve(read);
+            size_t dropped = this->filter_tx_echo_(raw.data(), read, filtered);
+            if (dropped > 0) {
+                ESP_LOGV(TAG, "Dropped %zu echo byte%s while reading DB frame.", dropped,
+                         dropped == 1 ? "" : "s");
             }
-            return finish_frame(this->db_rx_buffer_.size(), this->db_rx_buffer_.size(), "timeout");
+            for (uint8_t byte : filtered) {
+                this->db_rx_queue_.push_back(byte);
+            }
+            process_queue();
+            if (frame_complete) {
+                break;
+            }
+            frame_started = frame_started || !filtered.empty();
+            continue;
         }
+
+        uint32_t now = esphome::millis();
+        if (frame_started && last_activity != 0 &&
+            static_cast<int32_t>(now - last_activity - GAP_MS) >= 0) {
+            end_reason = FrameEnd::Gap;
+            break;
+        }
+        if (timeout_ms != 0 && static_cast<int32_t>(now - start - timeout_ms) >= 0) {
+            end_reason = frame_started ? FrameEnd::Gap : FrameEnd::Timeout;
+            break;
+        }
+        esphome::delay(1);
     }
 
-    return false;
+    if (decoded.empty()) {
+        if (end_reason == FrameEnd::Timeout) {
+            ESP_LOGW(TAG, "RX_DB timeout (no data)");
+        }
+        return false;
+    }
+
+    if (end_reason == FrameEnd::None) {
+        end_reason = FrameEnd::Gap;
+    }
+
+    const char* reason = nullptr;
+    switch (end_reason) {
+        case FrameEnd::Gap:
+            reason = "gap";
+            break;
+        case FrameEnd::Terminator:
+            reason = "CRLF";
+            break;
+        case FrameEnd::Timeout:
+            reason = "timeout";
+            break;
+        case FrameEnd::None:
+            reason = "unknown";
+            break;
+    }
+
+    ESP_LOGD(TAG, "RX_DB decoded_len=%u reason=%s", static_cast<unsigned>(decoded.size()), reason);
+    return true;
 }
 
 void JuttaConnection::reset_db_rx_buffer() {
