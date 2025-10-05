@@ -235,9 +235,12 @@ const char *JuraComponent::handshake_stage_name(JuraComponent::HandshakeStage st
 
 JuraComponent::~JuraComponent() {
   for (auto &entry : this->xml_sensors_) {
-    delete entry.second;
+    if (this->xml_owned_sensors_.find(entry.second) != this->xml_owned_sensors_.end()) {
+      delete entry.second;
+    }
   }
   this->xml_sensors_.clear();
+  this->xml_owned_sensors_.clear();
 }
 
 void JuraComponent::setup() {
@@ -819,6 +822,7 @@ bool JuraComponent::process_tgc0_response_(const std::vector<uint8_t> &decoded) 
 
 void JuraComponent::register_xml_sensor_(const XmlField &field, XmlSensorKind kind) {
   auto &meta = this->xml_sensor_meta_[field.name];
+  bool user_configured = this->xml_user_configured_.find(field.name) != this->xml_user_configured_.end();
   meta.kind = kind;
   meta.min_value = (kind == XmlSensorKind::Counter) ? XML_COUNTER_MIN : XML_MEASUREMENT_MIN;
   meta.max_value = (kind == XmlSensorKind::Counter) ? XML_COUNTER_MAX : XML_MEASUREMENT_MAX;
@@ -836,7 +840,22 @@ void JuraComponent::register_xml_sensor_(const XmlField &field, XmlSensorKind ki
     meta.is_tgc0 = true;
   }
   meta.configured = true;
+  meta.user_provided = user_configured;
+  meta.force_label = !user_configured;
   this->get_or_create_sensor_(field.name, field.label);
+}
+
+void JuraComponent::add_configured_xml_sensor(const std::string &name, sensor::Sensor *sensor) {
+  if (sensor == nullptr) {
+    return;
+  }
+  this->xml_sensors_[name] = sensor;
+  this->xml_user_configured_.insert(name);
+  this->xml_owned_sensors_.erase(sensor);
+  auto &meta = this->xml_sensor_meta_[name];
+  meta.user_provided = true;
+  meta.force_label = false;
+  meta.configured = true;
 }
 
 void JuraComponent::ensure_xml_sensors_created_() {
@@ -1152,19 +1171,24 @@ sensor::Sensor *JuraComponent::get_or_create_sensor_(const std::string &name, co
   if (it != this->xml_sensors_.end()) {
     auto *sensor_obj = it->second;
     sensor_obj->set_unique_id(unique_id);
-    sensor_obj->set_accuracy_decimals(accuracy);
-    sensor_obj->set_state_class(state_class);
-    if (meta != nullptr && meta->has_unit) {
-      sensor_obj->set_unit_of_measurement(meta->unit_of_measurement);
+    if (meta == nullptr || !meta->user_provided) {
+      sensor_obj->set_accuracy_decimals(accuracy);
+      sensor_obj->set_state_class(state_class);
+      if (meta != nullptr && meta->has_unit) {
+        sensor_obj->set_unit_of_measurement(meta->unit_of_measurement);
+      }
+      if (meta != nullptr && meta->has_icon) {
+        sensor_obj->set_icon(meta->icon);
+      }
     }
-    if (meta != nullptr && meta->has_icon) {
-      sensor_obj->set_icon(meta->icon);
+    if (meta == nullptr || meta->force_label) {
+      auto label_it = this->xml_sensor_labels_.find(name);
+      if (label_it == this->xml_sensor_labels_.end() || label_it->second != effective_label) {
+        sensor_obj->set_name(effective_label);
+        this->xml_sensor_labels_[name] = effective_label;
+      }
     }
-    auto label_it = this->xml_sensor_labels_.find(name);
-    if (label_it == this->xml_sensor_labels_.end() || label_it->second != effective_label) {
-      sensor_obj->set_name(effective_label);
-      this->xml_sensor_labels_[name] = effective_label;
-    }
+    try_set_parent(sensor_obj, this, 0);
     return sensor_obj;
   }
 
@@ -1184,6 +1208,7 @@ sensor::Sensor *JuraComponent::get_or_create_sensor_(const std::string &name, co
   sensor_obj->set_name(effective_label);
   this->xml_sensor_labels_[name] = effective_label;
   this->xml_sensors_[name] = sensor_obj;
+  this->xml_owned_sensors_.insert(sensor_obj);
   return sensor_obj;
 }
 

@@ -20,6 +20,13 @@ jutta_proto:
   enable_xml_poll: true            # optional, default false
   xml_mapping_path: embedded       # optional, "embedded" nutzt die mitgelieferte XML
   xml_poll_interval_ms: 30000      # optional, Pollintervall in ms (min. 25000)
+  xml_sensors:
+    - field: "TG43_Cleaning"
+      name: "Reinigungszähler"
+    - field: "TGC0_WaterTank"
+      name: "Wasserfüllstand"
+      unit_of_measurement: "%"
+      accuracy_decimals: 1
 ```
 
 The component takes care of the handshake during startup. Once the handshake finishes, all brewing actions become available.
@@ -77,6 +84,34 @@ verarbeiten kann, gelten die folgenden Eckpunkte:
 - **Logging.** Die Initialisierung protokolliert das geladene Mapping und die Anzahl der Sensoren. Für jeden veröffentlichen
   Wert bleibt die bestehende DEBUG-Zeile mit Feldname und Wert erhalten; Längenabweichungen der Rohframes erscheinen nur
   noch auf DEBUG-Level.
+
+#### Eigene Sensoren in YAML verknüpfen
+
+Über den neuen Abschnitt `xml_sensors` kannst du gezielt festlegen, welche Felder aus der Statistik in Home Assistant
+sichtbar werden sollen. Pro Eintrag wird ein klassisches ESPHome-Sensorobjekt erzeugt und mit dem jeweiligen XML-Feld
+verknüpft. Der Schlüssel `field` entspricht dem `name`-Attribut aus der XML-Datei (z. B. `<FIELD name="TG43_Cleaning" …/>`).
+Fehlt ein `FIELD`-Eintrag, verwendet der Parser automatisch einen sprechenden Namen auf Basis des Labels im XML – diese
+Bezeichner tauchen beim Booten im Debug-Log auf und können dort abgeschrieben werden.
+
+```yaml
+jutta_proto:
+  enable_xml_poll: true
+  xml_mapping_path: embedded
+  xml_sensors:
+    - field: "TR32_TotalProducts"
+      name: "Bezüge gesamt"
+    - field: "TG43_FilterChange"
+      name: "Filterwechsel"
+    - field: "TGC0_Cleaning"
+      name: "Reinigung fällig"
+      unit_of_measurement: "%"
+      accuracy_decimals: 1
+```
+
+Alle hier definierten Sensoren behalten die in YAML gesetzten Eigenschaften (`name`, `unit_of_measurement`, `icon`, …).
+Nicht aufgeführte Felder werden weiterhin automatisch als interne Sensoren angelegt, damit Legacy-Installationen
+unverändert funktionieren. Wer ausschließlich eigene Sensoren sichtbar haben möchte, blendet die übrigen Entitäten in
+Home Assistant einfach aus.
 
 #### Sensoraufbau im Detail
 
