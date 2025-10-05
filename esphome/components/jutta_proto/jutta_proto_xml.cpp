@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -186,15 +185,6 @@ bool parse_size_t_attr(const AttributeMap &attrs, std::initializer_list<const ch
   return false;
 }
 
-bool parse_int_attr(const AttributeMap &attrs, std::initializer_list<const char *> keys, int &out) {
-  std::size_t tmp = 0;
-  if (!parse_size_t_attr(attrs, keys, tmp)) {
-    return false;
-  }
-  out = static_cast<int>(tmp);
-  return true;
-}
-
 bool parse_double_attr(const AttributeMap &attrs, std::initializer_list<const char *> keys, double &out) {
   for (const char *key : keys) {
     std::string value = attrs.get(key);
@@ -205,24 +195,6 @@ bool parse_double_attr(const AttributeMap &attrs, std::initializer_list<const ch
         out = parsed;
         return true;
       }
-    }
-  }
-  return false;
-}
-
-bool parse_bool_attr(const AttributeMap &attrs, std::initializer_list<const char *> keys, bool &out) {
-  for (const char *key : keys) {
-    std::string value = to_lower_copy(attrs.get(key));
-    if (value.empty()) {
-      continue;
-    }
-    if (value == "1" || value == "true" || value == "yes" || value == "on") {
-      out = true;
-      return true;
-    }
-    if (value == "0" || value == "false" || value == "no" || value == "off") {
-      out = false;
-      return true;
     }
   }
   return false;
@@ -383,82 +355,6 @@ bool parse_field_tag(const std::string &tag_text, XmlCommandMapping &mapping) {
   } else if (contains_percent_hint(field.name) || contains_percent_hint(field.label)) {
     field.scale = 0.01;
   }
-  std::string unit = attrs.get("unit");
-  trim(unit);
-  field.unit = unit;
-  std::string unique_id = attrs.get("unique_id");
-  trim(unique_id);
-  field.unique_id = unique_id;
-
-  auto decode_sensor_kind = [](const std::string &value) -> XmlField::SensorKind {
-    std::string lower = to_lower_copy(value);
-    if (lower == "counter" || lower == "total" || lower == "total_increasing" || lower == "sum") {
-      return XmlField::SensorKind::TotalIncreasing;
-    }
-    if (lower == "measurement" || lower == "measure" || lower == "value" || lower == "status") {
-      return XmlField::SensorKind::Measurement;
-    }
-    return XmlField::SensorKind::None;
-  };
-
-  std::string sensor_attr = attrs.get("sensor");
-  std::string publish_attr = attrs.get("publish");
-  std::string state_class_attr = attrs.get("state_class");
-  XmlField::SensorKind sensor_kind = XmlField::SensorKind::None;
-  if (!sensor_attr.empty()) {
-    sensor_kind = decode_sensor_kind(sensor_attr);
-  }
-  if (sensor_kind == XmlField::SensorKind::None && !publish_attr.empty()) {
-    sensor_kind = decode_sensor_kind(publish_attr);
-    if (sensor_kind == XmlField::SensorKind::None) {
-      std::string lower = to_lower_copy(publish_attr);
-      if (lower == "1" || lower == "true" || lower == "yes" || lower == "sensor") {
-        sensor_kind = XmlField::SensorKind::Measurement;
-      }
-    }
-  }
-  if (!state_class_attr.empty()) {
-    XmlField::SensorKind from_state = decode_sensor_kind(state_class_attr);
-    if (from_state != XmlField::SensorKind::None) {
-      sensor_kind = from_state;
-    }
-  }
-
-  field.sensor_kind = sensor_kind;
-  field.publish_sensor = sensor_kind != XmlField::SensorKind::None;
-
-  double min_value = field.min_value;
-  if (parse_double_attr(attrs, {"min", "min_value"}, min_value)) {
-    field.min_value = min_value;
-    field.has_min = true;
-  }
-  double max_value = field.max_value;
-  if (parse_double_attr(attrs, {"max", "max_value"}, max_value)) {
-    field.max_value = max_value;
-    field.has_max = true;
-  }
-  int decimals = field.accuracy_decimals;
-  if (parse_int_attr(attrs, {"decimals", "precision"}, decimals)) {
-    field.accuracy_decimals = decimals;
-    field.has_accuracy = true;
-  }
-
-  if (!field.has_min && field.sensor_kind == XmlField::SensorKind::TotalIncreasing) {
-    field.has_min = true;
-    field.min_value = 0.0;
-  }
-  if (!field.has_max && field.sensor_kind == XmlField::SensorKind::TotalIncreasing) {
-    field.has_max = true;
-    field.max_value = 1000000.0;
-  }
-  if (field.sensor_kind == XmlField::SensorKind::Measurement && !field.has_max &&
-      (contains_percent_hint(field.name) || contains_percent_hint(field.label) || std::fabs(field.scale - 0.01) < 1e-9)) {
-    field.has_min = true;
-    field.min_value = 0.0;
-    field.has_max = true;
-    field.max_value = 250.0;
-  }
-
   mapping.fields.push_back(field);
   return true;
 }
@@ -745,20 +641,9 @@ bool parse_payload(const std::vector<uint8_t> &decoded, const XmlCommandMapping 
     std::string payload_ascii = format_ascii_string(decoded);
     ESP_LOGD(TAG, "XML %s payload ASCII: %s", command_label, payload_ascii.c_str());
   }
-  if (decoded.empty() || decoded[0] != 0x26) {
-    ESP_LOGW(TAG, "XML %s: fehlender 0x26 Marker (decoded_len=%u)", command_label,
-             static_cast<unsigned>(decoded.size()));
-    return false;
-  }
-  if (expected_len != 0 && decoded.size() < expected_len) {
-    ESP_LOGW(TAG,
-             "XML %s: decoded_len (%u) < expected_len (%u)",
-             command_label, static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len));
-    return false;
-  }
   if (expected_len != 0 && decoded.size() != expected_len) {
     std::string mismatch_head = format_hex_head(decoded, 32);
-    ESP_LOGD(TAG,
+    ESP_LOGW(TAG,
              "XML %s: decoded_len (%u) != expected_len (%u), head32=%s",
              command_label, static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len),
              mismatch_head.c_str());

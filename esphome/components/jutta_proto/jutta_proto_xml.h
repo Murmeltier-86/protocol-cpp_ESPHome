@@ -10,24 +10,12 @@ namespace esphome {
 namespace jutta_component {
 
 struct XmlField {
-  enum class SensorKind { None, Measurement, TotalIncreasing };
-
   std::string name;
   std::string label;
   std::size_t offset{0};
   std::size_t size{0};
   bool little_endian{false};
   double scale{1.0};
-  bool publish_sensor{false};
-  SensorKind sensor_kind{SensorKind::None};
-  bool has_min{false};
-  double min_value{0.0};
-  bool has_max{false};
-  double max_value{0.0};
-  bool has_accuracy{false};
-  int accuracy_decimals{0};
-  std::string unit;
-  std::string unique_id;
 };
 
 struct XmlCommandMapping {
