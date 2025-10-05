@@ -1150,10 +1150,10 @@ sensor::Sensor *JuraComponent::get_or_create_sensor_(const std::string &name, co
                                          : sensor::StateClass::STATE_CLASS_MEASUREMENT;
     sensor_obj->set_state_class(state_class);
     if (meta.has_unit) {
-      sensor_obj->set_unit_of_measurement(meta.unit_of_measurement);
+      sensor_obj->set_unit_of_measurement(meta.unit_of_measurement.c_str());
     }
     if (meta.has_icon) {
-      sensor_obj->set_icon(meta.icon);
+      sensor_obj->set_icon(meta.icon.c_str());
     }
   }
 
