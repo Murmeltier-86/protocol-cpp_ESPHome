@@ -124,8 +124,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void finish_xml_cycle_(uint32_t now, bool success);
   void publish_xml_stats_();
   void publish_single_stat_(const std::string &name, double value, const std::string &label);
-  sensor::Sensor *get_or_create_sensor_(const XmlField &field);
-  std::string make_sensor_unique_id_(const XmlField &field) const;
+  sensor::Sensor *get_or_create_sensor_(const std::string &name, const std::string &label);
   static const char *xml_command_for_index_(size_t index);
   static const char *xml_log_label_for_index_(size_t index);
   bool xml_command_has_mapping_(size_t index) const;
@@ -160,19 +159,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   Stats xml_stats_{};
   std::unordered_map<std::string, sensor::Sensor *> xml_sensors_{};
   std::unordered_map<std::string, std::string> xml_sensor_labels_{};
-  struct XmlSensorMetadata {
-    sensor::Sensor *sensor{nullptr};
-    XmlField::SensorKind kind{XmlField::SensorKind::None};
-    bool has_min{false};
-    double min_value{0.0};
-    bool has_max{false};
-    double max_value{0.0};
-    int accuracy_decimals{0};
-    std::string label;
-    std::string unit;
-  };
-  std::unordered_map<std::string, XmlSensorMetadata> xml_sensor_meta_{};
-  std::unordered_map<std::string, double> xml_last_published_values_{};
 
   struct XmlCycleState {
     enum class Phase { Idle, WaitingForFrame, DelayBeforeNext };
