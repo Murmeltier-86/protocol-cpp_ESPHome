@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <deque>
 #include <unordered_map>
 #include <vector>
 
@@ -41,6 +42,8 @@ class Sensor {
   virtual void set_internal(bool) {}
   virtual void set_unique_id(const std::string &) {}
   virtual void set_state_class(StateClass) {}
+  virtual void set_unit_of_measurement(const std::string &) {}
+  virtual void set_icon(const std::string &) {}
 };
 
 }  // namespace sensor
@@ -94,6 +97,11 @@ struct XmlSensorMeta {
   bool configured{false};
   bool has_last_value{false};
   float last_value{0.0f};
+  bool has_unit{false};
+  std::string unit_of_measurement;
+  bool has_icon{false};
+  std::string icon;
+  bool is_tgc0{false};
 };
 
 class JuraComponent : public esphome::Component, public esphome::uart::UARTDevice {
@@ -151,6 +159,11 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_command_has_mapping_(size_t index) const;
   size_t first_mapped_xml_command_index_() const;
   size_t next_mapped_xml_command_index_(size_t index) const;
+  bool process_tgc0_response_(const std::vector<uint8_t> &decoded);
+  bool stage_tgc0_value_(const std::string &name, const std::string &label, float filtered_value,
+                         uint16_t header_value, uint16_t encoded_value, uint16_t raw_value);
+  bool decode_field_value_(const std::vector<uint8_t> &decoded, const XmlField &field, bool little_endian,
+                           std::uint64_t &out) const;
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
   std::unique_ptr<::jutta_proto::CoffeeMaker> coffee_maker_;
@@ -180,6 +193,12 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   Stats xml_stats_{};
   std::unordered_map<std::string, sensor::Sensor *> xml_sensors_{};
   std::unordered_map<std::string, std::string> xml_sensor_labels_{};
+  struct Tgc0FilterState {
+    std::deque<float> window;
+    uint8_t consecutive_valid{0};
+    bool logged_once{false};
+  };
+  std::unordered_map<std::string, Tgc0FilterState> tgc0_filters_{};
   std::unordered_map<std::string, XmlSensorMeta> xml_sensor_meta_{};
 
   struct XmlCycleState {

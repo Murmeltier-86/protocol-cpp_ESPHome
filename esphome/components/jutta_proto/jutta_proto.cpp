@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <utility>
 
@@ -32,7 +33,44 @@ constexpr double XML_COUNTER_MAX = 1'000'000.0;
 constexpr double XML_MEASUREMENT_MIN = 0.0;
 constexpr double XML_MEASUREMENT_MAX = 250.0;
 constexpr float XML_COUNTER_TOLERANCE = 0.5f;
-constexpr float XML_MEASUREMENT_TOLERANCE = 0.01f;
+constexpr float XML_MEASUREMENT_TOLERANCE = 0.1f;
+constexpr double TGC0_DEFAULT_DIVISOR = 256.0;
+constexpr bool TGC0_TRY_LITTLE_ENDIAN_FIRST = true;
+
+std::string format_hex_head(const std::vector<uint8_t> &data, std::size_t max_bytes) {
+  if (data.empty() || max_bytes == 0) {
+    return {};
+  }
+  std::size_t count = std::min<std::size_t>(data.size(), max_bytes);
+  std::string out;
+  out.reserve(count * 3U);
+  char buf[4];
+  for (std::size_t i = 0; i < count; ++i) {
+    if (i > 0) {
+      out.push_back(' ');
+    }
+    std::snprintf(buf, sizeof(buf), "%02X", static_cast<unsigned>(data[i]));
+    out.append(buf);
+  }
+  return out;
+}
+
+std::string format_ascii_string(const std::vector<uint8_t> &data) {
+  if (data.empty()) {
+    return {};
+  }
+  std::string out;
+  out.reserve(data.size());
+  for (uint8_t byte : data) {
+    unsigned char c = static_cast<unsigned char>(byte);
+    if (c >= 0x20 && c <= 0x7E) {
+      out.push_back(static_cast<char>(c));
+    } else {
+      out.push_back('.');
+    }
+  }
+  return out;
+}
 
 int determine_accuracy(XmlSensorKind kind, double scale) {
   if (kind == XmlSensorKind::Counter) {
@@ -611,12 +649,192 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
   }
 }
 
+bool JuraComponent::decode_field_value_(const std::vector<uint8_t> &decoded, const XmlField &field,
+                                        bool little_endian, std::uint64_t &out) const {
+  if (field.offset + field.size > decoded.size()) {
+    ESP_LOGW(TAG, "XML @TG:C0 Feld %s überläuft Frame (Offset=%u, Bytes=%u, Frame=%u)", field.name.c_str(),
+             static_cast<unsigned>(field.offset), static_cast<unsigned>(field.size),
+             static_cast<unsigned>(decoded.size()));
+    return false;
+  }
+  out = 0;
+  if (little_endian) {
+    for (std::size_t i = 0; i < field.size; ++i) {
+      out |= static_cast<std::uint64_t>(decoded[field.offset + i]) << (8U * i);
+    }
+  } else {
+    for (std::size_t i = 0; i < field.size; ++i) {
+      out = (out << 8U) | static_cast<std::uint64_t>(decoded[field.offset + i]);
+    }
+  }
+  return true;
+}
+
+bool JuraComponent::stage_tgc0_value_(const std::string &name, const std::string &label, float raw_percent,
+                                      uint16_t header_value, uint16_t encoded_value, uint16_t raw_value) {
+  auto &state = this->tgc0_filters_[name];
+  if (std::isnan(raw_percent)) {
+    state.window.clear();
+    state.consecutive_valid = 0;
+    return false;
+  }
+  state.window.push_back(raw_percent);
+  if (state.window.size() > 3) {
+    state.window.pop_front();
+  }
+  if (state.consecutive_valid < std::numeric_limits<uint8_t>::max()) {
+    state.consecutive_valid += 1;
+  }
+  if (state.consecutive_valid < 2) {
+    return false;
+  }
+  float sum = 0.0f;
+  for (float value : state.window) {
+    sum += value;
+  }
+  float filtered = sum / static_cast<float>(state.window.size());
+  this->xml_stats_.set_value(name, filtered, label);
+  if (!state.logged_once) {
+    std::string log_label = label.empty() ? name : label;
+    ESP_LOGD(TAG, "TGC0 %s Frame: header=0x%02X encoded=0x%02X raw=%u percent=%.1f", log_label.c_str(),
+             static_cast<unsigned>(header_value), static_cast<unsigned>(encoded_value),
+             static_cast<unsigned>(raw_value), static_cast<double>(filtered));
+    state.logged_once = true;
+  }
+  return true;
+}
+
+bool JuraComponent::process_tgc0_response_(const std::vector<uint8_t> &decoded) {
+  const auto &mapping = this->xml_mapping_.tgc0;
+  if (mapping.empty()) {
+    ESP_LOGW(TAG, "XML TGC0: kein Mapping aktiv");
+    return false;
+  }
+  std::size_t expected_len = 0;
+  for (const auto &field : mapping.fields) {
+    expected_len = std::max(expected_len, field.offset + field.size);
+  }
+  std::string hex_head = format_hex_head(decoded, 32);
+  ESP_LOGD(TAG, "XML frame: cmd=@TG:C0 decoded_len=%u expected_len=%u hex_head=%s",
+           static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len), hex_head.c_str());
+  if (!decoded.empty()) {
+    std::string payload_ascii = format_ascii_string(decoded);
+    ESP_LOGD(TAG, "XML @TG:C0 payload ASCII: %s", payload_ascii.c_str());
+  }
+  if (decoded.empty() || decoded[0] != 0x26) {
+    ESP_LOGW(TAG, "XML @TG:C0: unerwarteter Startmarker (decoded_len=%u)", static_cast<unsigned>(decoded.size()));
+    return false;
+  }
+  if (expected_len != 0 && decoded.size() < expected_len) {
+    ESP_LOGW(TAG, "XML @TG:C0: decoded_len (%u) < expected_len (%u)", static_cast<unsigned>(decoded.size()),
+             static_cast<unsigned>(expected_len));
+    return false;
+  }
+  if (expected_len != 0 && decoded.size() != expected_len) {
+    std::string mismatch_head = format_hex_head(decoded, 32);
+    ESP_LOGD(TAG, "XML @TG:C0: decoded_len (%u) != expected_len (%u), head32=%s",
+             static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len), mismatch_head.c_str());
+  }
+
+  bool any_value = false;
+  bool had_valid_sample = false;
+  for (const auto &field : mapping.fields) {
+    if (field.size < 4) {
+      ESP_LOGW(TAG, "XML @TG:C0 Feld %s ignoriert (nicht unterstützte Größe %u)", field.name.c_str(),
+               static_cast<unsigned>(field.size));
+      continue;
+    }
+    if (field.offset + field.size > decoded.size()) {
+      ESP_LOGW(TAG, "XML @TG:C0 Feld %s überläuft Frame (Offset=%u, Bytes=%u, Frame=%u)", field.name.c_str(),
+               static_cast<unsigned>(field.offset), static_cast<unsigned>(field.size),
+               static_cast<unsigned>(decoded.size()));
+      continue;
+    }
+    std::size_t header_offset = field.offset;
+    uint16_t header_value = decoded[header_offset];
+    uint16_t encoded_value = decoded[header_offset + 1];
+
+    XmlField raw_field = field;
+    raw_field.offset = field.offset + field.size - 2;
+    raw_field.size = 2;
+    std::uint64_t raw_value = 0;
+    bool little_endian = raw_field.has_endian ? raw_field.little_endian : TGC0_TRY_LITTLE_ENDIAN_FIRST;
+    if (!this->decode_field_value_(decoded, raw_field, little_endian, raw_value)) {
+      continue;
+    }
+
+    auto compute_percent = [&](std::uint64_t raw) -> double {
+      double base = static_cast<double>(raw);
+      if (field.has_add || std::fabs(field.scale - 1.0) > 1e-6) {
+        double scaled = base * field.scale;
+        if (field.has_add) {
+          scaled += field.add;
+        }
+        return scaled;
+      }
+      return base / TGC0_DEFAULT_DIVISOR;
+    };
+
+    double percent = compute_percent(raw_value);
+    if (!field.has_endian && raw_field.size == 2 && percent > XML_MEASUREMENT_MAX) {
+      std::uint64_t alt_raw = 0;
+      if (this->decode_field_value_(decoded, raw_field, !little_endian, alt_raw)) {
+        double alt_percent = compute_percent(alt_raw);
+        if (alt_percent <= XML_MEASUREMENT_MAX) {
+          raw_value = alt_raw;
+          percent = alt_percent;
+        }
+      }
+    }
+
+    if (!std::isfinite(percent)) {
+      auto &state = this->tgc0_filters_[field.name];
+      state.window.clear();
+      state.consecutive_valid = 0;
+      continue;
+    }
+
+    if (percent < XML_MEASUREMENT_MIN || percent > XML_MEASUREMENT_MAX) {
+      ESP_LOGD(TAG, "TGC0 out-of-range verworfen: %s raw=%llu percent=%.2f", field.name.c_str(),
+               static_cast<unsigned long long>(raw_value), percent);
+      auto &state = this->tgc0_filters_[field.name];
+      state.window.clear();
+      state.consecutive_valid = 0;
+      continue;
+    }
+
+    had_valid_sample = true;
+    float clamped_percent = static_cast<float>(std::clamp(percent, XML_MEASUREMENT_MIN, XML_MEASUREMENT_MAX));
+    if (this->stage_tgc0_value_(field.name, field.label, clamped_percent, header_value, encoded_value,
+                                static_cast<uint16_t>(raw_value & 0xFFFFu))) {
+      any_value = true;
+    }
+  }
+
+  if (!any_value && !had_valid_sample) {
+    ESP_LOGW(TAG, "XML TGC0: keine Daten empfangen");
+  }
+  return any_value;
+}
+
 void JuraComponent::register_xml_sensor_(const XmlField &field, XmlSensorKind kind) {
   auto &meta = this->xml_sensor_meta_[field.name];
   meta.kind = kind;
   meta.min_value = (kind == XmlSensorKind::Counter) ? XML_COUNTER_MIN : XML_MEASUREMENT_MIN;
   meta.max_value = (kind == XmlSensorKind::Counter) ? XML_COUNTER_MAX : XML_MEASUREMENT_MAX;
   meta.accuracy_decimals = determine_accuracy(kind, field.scale);
+  std::string lower_name = field.name;
+  std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  bool is_tgc0 = kind == XmlSensorKind::Measurement && lower_name.find("tgc0") != std::string::npos;
+  if (is_tgc0) {
+    meta.accuracy_decimals = 1;
+    meta.has_unit = true;
+    meta.unit_of_measurement = "%";
+    meta.has_icon = true;
+    meta.icon = "mdi:percent";
+    meta.is_tgc0 = true;
+  }
   meta.configured = true;
   this->get_or_create_sensor_(field.name, field.label);
 }
@@ -663,6 +881,7 @@ bool JuraComponent::ensure_xml_mapping_loaded_() {
   this->xml_mapping_logged_ = false;
   this->xml_stats_.clear();
   this->xml_sensor_meta_.clear();
+  this->tgc0_filters_.clear();
   this->log_xml_mapping_status_();
   if (this->xml_mapping_.valid) {
     this->ensure_xml_sensors_created_();
@@ -787,6 +1006,24 @@ bool JuraComponent::try_receive_xml_frame_(uint32_t now) {
     return false;
   }
   size_t index = this->xml_cycle_.command_index;
+  if (index == 2 && this->xml_command_has_mapping_(index)) {
+    std::size_t expected_len = 0;
+    for (const auto &field : this->xml_mapping_.tgc0.fields) {
+      expected_len = std::max(expected_len, field.offset + field.size);
+    }
+    if (expected_len != 0 && decoded.size() != expected_len) {
+      std::vector<uint8_t> retry;
+      if (this->coffee_maker_ != nullptr && this->coffee_maker_->connection != nullptr &&
+          this->coffee_maker_->connection->read_db_frame(retry, 10)) {
+        decoded = std::move(retry);
+      }
+      if (expected_len != 0 && decoded.size() != expected_len) {
+        ESP_LOGD(TAG, "XML TGC0: decoded_len=%u bleibt ungleich expected_len=%u nach Retry",
+                 static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len));
+        decoded.clear();
+      }
+    }
+  }
   this->xml_cycle_.responses[index] = std::move(decoded);
   ESP_LOGD(TAG, "RX_DB %s decoded_len=%u", xml_log_label_for_index_(index),
            static_cast<unsigned>(this->xml_cycle_.responses[index].size()));
@@ -813,7 +1050,14 @@ void JuraComponent::finish_xml_cycle_(uint32_t now, bool success) {
 
   handle_response(0, parse_TR32);
   handle_response(1, parse_TG43);
-  handle_response(2, parse_TGC0);
+  if (this->xml_command_has_mapping_(2)) {
+    const auto &response = this->xml_cycle_.responses[2];
+    if (response.empty()) {
+      ESP_LOGW(TAG, "XML TGC0: keine Daten empfangen");
+    } else if (this->process_tgc0_response_(response)) {
+      any_value = true;
+    }
+  }
 
   if (any_value) {
     this->publish_xml_stats_();
@@ -910,6 +1154,12 @@ sensor::Sensor *JuraComponent::get_or_create_sensor_(const std::string &name, co
     sensor_obj->set_unique_id(unique_id);
     sensor_obj->set_accuracy_decimals(accuracy);
     sensor_obj->set_state_class(state_class);
+    if (meta != nullptr && meta->has_unit) {
+      sensor_obj->set_unit_of_measurement(meta->unit_of_measurement);
+    }
+    if (meta != nullptr && meta->has_icon) {
+      sensor_obj->set_icon(meta->icon);
+    }
     auto label_it = this->xml_sensor_labels_.find(name);
     if (label_it == this->xml_sensor_labels_.end() || label_it->second != effective_label) {
       sensor_obj->set_name(effective_label);
@@ -923,6 +1173,12 @@ sensor::Sensor *JuraComponent::get_or_create_sensor_(const std::string &name, co
   sensor_obj->set_state_class(state_class);
   sensor_obj->set_internal(false);
   sensor_obj->set_unique_id(unique_id);
+  if (meta != nullptr && meta->has_unit) {
+    sensor_obj->set_unit_of_measurement(meta->unit_of_measurement);
+  }
+  if (meta != nullptr && meta->has_icon) {
+    sensor_obj->set_icon(meta->icon);
+  }
   try_set_parent(sensor_obj, this, 0);
   register_sensor_with_app(sensor_obj);
   sensor_obj->set_name(effective_label);
