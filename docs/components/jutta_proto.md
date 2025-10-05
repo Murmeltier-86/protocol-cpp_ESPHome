@@ -209,3 +209,17 @@ jedoch, dass GCC oder Clang bei der Vorlagendeduktion scheitern.
 **Lösung.** Die Attribut-Erkennung ignoriert nun das Tag-Präfix, sobald hinter dem Tag-Namen kein `=` folgt. Dadurch werden auch J.O.E.-
 Exporte mit vollständig großgeschriebenen `BANK`-Tags korrekt ausgewertet, die Sensorfelder werden wieder angelegt und der Status
 wechselt auf `XML mapping valid: YES`.
+
+### XML-Statuswerte als Sensoren
+
+* Die Befehle `@TR:32`, `@TG:43` und `@TG:C0` werden mit flexiblen Rahmenlängen verarbeitet. Antworten, die den erwarteten Mindestumfang
+  erreichen und mit dem Startbyte `0x26` beginnen, werden auch dann ausgewertet, wenn zusätzliche Bytes folgen. Erst wenn der Frame zu kurz ist
+  oder der Marker fehlt, erscheint eine Warnung.
+* Vor jedem XML-Kommando wird der UART-Empfangspuffer geleert, zwischen den Abfragen liegt eine nicht-blockierende Pause von 25 ms und das
+  Timeout pro Kommando wurde auf 1 s gesetzt. So bleiben die Antworten sauber getrennt und kommen auch bei langsameren Maschinen stabil an.
+* Das XML-Mapping markiert veröffentlichte Felder explizit. Für diese Felder legt die Komponente numerische Sensoren mit Namen im Schema
+  `Jura E6 <Label>` und eindeutiger `unique_id` an. Zähler erhalten den Status `total_increasing`, Messwerte den Status `measurement`.
+* Werte werden nur veröffentlicht, wenn sie sich tatsächlich geändert haben und innerhalb der hinterlegten Plausibilitätsgrenzen liegen.
+  Ausreißer (z. B. fehlerhafte Counter-Werte) werden im Debug-Log dokumentiert, aber nicht an Home Assistant weitergegeben.
+* Die YAML-Integration bleibt unverändert: Die Mapping-Datei wird per `!include` ins Projekt übernommen und zur Laufzeit unter
+  `/config/esphome/e6.xml` geladen. Der Legacy-Handshake und alle klassischen Befehle funktionieren weiterhin wie bisher.

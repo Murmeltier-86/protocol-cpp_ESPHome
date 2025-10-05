@@ -24,8 +24,8 @@ constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
 constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
 const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
-constexpr uint32_t XML_RESPONSE_TIMEOUT_MS = 1400;
-constexpr uint32_t XML_INTER_COMMAND_DELAY_MS = 180;
+constexpr uint32_t XML_RESPONSE_TIMEOUT_MS = 1000;
+constexpr uint32_t XML_INTER_COMMAND_DELAY_MS = 25;
 constexpr size_t XML_COMMAND_COUNT = 3;
 
 template<typename AppT>
@@ -599,7 +599,29 @@ void JuraComponent::ensure_xml_sensors_created_() {
       return;
     }
     for (const auto &field : mapping.fields) {
-      this->get_or_create_sensor_(field.name, field.label);
+      if (!field.publish_sensor) {
+        continue;
+      }
+      sensor::Sensor *sensor = this->get_or_create_sensor_(field);
+      if (sensor == nullptr) {
+        continue;
+      }
+      XmlSensorMetadata meta;
+      meta.sensor = sensor;
+      meta.kind = field.sensor_kind;
+      meta.has_min = field.has_min;
+      meta.min_value = field.min_value;
+      meta.has_max = field.has_max;
+      meta.max_value = field.max_value;
+      std::string base_label = field.label.empty() ? field.name : field.label;
+      meta.label = std::string("Jura E6 ") + base_label;
+      if (field.has_accuracy) {
+        meta.accuracy_decimals = field.accuracy_decimals;
+      } else {
+        meta.accuracy_decimals = (field.sensor_kind == XmlField::SensorKind::Measurement) ? 2 : 0;
+      }
+      meta.unit = field.unit;
+      this->xml_sensor_meta_[field.name] = meta;
     }
   };
   ensure_block(this->xml_mapping_.tr32);
@@ -628,6 +650,8 @@ bool JuraComponent::ensure_xml_mapping_loaded_() {
   std::string xml_source(this->xml_mapping_data_, this->xml_mapping_length_);
   bool valid = load_mapping_from_string(xml_source);
   this->xml_mapping_ = get_xml_mapping();
+  this->xml_sensor_meta_.clear();
+  this->xml_last_published_values_.clear();
   this->xml_mapping_loaded_ = true;
   this->xml_mapping_logged_ = false;
   this->xml_stats_.clear();
@@ -735,7 +759,7 @@ void JuraComponent::handle_xml_cycle_(uint32_t now) {
       }
       const char *command = xml_command_for_index_(next_index);
       ESP_LOGD(TAG, "TX_DB \"%s\"", command);
-      this->coffee_maker_->connection->reset_db_rx_buffer();
+      this->coffee_maker_->connection->reset_all_rx_buffers();
       this->coffee_maker_->connection->tx_db_command(command);
       this->xml_cycle_.command_index = next_index;
       this->xml_cycle_.phase = XmlCycleState::Phase::WaitingForFrame;
@@ -803,58 +827,136 @@ void JuraComponent::publish_xml_stats_() {
   }
   const auto &stats = this->xml_stats_.values();
   for (const auto &entry : stats) {
+    if (this->xml_sensor_meta_.find(entry.first) == this->xml_sensor_meta_.end()) {
+      continue;
+    }
     this->publish_single_stat_(entry.first, entry.second.value, entry.second.label);
   }
 }
 
 void JuraComponent::publish_single_stat_(const std::string &name, double value, const std::string &label) {
-  auto *sensor = this->get_or_create_sensor_(name, label);
-  if (sensor == nullptr) {
-    ESP_LOGW(TAG, "XML field %s konnte nicht veröffentlicht werden", name.c_str());
+  (void) label;
+  auto meta_it = this->xml_sensor_meta_.find(name);
+  if (meta_it == this->xml_sensor_meta_.end()) {
+    ESP_LOGV(TAG, "XML field %s nicht zur Veröffentlichung markiert", name.c_str());
     return;
   }
-  float publish_value = static_cast<float>(value);
-  double rounded = std::round(value);
-  bool is_integer = std::fabs(value - rounded) < 0.0005;
-  uint32_t published_uint = 0;
-  if (is_integer) {
-    if (rounded < 0.0) {
-      rounded = 0.0;
-    }
-    if (rounded > static_cast<double>(std::numeric_limits<uint32_t>::max())) {
-      rounded = static_cast<double>(std::numeric_limits<uint32_t>::max());
-    }
-    published_uint = static_cast<uint32_t>(rounded);
-    publish_value = static_cast<float>(published_uint);
+  auto &meta = meta_it->second;
+  sensor::Sensor *sensor = meta.sensor;
+  if (sensor == nullptr) {
+    ESP_LOGW(TAG, "XML field %s ohne Sensor-Objekt", name.c_str());
+    return;
   }
-  sensor->publish_state(publish_value);
-  if (is_integer) {
-    ESP_LOGD(TAG, "XML publish_state: %s=%u", name.c_str(),
-             static_cast<unsigned>(published_uint));
+  if (meta.has_min && value < meta.min_value) {
+    ESP_LOGD(TAG, "XML field %s (%s) Wert %.3f unter Grenze %.3f (unterdrückt)", name.c_str(),
+             meta.label.c_str(), value, meta.min_value);
+    return;
+  }
+  if (meta.has_max && value > meta.max_value) {
+    ESP_LOGD(TAG, "XML field %s (%s) Wert %.3f über Grenze %.3f (unterdrückt)", name.c_str(),
+             meta.label.c_str(), value, meta.max_value);
+    return;
+  }
+  double tolerance = 0.0005;
+  if (meta.accuracy_decimals >= 0) {
+    double factor = std::pow(10.0, static_cast<double>(meta.accuracy_decimals));
+    if (factor > 0.0) {
+      tolerance = 0.5 / factor;
+    }
+  }
+  auto last_it = this->xml_last_published_values_.find(name);
+  if (last_it != this->xml_last_published_values_.end()) {
+    if (std::fabs(last_it->second - value) < tolerance) {
+      return;
+    }
+  }
+
+  double publish_double = value;
+  if (meta.accuracy_decimals <= 0) {
+    publish_double = std::round(value);
   } else {
-    ESP_LOGD(TAG, "XML publish_state: %s=%.3f", name.c_str(), static_cast<double>(publish_value));
+    double factor = std::pow(10.0, static_cast<double>(meta.accuracy_decimals));
+    publish_double = std::round(value * factor) / factor;
+  }
+  float publish_value = static_cast<float>(publish_double);
+  this->xml_last_published_values_[name] = publish_double;
+  sensor->publish_state(publish_value);
+  if (meta.accuracy_decimals <= 0) {
+    ESP_LOGD(TAG, "XML publish_state: %s (%s)=%lld", name.c_str(), meta.label.c_str(),
+             static_cast<long long>(std::llround(publish_double)));
+  } else {
+    ESP_LOGD(TAG, "XML publish_state: %s (%s)=%.3f", name.c_str(), meta.label.c_str(), publish_double);
   }
 }
 
-sensor::Sensor *JuraComponent::get_or_create_sensor_(const std::string &name, const std::string &label) {
+sensor::Sensor *JuraComponent::get_or_create_sensor_(const XmlField &field) {
+  const std::string &name = field.name;
+  std::string base_label = field.label.empty() ? field.name : field.label;
+  std::string label = std::string("Jura E6 ") + base_label;
+  sensor::Sensor *sensor_obj = nullptr;
   auto it = this->xml_sensors_.find(name);
   if (it != this->xml_sensors_.end()) {
-    if (!label.empty() && this->xml_sensor_labels_[name] != label) {
-      it->second->set_name(label);
-      this->xml_sensor_labels_[name] = label;
-    }
-    return it->second;
+    sensor_obj = it->second;
+  } else {
+    sensor_obj = new sensor::Sensor();
+    sensor_obj->set_internal(false);
+    try_set_parent(sensor_obj, this, 0);
+    register_sensor_with_app(sensor_obj);
+    this->xml_sensors_[name] = sensor_obj;
   }
-  auto *sensor_obj = new sensor::Sensor();
-  sensor_obj->set_accuracy_decimals(0);
-  sensor_obj->set_internal(false);
-  try_set_parent(sensor_obj, this, 0);
-  register_sensor_with_app(sensor_obj);
+  int accuracy = field.has_accuracy ? field.accuracy_decimals : (field.sensor_kind == XmlField::SensorKind::Measurement ? 2 : 0);
+  sensor_obj->set_accuracy_decimals(accuracy);
   std::string effective_label = label.empty() ? name : label;
   sensor_obj->set_name(effective_label);
+  std::string unique_id = field.unique_id.empty() ? this->make_sensor_unique_id_(field) : field.unique_id;
+  if (!unique_id.empty()) {
+    sensor_obj->set_unique_id(unique_id);
+  }
+  if (!field.unit.empty()) {
+    sensor_obj->set_unit_of_measurement(field.unit);
+  }
+  if (field.sensor_kind == XmlField::SensorKind::TotalIncreasing) {
+    sensor_obj->set_state_class(sensor::STATE_CLASS_TOTAL_INCREASING);
+  } else if (field.sensor_kind == XmlField::SensorKind::Measurement) {
+    sensor_obj->set_state_class(sensor::STATE_CLASS_MEASUREMENT);
+  }
   this->xml_sensor_labels_[name] = effective_label;
-  this->xml_sensors_[name] = sensor_obj;
   return sensor_obj;
+}
+
+std::string JuraComponent::make_sensor_unique_id_(const XmlField &field) const {
+  std::string base = field.unique_id;
+  if (base.empty()) {
+    base = field.label.empty() ? field.name : field.label;
+  }
+  if (base.empty()) {
+    base = field.name;
+  }
+  std::string sanitized;
+  sanitized.reserve(base.size() + 8);
+  bool last_was_underscore = false;
+  for (char ch : base) {
+    unsigned char c = static_cast<unsigned char>(ch);
+    if (std::isalnum(c) != 0) {
+      sanitized.push_back(static_cast<char>(std::tolower(c)));
+      last_was_underscore = false;
+    } else {
+      if (!last_was_underscore) {
+        sanitized.push_back('_');
+        last_was_underscore = true;
+      }
+    }
+  }
+  while (!sanitized.empty() && sanitized.back() == '_') {
+    sanitized.pop_back();
+  }
+  if (sanitized.empty()) {
+    sanitized = field.name;
+  }
+  if (sanitized.find("jura_e6_") == 0) {
+    return sanitized;
+  }
+  return std::string("jura_e6_") + sanitized;
 }
 
 const char *JuraComponent::xml_command_for_index_(size_t index) {
