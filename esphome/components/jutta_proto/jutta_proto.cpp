@@ -24,11 +24,11 @@ constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
 constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
 const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
-constexpr uint32_t XML_RESPONSE_TIMEOUT_MS = 1000;
+constexpr uint32_t XML_STAGE_TIMEOUT_DEFAULT_MS = 1000;
+constexpr uint32_t XML_STAGE_TIMEOUT_EXTENDED_MS = 2000;
 constexpr uint32_t XML_INTER_COMMAND_DELAY_MS = 25;
-constexpr uint32_t XML_TGC0_POST_TG43_DELAY_MS = 75;
+constexpr uint32_t XML_PRE_COMMAND_QUIET_TIME_MS = 100;
 constexpr uint32_t XML_TGC0_EXTEND_WINDOW_MS = 25;
-constexpr uint32_t XML_TGC0_RETRY_DELAY_MS = XML_TGC0_POST_TG43_DELAY_MS;
 constexpr size_t XML_COMMAND_COUNT = 3;
 
 constexpr double XML_COUNTER_MIN = 0.0;
@@ -207,7 +207,10 @@ const char *JuraComponent::handshake_stage_name(JuraComponent::HandshakeStage st
   return "unknown";
 }
 
-JuraComponent::~JuraComponent() { this->xml_sensors_.clear(); }
+JuraComponent::~JuraComponent() {
+  this->xml_sensors_.clear();
+  this->xml_owned_sensors_.clear();
+}
 
 void JuraComponent::setup() {
   if (this->parent_ == nullptr) {
@@ -685,14 +688,18 @@ bool JuraComponent::process_tgc0_response_(const std::vector<uint8_t> &decoded) 
   bool trimmed = this->xml_cycle_.tgc0_last_frame_trimmed;
   bool had_crlf = this->xml_cycle_.tgc0_last_frame_had_crlf;
   std::vector<std::string> first_frame_logs;
-  std::size_t expected_len = 0;
+  std::size_t expected_min_len = 0;
   for (const auto &field : mapping.fields) {
-    expected_len = std::max(expected_len, field.offset + field.size);
+    expected_min_len = std::max(expected_min_len, field.offset + field.size);
   }
   std::string hex_head = format_hex_head(decoded, 32);
-  ESP_LOGD(TAG, "XML frame: cmd=@TG:C0 decoded_len=%u expected_len=%u hex_head=%s",
-           static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len), hex_head.c_str());
+  ESP_LOGD(TAG, "XML frame: cmd=@TG:C0 decoded_len=%u expected_min_len=%u hex_head=%s",
+           static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_min_len), hex_head.c_str());
   if (!decoded.empty()) {
+    std::string payload_hex = format_hex_string(decoded);
+    if (!payload_hex.empty()) {
+      ESP_LOGD(TAG, "XML @TG:C0 payload HEX: %s", payload_hex.c_str());
+    }
     std::string payload_ascii = format_ascii_string(decoded);
     ESP_LOGD(TAG, "XML @TG:C0 payload ASCII: %s", payload_ascii.c_str());
   }
@@ -700,15 +707,15 @@ bool JuraComponent::process_tgc0_response_(const std::vector<uint8_t> &decoded) 
     ESP_LOGW(TAG, "XML @TG:C0: unerwarteter Startmarker (decoded_len=%u)", static_cast<unsigned>(decoded.size()));
     return false;
   }
-  if (expected_len != 0 && decoded.size() < expected_len) {
-    ESP_LOGW(TAG, "XML @TG:C0: decoded_len (%u) < expected_len (%u)", static_cast<unsigned>(decoded.size()),
-             static_cast<unsigned>(expected_len));
+  if (expected_min_len != 0 && decoded.size() < expected_min_len) {
+    ESP_LOGW(TAG, "XML @TG:C0: decoded_len (%u) < expected_min_len (%u)", static_cast<unsigned>(decoded.size()),
+             static_cast<unsigned>(expected_min_len));
     return false;
   }
-  if (expected_len != 0 && decoded.size() != expected_len) {
+  if (expected_min_len != 0 && decoded.size() != expected_min_len) {
     std::string mismatch_head = format_hex_head(decoded, 32);
-    ESP_LOGD(TAG, "XML @TG:C0: decoded_len (%u) != expected_len (%u), head32=%s",
-             static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len), mismatch_head.c_str());
+    ESP_LOGD(TAG, "XML @TG:C0: decoded_len (%u) != expected_min_len (%u), head32=%s",
+             static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_min_len), mismatch_head.c_str());
   }
 
   bool any_value = false;
@@ -813,6 +820,7 @@ void JuraComponent::add_configured_xml_sensor(const std::string &field, sensor::
   if (field.empty() || sensor == nullptr) {
     return;
   }
+  sensor->set_internal(false);
   this->xml_sensors_[field] = sensor;
   this->xml_unconfigured_sensor_logged_.erase(field);
   if (this->xml_sensor_meta_.find(field) != this->xml_sensor_meta_.end()) {
@@ -965,6 +973,103 @@ void JuraComponent::prepare_tgc0_request_() {
   this->xml_cycle_.tgc0_last_frame_had_crlf = false;
 }
 
+void JuraComponent::schedule_stage_send_(uint32_t now, XmlSeqStage stage, bool is_retry) {
+  (void) is_retry;
+  this->xml_cycle_.phase = XmlCycleState::Phase::DelayBeforeNext;
+  this->xml_cycle_.deadline_ms = 0;
+  this->xml_cycle_.command_inflight = false;
+  uint32_t delay = this->stage_delay_before_send_ms_(stage, is_retry);
+  if (this->coffee_maker_ != nullptr && this->coffee_maker_->connection != nullptr &&
+      this->stage_requires_quiet_time_(stage)) {
+    this->coffee_maker_->connection->drain_serial_input_nonblocking();
+  }
+  this->xml_cycle_.next_action_ms = now + delay;
+  this->xml_cycle_.command_send_pending = true;
+}
+
+uint32_t JuraComponent::stage_delay_before_send_ms_(XmlSeqStage stage, bool is_retry) const {
+  (void) is_retry;
+  switch (stage) {
+    case XmlSeqStage::TR32:
+    case XmlSeqStage::TGC0:
+      return XML_PRE_COMMAND_QUIET_TIME_MS;
+    case XmlSeqStage::TG43:
+      return XML_INTER_COMMAND_DELAY_MS;
+    case XmlSeqStage::IDLE:
+    default:
+      return XML_INTER_COMMAND_DELAY_MS;
+  }
+}
+
+uint32_t JuraComponent::stage_timeout_ms_(XmlSeqStage stage) const {
+  switch (stage) {
+    case XmlSeqStage::TR32:
+    case XmlSeqStage::TGC0:
+      return XML_STAGE_TIMEOUT_EXTENDED_MS;
+    case XmlSeqStage::TG43:
+    case XmlSeqStage::IDLE:
+    default:
+      return XML_STAGE_TIMEOUT_DEFAULT_MS;
+  }
+}
+
+bool JuraComponent::stage_requires_quiet_time_(XmlSeqStage stage) const {
+  return stage == XmlSeqStage::TR32 || stage == XmlSeqStage::TGC0;
+}
+
+std::size_t JuraComponent::stage_expected_min_length_(XmlSeqStage stage) const {
+  const XmlCommandMapping *mapping = nullptr;
+  switch (stage) {
+    case XmlSeqStage::TR32:
+      mapping = &this->xml_mapping_.tr32;
+      break;
+    case XmlSeqStage::TG43:
+      mapping = &this->xml_mapping_.tg43;
+      break;
+    case XmlSeqStage::TGC0:
+      mapping = &this->xml_mapping_.tgc0;
+      break;
+    case XmlSeqStage::IDLE:
+    default:
+      break;
+  }
+  if (mapping == nullptr || mapping->fields.empty()) {
+    return 0;
+  }
+  std::size_t expected_min = 0;
+  for (const auto &field : mapping->fields) {
+    expected_min = std::max(expected_min, field.offset + field.size);
+  }
+  switch (stage) {
+    case XmlSeqStage::TR32:
+      expected_min = std::max<std::size_t>(expected_min, 21);
+      break;
+    case XmlSeqStage::TG43:
+      expected_min = std::max<std::size_t>(expected_min, 13);
+      break;
+    case XmlSeqStage::TGC0:
+      expected_min = std::max<std::size_t>(expected_min, 13);
+      break;
+    case XmlSeqStage::IDLE:
+    default:
+      break;
+  }
+  return expected_min;
+}
+
+bool JuraComponent::stage_response_meets_min_length_(XmlSeqStage stage) const {
+  std::size_t index = this->stage_to_index_(stage);
+  if (index >= XML_COMMAND_COUNT) {
+    return true;
+  }
+  std::size_t expected_min = this->stage_expected_min_length_(stage);
+  if (expected_min == 0) {
+    return true;
+  }
+  const auto &response = this->xml_cycle_.responses[index];
+  return response.size() >= expected_min;
+}
+
 void JuraComponent::start_xml_cycle_(uint32_t now) {
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     return;
@@ -984,17 +1089,13 @@ void JuraComponent::start_xml_cycle_(uint32_t now) {
   }
 
   this->xml_cycle_.reset();
-  this->xml_seq_stage_ = XmlSeqStage::TGC0;
+  this->xml_seq_stage_ = XmlSeqStage::TR32;
   this->xml_next_poll_ = 0;
 
   auto *connection = this->coffee_maker_->connection.get();
   connection->reset_all_rx_buffers();
 
-  this->xml_cycle_.phase = XmlCycleState::Phase::DelayBeforeNext;
-  this->xml_cycle_.deadline_ms = 0;
-  this->xml_cycle_.next_action_ms = now + XML_TGC0_POST_TG43_DELAY_MS;
-  this->xml_cycle_.command_send_pending = true;
-
+  this->schedule_stage_send_(now, this->xml_seq_stage_, false);
   if (!this->stage_has_mapping_(this->xml_seq_stage_)) {
     this->xml_cycle_.command_send_pending = false;
     this->complete_current_stage_(now, true, false);
@@ -1024,6 +1125,33 @@ void JuraComponent::handle_xml_cycle_(uint32_t now) {
     }
     case XmlCycleState::Phase::WaitingForFrame: {
       if (this->try_receive_xml_frame_(now)) {
+        bool valid_length = this->stage_response_meets_min_length_(this->xml_seq_stage_);
+        if (!valid_length) {
+          size_t index = this->stage_to_index_(this->xml_seq_stage_);
+          std::size_t expected_min = this->stage_expected_min_length_(this->xml_seq_stage_);
+          std::size_t actual_len = 0;
+          if (index < this->xml_cycle_.responses.size()) {
+            actual_len = this->xml_cycle_.responses[index].size();
+          }
+          ESP_LOGW(TAG, "XML %s: decoded_len (%u) < expected_min_len (%u)",
+                   this->stage_label_(this->xml_seq_stage_), static_cast<unsigned>(actual_len),
+                   static_cast<unsigned>(expected_min));
+          bool can_retry = index < this->xml_cycle_.attempts.size() &&
+                           this->xml_cycle_.attempts[index] < 2 &&
+                           this->stage_has_mapping_(this->xml_seq_stage_);
+          if (can_retry) {
+            this->xml_cycle_.pending_retry[index] = true;
+            if (this->xml_seq_stage_ == XmlSeqStage::TGC0) {
+              this->xml_cycle_.tgc0_pending_retry = true;
+              this->xml_cycle_.tgc0_retry_used = true;
+            }
+            this->schedule_stage_send_(now, this->xml_seq_stage_, true);
+            return;
+          }
+          this->xml_cycle_.sequence_success = false;
+          this->complete_current_stage_(now, false, false);
+          return;
+        }
         this->complete_current_stage_(now, true, false);
         return;
       }
@@ -1058,6 +1186,13 @@ bool JuraComponent::send_current_stage_command_(uint32_t now) {
     return false;
   }
 
+  if (this->xml_cycle_.command_inflight) {
+    ESP_LOGW(TAG, "XML %s: TX übersprungen (Befehl noch ausstehend)", this->stage_label_(this->xml_seq_stage_));
+    this->xml_cycle_.phase = XmlCycleState::Phase::WaitingForFrame;
+    this->xml_cycle_.command_send_pending = false;
+    return false;
+  }
+
   const char *command = xml_command_for_index_(index);
   if (command == nullptr || command[0] == '\0') {
     this->complete_current_stage_(now, false, false);
@@ -1065,23 +1200,18 @@ bool JuraComponent::send_current_stage_command_(uint32_t now) {
   }
 
   auto *connection = this->coffee_maker_->connection.get();
+  connection->reset_db_rx_buffer();
+
   if (this->xml_seq_stage_ == XmlSeqStage::TGC0) {
-    if (!this->xml_cycle_.tgc0_pending_retry) {
-      this->xml_cycle_.tgc0_attempt = 1;
+    if (this->xml_cycle_.tgc0_pending_retry) {
+      this->xml_cycle_.tgc0_pending_retry = false;
+    } else {
       this->xml_cycle_.tgc0_retry_used = false;
       this->xml_cycle_.tgc0_extend_used = false;
-      this->xml_cycle_.tgc0_extend_window_active = false;
       this->xml_cycle_.tgc0_timeout_logged = false;
-    } else {
-      this->xml_cycle_.tgc0_pending_retry = false;
-      this->xml_cycle_.tgc0_extend_window_active = false;
-      this->xml_cycle_.tgc0_extend_used = false;
-      this->xml_cycle_.tgc0_timeout_logged = false;
-      this->xml_cycle_.tgc0_attempt += 1;
     }
+    this->xml_cycle_.tgc0_extend_window_active = false;
     this->prepare_tgc0_request_();
-  } else {
-    connection->reset_db_rx_buffer();
   }
 
   if (this->xml_seq_stage_ == XmlSeqStage::TR32) {
@@ -1089,10 +1219,19 @@ bool JuraComponent::send_current_stage_command_(uint32_t now) {
     this->xml_next_poll_ = 0;
   }
 
+  if (index < this->xml_cycle_.attempts.size()) {
+    this->xml_cycle_.attempts[index] += 1;
+    this->xml_cycle_.pending_retry[index] = false;
+    if (this->xml_seq_stage_ == XmlSeqStage::TGC0) {
+      this->xml_cycle_.tgc0_attempt = this->xml_cycle_.attempts[index];
+    }
+  }
+
   ESP_LOGD(TAG, "TX_DB \"%s\"", command);
   connection->tx_db_command(command);
   this->xml_cycle_.phase = XmlCycleState::Phase::WaitingForFrame;
-  this->xml_cycle_.deadline_ms = now + XML_RESPONSE_TIMEOUT_MS;
+  this->xml_cycle_.deadline_ms = now + this->stage_timeout_ms_(this->xml_seq_stage_);
+  this->xml_cycle_.command_inflight = true;
   return true;
 }
 
@@ -1104,6 +1243,11 @@ void JuraComponent::complete_current_stage_(uint32_t now, bool stage_success, bo
 
   this->xml_cycle_.tgc0_pending_retry = false;
   this->xml_cycle_.tgc0_extend_window_active = false;
+  this->xml_cycle_.command_inflight = false;
+  size_t current_index = this->stage_to_index_(this->xml_seq_stage_);
+  if (current_index < this->xml_cycle_.pending_retry.size()) {
+    this->xml_cycle_.pending_retry[current_index] = false;
+  }
 
   XmlSeqStage next = this->next_stage_(this->xml_seq_stage_);
   if (next == XmlSeqStage::IDLE) {
@@ -1116,19 +1260,7 @@ void JuraComponent::complete_current_stage_(uint32_t now, bool stage_success, bo
   }
 
   this->xml_seq_stage_ = next;
-  if (this->xml_seq_stage_ == XmlSeqStage::TR32) {
-    this->xml_poll_inflight_ = true;
-    this->xml_next_poll_ = 0;
-  }
-
-  this->xml_cycle_.phase = XmlCycleState::Phase::DelayBeforeNext;
-  this->xml_cycle_.deadline_ms = 0;
-  uint32_t delay = XML_INTER_COMMAND_DELAY_MS;
-  if (this->xml_seq_stage_ == XmlSeqStage::TGC0) {
-    delay = XML_TGC0_POST_TG43_DELAY_MS;
-  }
-  this->xml_cycle_.next_action_ms = now + delay;
-  this->xml_cycle_.command_send_pending = true;
+  this->schedule_stage_send_(now, this->xml_seq_stage_, false);
 
   if (!this->stage_has_mapping_(this->xml_seq_stage_)) {
     this->xml_cycle_.command_send_pending = false;
@@ -1137,6 +1269,9 @@ void JuraComponent::complete_current_stage_(uint32_t now, bool stage_success, bo
 }
 
 void JuraComponent::handle_stage_timeout_(uint32_t now) {
+  size_t index = this->stage_to_index_(this->xml_seq_stage_);
+  ESP_LOGW(TAG, "RX_DB timeout %s", this->stage_label_(this->xml_seq_stage_));
+
   if (this->xml_seq_stage_ == XmlSeqStage::TGC0 && this->stage_has_mapping_(XmlSeqStage::TGC0) &&
       this->xml_cycle_.tgc0_attempt > 0) {
     if (!this->xml_cycle_.tgc0_extend_used) {
@@ -1145,13 +1280,11 @@ void JuraComponent::handle_stage_timeout_(uint32_t now) {
       this->xml_cycle_.deadline_ms = now + XML_TGC0_EXTEND_WINDOW_MS;
       return;
     }
-    if (!this->xml_cycle_.tgc0_retry_used) {
+    if (!this->xml_cycle_.tgc0_retry_used && index < this->xml_cycle_.pending_retry.size()) {
       this->xml_cycle_.tgc0_retry_used = true;
       this->xml_cycle_.tgc0_pending_retry = true;
-      this->xml_cycle_.command_send_pending = true;
-      this->xml_cycle_.phase = XmlCycleState::Phase::DelayBeforeNext;
-      this->xml_cycle_.next_action_ms = now + XML_TGC0_RETRY_DELAY_MS;
-      this->xml_cycle_.deadline_ms = 0;
+      this->xml_cycle_.pending_retry[index] = true;
+      this->schedule_stage_send_(now, this->xml_seq_stage_, true);
       return;
     }
     if (!this->xml_cycle_.tgc0_timeout_logged) {
@@ -1160,7 +1293,13 @@ void JuraComponent::handle_stage_timeout_(uint32_t now) {
     }
   }
 
-  ESP_LOGW(TAG, "RX_DB timeout %s", this->stage_label_(this->xml_seq_stage_));
+  if (index < this->xml_cycle_.attempts.size() && this->xml_cycle_.attempts[index] < 2 &&
+      this->stage_has_mapping_(this->xml_seq_stage_)) {
+    this->xml_cycle_.pending_retry[index] = true;
+    this->schedule_stage_send_(now, this->xml_seq_stage_, true);
+    return;
+  }
+
   this->xml_cycle_.sequence_success = false;
   this->complete_current_stage_(now, false, true);
 }
@@ -1181,36 +1320,11 @@ bool JuraComponent::try_receive_xml_frame_(uint32_t now) {
   if (index >= XML_COMMAND_COUNT) {
     return false;
   }
-  if (this->xml_seq_stage_ == XmlSeqStage::TGC0 && this->stage_has_mapping_(XmlSeqStage::TGC0)) {
+  if (this->xml_seq_stage_ == XmlSeqStage::TGC0) {
     this->xml_cycle_.tgc0_last_raw_len = decoded.size();
+    this->xml_cycle_.tgc0_last_payload_len = decoded.size();
     this->xml_cycle_.tgc0_last_frame_trimmed = false;
     this->xml_cycle_.tgc0_last_frame_had_crlf = false;
-    if (decoded.size() >= 2) {
-      std::size_t last_crlf = std::string::npos;
-      for (std::size_t i = 0; i + 1 < decoded.size(); ++i) {
-        if (decoded[i] == '\r' && decoded[i + 1] == '\n') {
-          last_crlf = i;
-        }
-      }
-      if (last_crlf != std::string::npos) {
-        this->xml_cycle_.tgc0_last_frame_had_crlf = true;
-        std::size_t payload_offset = last_crlf + 2;
-        if (payload_offset < decoded.size()) {
-          decoded.erase(decoded.begin(), decoded.begin() + static_cast<std::ptrdiff_t>(payload_offset));
-          this->xml_cycle_.tgc0_last_frame_trimmed = payload_offset > 0;
-        } else {
-          decoded.clear();
-          this->xml_cycle_.tgc0_last_frame_trimmed = true;
-        }
-      } else {
-        decoded.clear();
-      }
-    } else {
-      decoded.clear();
-    }
-    this->xml_cycle_.tgc0_last_payload_len = decoded.size();
-  } else if (this->xml_seq_stage_ == XmlSeqStage::TGC0) {
-    this->xml_cycle_.tgc0_last_payload_len = decoded.size();
   }
   this->xml_cycle_.responses[index] = std::move(decoded);
   ESP_LOGD(TAG, "RX_DB %s decoded_len=%u", this->stage_label_(this->xml_seq_stage_),
@@ -1222,6 +1336,7 @@ void JuraComponent::finish_xml_cycle_(uint32_t now, bool success) {
   this->xml_seq_stage_ = XmlSeqStage::IDLE;
   this->xml_poll_inflight_ = false;
   bool any_value = false;
+  this->xml_cycle_.command_inflight = false;
 
   auto handle_response = [&](size_t index, bool (*parser)(const std::vector<uint8_t> &, Stats &)) {
     if (!this->xml_command_has_mapping_(index)) {
@@ -1330,13 +1445,44 @@ void JuraComponent::publish_single_stat_(const std::string &name, double value, 
   }
 }
 
-sensor::Sensor *JuraComponent::get_or_create_sensor_(const std::string &name, const std::string &label) {
-  (void) label;
-  auto it = this->xml_sensors_.find(name);
-  if (it == this->xml_sensors_.end()) {
-    return nullptr;
+sensor::Sensor *JuraComponent::ensure_sensor_slot_(const std::string &name, const std::string &label) {
+  auto map_it = this->xml_sensors_.find(name);
+  if (map_it != this->xml_sensors_.end() && map_it->second != nullptr) {
+    if (!label.empty()) {
+      map_it->second->set_name(label);
+    }
+    return map_it->second;
   }
-  auto *sensor_obj = it->second;
+
+  auto owned_it = this->xml_owned_sensors_.find(name);
+  if (owned_it == this->xml_owned_sensors_.end() || owned_it->second == nullptr) {
+    auto sensor_ptr = std::make_unique<sensor::Sensor>();
+    auto *raw = sensor_ptr.get();
+    try_register_sensor(App, raw, 0L);
+    raw->set_internal(false);
+    if (!label.empty()) {
+      raw->set_name(label);
+    } else {
+      raw->set_name(name);
+    }
+    this->xml_sensors_[name] = raw;
+    this->xml_owned_sensors_[name] = std::move(sensor_ptr);
+    return raw;
+  }
+
+  sensor::Sensor *owned = owned_it->second.get();
+  if (owned != nullptr) {
+    this->xml_sensors_[name] = owned;
+    owned->set_internal(false);
+    if (!label.empty()) {
+      owned->set_name(label);
+    }
+  }
+  return owned;
+}
+
+sensor::Sensor *JuraComponent::get_or_create_sensor_(const std::string &name, const std::string &label) {
+  auto *sensor_obj = this->ensure_sensor_slot_(name, label);
   if (sensor_obj == nullptr) {
     return nullptr;
   }
@@ -1394,11 +1540,11 @@ bool JuraComponent::xml_command_has_mapping_(size_t index) const {
 
 JuraComponent::XmlSeqStage JuraComponent::next_stage_(XmlSeqStage stage) const {
   switch (stage) {
-    case XmlSeqStage::TGC0:
-      return XmlSeqStage::TR32;
     case XmlSeqStage::TR32:
       return XmlSeqStage::TG43;
     case XmlSeqStage::TG43:
+      return XmlSeqStage::TGC0;
+    case XmlSeqStage::TGC0:
     case XmlSeqStage::IDLE:
     default:
       return XmlSeqStage::IDLE;
@@ -1441,9 +1587,12 @@ void JuraComponent::XmlCycleState::reset() {
   this->deadline_ms = 0;
   this->next_action_ms = 0;
   this->command_send_pending = false;
+  this->command_inflight = false;
   for (auto &response : this->responses) {
     response.clear();
   }
+  this->attempts.fill(0);
+  this->pending_retry.fill(false);
   this->tgc0_extend_window_active = false;
   this->tgc0_extend_used = false;
   this->tgc0_retry_used = false;
