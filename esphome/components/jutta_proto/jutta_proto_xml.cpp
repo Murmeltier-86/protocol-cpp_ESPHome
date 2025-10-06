@@ -638,13 +638,13 @@ bool parse_payload(const std::vector<uint8_t> &decoded, const XmlCommandMapping 
     return false;
   }
   bool any = false;
-  std::size_t expected_min_len = 0;
+  std::size_t expected_len = 0;
   for (const auto &field : mapping.fields) {
-    expected_min_len = std::max(expected_min_len, field.offset + field.size);
+    expected_len = std::max(expected_len, field.offset + field.size);
   }
   std::string hex_head = format_hex_head(decoded, 32);
-  ESP_LOGD(TAG, "XML frame: cmd=%s decoded_len=%u expected_min_len=%u hex_head=%s", command_label,
-           static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_min_len), hex_head.c_str());
+  ESP_LOGD(TAG, "XML frame: cmd=%s decoded_len=%u expected_len=%u hex_head=%s", command_label,
+           static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len), hex_head.c_str());
   std::string payload_hex = format_hex_string(decoded);
   if (!payload_hex.empty()) {
     ESP_LOGD(TAG, "XML %s payload HEX: %s", command_label, payload_hex.c_str());
@@ -656,15 +656,15 @@ bool parse_payload(const std::vector<uint8_t> &decoded, const XmlCommandMapping 
              static_cast<unsigned>(decoded.size()));
     return false;
   }
-  if (expected_min_len != 0 && decoded.size() < expected_min_len) {
-    ESP_LOGW(TAG, "XML %s: decoded_len (%u) < expected_min_len (%u)", command_label,
-             static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_min_len));
+  if (expected_len != 0 && decoded.size() < expected_len) {
+    ESP_LOGW(TAG, "XML %s: decoded_len (%u) < expected_len (%u)", command_label,
+             static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len));
     return false;
   }
-  if (expected_min_len != 0 && decoded.size() != expected_min_len) {
+  if (expected_len != 0 && decoded.size() != expected_len) {
     std::string mismatch_head = format_hex_head(decoded, 32);
-    ESP_LOGD(TAG, "XML %s: decoded_len (%u) != expected_min_len (%u), head32=%s", command_label,
-             static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_min_len), mismatch_head.c_str());
+    ESP_LOGD(TAG, "XML %s: decoded_len (%u) != expected_len (%u), head32=%s", command_label,
+             static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len), mismatch_head.c_str());
   }
   for (const auto &field : mapping.fields) {
     if (field.offset + field.size > decoded.size()) {
