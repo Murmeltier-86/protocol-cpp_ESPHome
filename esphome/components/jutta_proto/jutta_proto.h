@@ -9,7 +9,6 @@
 #include <deque>
 #include <unordered_map>
 #include <vector>
-#include <limits>
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -107,9 +106,6 @@ struct XmlSensorMeta {
   bool has_icon{false};
   std::string icon;
   bool is_tgc0{false};
-  bool is_percent{false};
-  uint32_t last_update_ms{0};
-  std::string command_label;
 };
 
 class JuraComponent : public esphome::Component, public esphome::uart::UARTDevice {
@@ -154,37 +150,35 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool ensure_xml_mapping_loaded_();
   void log_xml_mapping_status_(bool force = false);
   void ensure_xml_sensors_created_();
-  void reset_xml_poll_state_();
+  void reset_xml_cycle_state_();
+  void start_xml_cycle_(uint32_t now);
+  void handle_xml_cycle_(uint32_t now);
+  bool try_receive_xml_frame_(uint32_t now);
+  void finish_xml_cycle_(uint32_t now, bool success);
+  bool send_current_stage_command_(uint32_t now);
+  void complete_current_stage_(uint32_t now, bool stage_success, bool from_timeout);
+  void handle_stage_timeout_(uint32_t now);
   void publish_xml_stats_();
   void publish_single_stat_(const std::string &name, double value, const std::string &label);
-  void register_xml_sensor_(const XmlField &field, XmlSensorKind kind, const char *command_label);
+  void register_xml_sensor_(const XmlField &field, XmlSensorKind kind);
   sensor::Sensor *get_or_create_sensor_(const std::string &name, const std::string &label);
   sensor::Sensor *create_internal_sensor_(const std::string &name, const std::string &label);
+  static const char *xml_command_for_index_(size_t index);
+  static const char *xml_log_label_for_index_(size_t index);
+  bool xml_command_has_mapping_(size_t index) const;
+  enum class XmlSeqStage { IDLE, TR32, TG43, TGC0 };
+  XmlSeqStage next_stage_(XmlSeqStage stage) const;
+  size_t stage_to_index_(XmlSeqStage stage) const;
+  bool stage_has_mapping_(XmlSeqStage stage) const;
+  const char *stage_label_(XmlSeqStage stage) const;
   bool process_tgc0_response_(const std::vector<uint8_t> &decoded);
   bool stage_tgc0_value_(const std::string &name, const std::string &label, float filtered_value,
                          uint16_t header_value, uint16_t encoded_value, uint16_t raw_value);
   bool decode_field_value_(const std::vector<uint8_t> &decoded, const XmlField &field, bool little_endian,
                            std::uint64_t &out) const;
-  void handle_xml_state_machine_(uint32_t now);
-  enum class XmlPollState {
-    IDLE,
-    SEND_TR32,
-    WAIT_TR32,
-    PARSE_TR32,
-    SEND_TG43,
-    WAIT_TG43,
-    PARSE_TG43,
-    SEND_TGC0,
-    WAIT_TGC0,
-    PARSE_TGC0,
-    SLEEP
-  };
-  bool xml_state_has_mapping_(XmlPollState state) const;
-  const char *xml_state_command_(XmlPollState state) const;
-  const char *xml_state_label_(XmlPollState state) const;
-  void transition_to_state_(XmlPollState state, uint32_t now, uint32_t delay_ms = 0);
-  bool send_xml_command_(const char *command, XmlPollState wait_state, uint32_t now);
-  void handle_xml_timeout_(XmlPollState next_state, const char *label, uint32_t now);
+  void schedule_stage_command_(uint32_t now, XmlSeqStage stage, bool is_retry);
+  uint32_t stage_timeout_(XmlSeqStage stage) const;
+  uint32_t stage_delay_before_send_(XmlSeqStage stage, bool is_retry) const;
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
   std::unique_ptr<::jutta_proto::CoffeeMaker> coffee_maker_;
@@ -208,12 +202,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const char *xml_mapping_data_{nullptr};
   size_t xml_mapping_length_{0};
   uint32_t xml_next_poll_{0};
-  XmlPollState xml_state_{XmlPollState::IDLE};
-  uint32_t xml_deadline_ms_{0};
-  uint32_t xml_next_action_ms_{0};
-  bool xml_inflight_{false};
-  std::string xml_last_command_{};
-  std::vector<uint8_t> xml_rx_buffer_{};
+  bool xml_poll_inflight_{false};
+  XmlSeqStage xml_seq_stage_{XmlSeqStage::IDLE};
   bool xml_mapping_logged_{false};
   bool xml_mapping_loaded_{false};
   XmlMapping xml_mapping_{};
@@ -230,7 +220,32 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::unordered_map<std::string, XmlSensorMeta> xml_sensor_meta_{};
   std::unordered_map<std::string, bool> xml_missing_sensor_logged_{};
   std::unordered_map<std::string, bool> xml_unconfigured_sensor_logged_{};
-  float last_tg43_percent_{std::numeric_limits<float>::quiet_NaN()};
+
+  struct XmlCycleState {
+    enum class Phase { Idle, WaitingForFrame, DelayBeforeNext };
+
+    void reset();
+
+    Phase phase{Phase::Idle};
+    uint32_t deadline_ms{0};
+    uint32_t next_action_ms{0};
+    bool command_send_pending{false};
+    std::array<uint8_t, 3> attempts{};
+    bool command_inflight{false};
+    std::array<std::vector<uint8_t>, 3> responses{};
+    bool tgc0_extend_window_active{false};
+    bool tgc0_extend_used{false};
+    bool tgc0_retry_used{false};
+    bool tgc0_pending_retry{false};
+    bool tgc0_timeout_logged{false};
+    uint8_t tgc0_attempt{0};
+    bool sequence_success{true};
+    std::size_t tgc0_last_raw_len{0};
+    std::size_t tgc0_last_payload_len{0};
+    bool tgc0_last_frame_trimmed{false};
+    bool tgc0_last_frame_had_crlf{false};
+  } xml_cycle_{};
+
   void prepare_tgc0_request_();
 };
 
