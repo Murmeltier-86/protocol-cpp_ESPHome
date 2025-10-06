@@ -116,9 +116,8 @@ class JuttaConnection {
     /**
      * Sends an escaped DB command ("@..." without trailing CRLF) with the fixed trailer required for XML frames.
      */
-    void tx_db_command(const std::string& ascii, bool flush = true);
-    bool read_db_frame(std::vector<uint8_t>& decoded, uint32_t timeout_ms, bool* had_crlf = nullptr,
-                       size_t* decoded_len = nullptr);
+    void tx_db_command(const std::string& ascii);
+    bool read_db_frame(std::vector<uint8_t>& decoded, uint32_t timeout_ms);
 
     /** Spült ausschließlich den DB-Puffer, um vor einem neuen Frame altes Echo zu verwerfen. */
     void reset_db_rx_buffer();
