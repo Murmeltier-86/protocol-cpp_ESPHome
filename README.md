@@ -71,6 +71,16 @@ jutta_proto:
 - Zeitüberschreitungen führen lediglich zu einer Warnung; beim nächsten Intervall wird automatisch weiter versucht.
 - Erfolgreich geparste Felder werden mit `XML publish: <Name>=<Wert>` protokolliert.
 
+#### Sequenzieller Ablauf & Plausibilisierung (aktuelle Firmware)
+
+- Das XML-Polling arbeitet nun strikt sequentiell: `@TR:32 → @TG:43 → @TG:C0`, zwischen den Kommandos liegt eine feste Pause.
+- Empfangene Frames werden anhand des `0x26`-Startbytes freigeschnitten; auch variable Längen (z. B. 21/22 Bytes) werden akzeptiert.
+- Prozentangaben werden automatisch skaliert (`>200` → `/10`) und anschließend auf `0‒100 %` begrenzt; Zähler werden auf Monotonie geprüft.
+- Tritt innerhalb von sechs Stunden ein negativer Zähler-Sprung auf, wird der Wert nur übernommen, wenn gleichzeitig die `@TG:43`-Prozentwerte ≈ 0 % melden.
+- Home Assistant erhält ausschließlich numerische Sensoren mit stabilen Namen; NaN- oder Ausreißerwerte werden nicht publiziert.
+
+**Kurztest:** Gerät starten, Logs beobachten (`TR32 → TG43 → TGC0 → sleep`). In Home Assistant sollten die Sensoren erscheinen und regelmäßig Werte aktualisieren.
+
 ## Example
 The following example shows the interaction with a JURA coffee maker over [XMPP](https://xmpp.org/).
 The complete implementation for this demo can be found [here](https://github.com/COM8/esp32-jura).
