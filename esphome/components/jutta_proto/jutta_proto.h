@@ -158,11 +158,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void publish_single_stat_(const std::string &name, double value, const std::string &label);
   void register_xml_sensor_(const XmlField &field, XmlSensorKind kind);
   sensor::Sensor *get_or_create_sensor_(const std::string &name, const std::string &label);
-  sensor::Sensor *create_internal_sensor_(const std::string &name, const std::string &label);
   static const char *xml_command_for_index_(size_t index);
   static const char *xml_log_label_for_index_(size_t index);
   bool xml_command_has_mapping_(size_t index) const;
-  enum class XmlSeqStage { IDLE, TR32, TG43, TGC0 };
+  enum class XmlSeqStage { IDLE, TGC0, TR32, TG43 };
   XmlSeqStage next_stage_(XmlSeqStage stage) const;
   size_t stage_to_index_(XmlSeqStage stage) const;
   bool stage_has_mapping_(XmlSeqStage stage) const;
@@ -172,9 +171,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
                          uint16_t header_value, uint16_t encoded_value, uint16_t raw_value);
   bool decode_field_value_(const std::vector<uint8_t> &decoded, const XmlField &field, bool little_endian,
                            std::uint64_t &out) const;
-  void schedule_stage_command_(uint32_t now, XmlSeqStage stage, bool is_retry);
-  uint32_t stage_timeout_(XmlSeqStage stage) const;
-  uint32_t stage_delay_before_send_(XmlSeqStage stage, bool is_retry) const;
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
   std::unique_ptr<::jutta_proto::CoffeeMaker> coffee_maker_;
@@ -205,7 +201,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   XmlMapping xml_mapping_{};
   Stats xml_stats_{};
   std::unordered_map<std::string, sensor::Sensor *> xml_sensors_{};
-  std::vector<std::unique_ptr<sensor::Sensor>> xml_owned_sensors_{};
   struct Tgc0FilterState {
     std::deque<float> window;
     uint8_t consecutive_valid{0};
@@ -226,8 +221,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     uint32_t deadline_ms{0};
     uint32_t next_action_ms{0};
     bool command_send_pending{false};
-    std::array<uint8_t, 3> attempts{};
-    bool command_inflight{false};
     std::array<std::vector<uint8_t>, 3> responses{};
     bool tgc0_extend_window_active{false};
     bool tgc0_extend_used{false};
