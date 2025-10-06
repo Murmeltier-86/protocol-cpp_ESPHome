@@ -635,60 +635,78 @@ bool parse_textitem_mapping(const std::string &xml, const std::string &command, 
 XmlMapping g_mapping;
 bool g_mapping_loaded = false;
 
+int find_first_byte(const uint8_t *data, std::size_t length, uint8_t value) {
+  for (std::size_t i = 0; i < length; ++i) {
+    if (data[i] == value) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
 bool parse_payload(const std::vector<uint8_t> &decoded, const XmlCommandMapping &mapping, Stats &out,
                    const char *command_label, std::size_t minimum_length) {
   if (mapping.empty()) {
     ESP_LOGW(TAG, "XML %s: kein Mapping vorhanden", command_label);
     return false;
   }
-  bool any = false;
+  if (decoded.empty()) {
+    ESP_LOGW(TAG, "XML %s: leeres Frame", command_label);
+    return false;
+  }
+
+  int start = find_first_byte(decoded.data(), decoded.size(), 0x26);
+  if (start < 0) {
+    ESP_LOGW(TAG, "XML %s: Startbyte 0x26 nicht gefunden (decoded_len=%u)", command_label,
+             static_cast<unsigned>(decoded.size()));
+    return false;
+  }
+  const uint8_t *payload = decoded.data() + start;
+  std::size_t avail = decoded.size() - static_cast<std::size_t>(start);
   std::size_t expected_len = 0;
   for (const auto &field : mapping.fields) {
     expected_len = std::max(expected_len, field.offset + field.size);
   }
-  std::size_t expected_min_len = std::max(expected_len, minimum_length);
-  std::string hex_head = format_hex_head(decoded, 32);
-  ESP_LOGD(TAG, "XML frame: cmd=%s decoded_len=%u expected_min_len=%u hex_head=%s", command_label,
-           static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_min_len), hex_head.c_str());
-  std::string payload_hex = format_hex_string(decoded);
-  if (!payload_hex.empty()) {
-    ESP_LOGD(TAG, "XML %s payload HEX: %s", command_label, payload_hex.c_str());
-    std::string payload_ascii = format_ascii_string(decoded);
+  std::size_t expected_min_len = std::max<std::size_t>(expected_len, minimum_length);
+  ESP_LOGD(TAG, "XML frame: cmd=%s decoded_len=%u start=%d expected_min_len=%u", command_label,
+           static_cast<unsigned>(decoded.size()), start, static_cast<unsigned>(expected_min_len));
+  std::string hex_head = format_hex_string(payload, std::min<std::size_t>(avail, 32U));
+  if (!hex_head.empty()) {
+    ESP_LOGD(TAG, "XML %s head HEX: %s", command_label, hex_head.c_str());
+  }
+  std::string payload_ascii = format_ascii_string(std::vector<uint8_t>(payload, payload + avail));
+  if (!payload_ascii.empty()) {
     ESP_LOGD(TAG, "XML %s payload ASCII: %s", command_label, payload_ascii.c_str());
   }
-  if (decoded.empty() || decoded[0] != 0x26) {
-    ESP_LOGW(TAG, "XML %s: unerwarteter Startmarker (decoded_len=%u)", command_label,
-             static_cast<unsigned>(decoded.size()));
+  if (expected_min_len != 0 && avail < expected_min_len) {
+    ESP_LOGW(TAG, "XML %s: decoded_len (%u) < expected_min_len (%u)", command_label, static_cast<unsigned>(avail),
+             static_cast<unsigned>(expected_min_len));
     return false;
   }
-  if (expected_min_len != 0 && decoded.size() < expected_min_len) {
-    ESP_LOGW(TAG, "XML %s: decoded_len (%u) < expected_min_len (%u)", command_label,
-             static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_min_len));
-    return false;
-  }
+
+  bool any = false;
   for (const auto &field : mapping.fields) {
-    if (field.offset + field.size > decoded.size()) {
+    if (field.offset + field.size > avail) {
       ESP_LOGW(TAG, "XML %s Feld %s überläuft Frame (Offset=%u, Bytes=%u, Frame=%u)", command_label,
                field.name.c_str(), static_cast<unsigned>(field.offset), static_cast<unsigned>(field.size),
-               static_cast<unsigned>(decoded.size()));
+               static_cast<unsigned>(avail));
       continue;
     }
     std::uint64_t raw = 0;
+    const uint8_t *field_ptr = payload + field.offset;
     if (field.little_endian) {
       for (std::size_t i = 0; i < field.size; ++i) {
-        raw |= static_cast<std::uint64_t>(decoded[field.offset + i]) << (8U * i);
+        raw |= static_cast<std::uint64_t>(field_ptr[i]) << (8U * i);
       }
     } else {
       for (std::size_t i = 0; i < field.size; ++i) {
-        raw = (raw << 8U) | static_cast<std::uint64_t>(decoded[field.offset + i]);
+        raw = (raw << 8U) | static_cast<std::uint64_t>(field_ptr[i]);
       }
     }
-    std::string raw_hex = format_hex_string(decoded.data() + field.offset, field.size, false);
-    ESP_LOGD(TAG,
-             "XML field %s offset=%u size=%u endian=%s raw=%s parsed_uint=%llu",
-             field.name.c_str(), static_cast<unsigned>(field.offset), static_cast<unsigned>(field.size),
-             field.little_endian ? "LE" : "BE", raw_hex.c_str(),
-             static_cast<unsigned long long>(raw));
+    std::string raw_hex = format_hex_string(field_ptr, field.size, false);
+    ESP_LOGD(TAG, "XML field %s offset=%u size=%u endian=%s raw=%s parsed_uint=%llu", field.name.c_str(),
+             static_cast<unsigned>(field.offset), static_cast<unsigned>(field.size),
+             field.little_endian ? "LE" : "BE", raw_hex.c_str(), static_cast<unsigned long long>(raw));
     double value = static_cast<double>(raw) * field.scale;
     if (field.has_add) {
       value += field.add;
