@@ -18,6 +18,10 @@ namespace jutta_component {
 namespace {
 static const char *const TAG = "jutta_proto.xml";
 
+constexpr std::size_t TR32_MIN_FRAME_LENGTH = 21;
+constexpr std::size_t TG43_MIN_FRAME_LENGTH = 13;
+constexpr std::size_t TGC0_MIN_FRAME_LENGTH = 13;
+
 std::string to_lower_copy(const std::string &input) {
   std::string result = input;
   std::transform(result.begin(), result.end(), result.begin(),
@@ -632,7 +636,7 @@ XmlMapping g_mapping;
 bool g_mapping_loaded = false;
 
 bool parse_payload(const std::vector<uint8_t> &decoded, const XmlCommandMapping &mapping, Stats &out,
-                   const char *command_label) {
+                   const char *command_label, std::size_t minimum_length) {
   if (mapping.empty()) {
     ESP_LOGW(TAG, "XML %s: kein Mapping vorhanden", command_label);
     return false;
@@ -642,9 +646,10 @@ bool parse_payload(const std::vector<uint8_t> &decoded, const XmlCommandMapping 
   for (const auto &field : mapping.fields) {
     expected_len = std::max(expected_len, field.offset + field.size);
   }
+  std::size_t expected_min_len = std::max(expected_len, minimum_length);
   std::string hex_head = format_hex_head(decoded, 32);
-  ESP_LOGD(TAG, "XML frame: cmd=%s decoded_len=%u expected_len=%u hex_head=%s", command_label,
-           static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len), hex_head.c_str());
+  ESP_LOGD(TAG, "XML frame: cmd=%s decoded_len=%u expected_min_len=%u hex_head=%s", command_label,
+           static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_min_len), hex_head.c_str());
   std::string payload_hex = format_hex_string(decoded);
   if (!payload_hex.empty()) {
     ESP_LOGD(TAG, "XML %s payload HEX: %s", command_label, payload_hex.c_str());
@@ -656,15 +661,10 @@ bool parse_payload(const std::vector<uint8_t> &decoded, const XmlCommandMapping 
              static_cast<unsigned>(decoded.size()));
     return false;
   }
-  if (expected_len != 0 && decoded.size() < expected_len) {
-    ESP_LOGW(TAG, "XML %s: decoded_len (%u) < expected_len (%u)", command_label,
-             static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len));
+  if (expected_min_len != 0 && decoded.size() < expected_min_len) {
+    ESP_LOGW(TAG, "XML %s: decoded_len (%u) < expected_min_len (%u)", command_label,
+             static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_min_len));
     return false;
-  }
-  if (expected_len != 0 && decoded.size() != expected_len) {
-    std::string mismatch_head = format_hex_head(decoded, 32);
-    ESP_LOGD(TAG, "XML %s: decoded_len (%u) != expected_len (%u), head32=%s", command_label,
-             static_cast<unsigned>(decoded.size()), static_cast<unsigned>(expected_len), mismatch_head.c_str());
   }
   for (const auto &field : mapping.fields) {
     if (field.offset + field.size > decoded.size()) {
@@ -765,7 +765,7 @@ bool parse_TR32(const std::vector<uint8_t> &decoded, Stats &out) {
     ESP_LOGW(TAG, "XML Mapping wurde nicht geladen");
     return false;
   }
-  return parse_payload(decoded, g_mapping.tr32, out, "@TR:32");
+  return parse_payload(decoded, g_mapping.tr32, out, "@TR:32", TR32_MIN_FRAME_LENGTH);
 }
 
 bool parse_TG43(const std::vector<uint8_t> &decoded, Stats &out) {
@@ -773,7 +773,7 @@ bool parse_TG43(const std::vector<uint8_t> &decoded, Stats &out) {
     ESP_LOGW(TAG, "XML Mapping wurde nicht geladen");
     return false;
   }
-  return parse_payload(decoded, g_mapping.tg43, out, "@TG:43");
+  return parse_payload(decoded, g_mapping.tg43, out, "@TG:43", TG43_MIN_FRAME_LENGTH);
 }
 
 bool parse_TGC0(const std::vector<uint8_t> &decoded, Stats &out) {
@@ -781,7 +781,7 @@ bool parse_TGC0(const std::vector<uint8_t> &decoded, Stats &out) {
     ESP_LOGW(TAG, "XML Mapping wurde nicht geladen");
     return false;
   }
-  return parse_payload(decoded, g_mapping.tgc0, out, "@TG:C0");
+  return parse_payload(decoded, g_mapping.tgc0, out, "@TG:C0", TGC0_MIN_FRAME_LENGTH);
 }
 
 }  // namespace jutta_component
