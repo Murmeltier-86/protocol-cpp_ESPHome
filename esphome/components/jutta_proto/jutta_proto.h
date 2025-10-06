@@ -15,6 +15,34 @@
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
 #if defined(__has_include)
+#if __has_include("esphome/core/entity_category.h")
+#include "esphome/core/entity_category.h"
+#else
+#define ESPHOME_JUTTA_ENTITY_CATEGORY_STUB
+#endif
+#else
+#define ESPHOME_JUTTA_ENTITY_CATEGORY_STUB
+#endif
+
+#ifdef ESPHOME_JUTTA_ENTITY_CATEGORY_STUB
+namespace esphome {
+
+enum class EntityCategory {
+  ENTITY_CATEGORY_NONE,
+  ENTITY_CATEGORY_DIAGNOSTIC,
+  ENTITY_CATEGORY_CONFIG,
+  ENTITY_CATEGORY_SYSTEM,
+};
+
+namespace entity {
+using EntityCategory = esphome::EntityCategory;
+}  // namespace entity
+
+}  // namespace esphome
+#endif
+
+#undef ESPHOME_JUTTA_ENTITY_CATEGORY_STUB
+#if defined(__has_include)
 #if __has_include("esphome/components/sensor/sensor.h")
 #include "esphome/components/sensor/sensor.h"
 #else
@@ -45,6 +73,8 @@ class Sensor {
   virtual void set_unique_id(const std::string &) {}
   virtual void set_unique_id(const char *) {}
   virtual void set_state_class(StateClass) {}
+  virtual void set_force_update(bool) {}
+  virtual void set_entity_category(esphome::EntityCategory) {}
   virtual void set_unit_of_measurement(const std::string &) {}
   virtual void set_unit_of_measurement(const char *) {}
   virtual void set_icon(const std::string &) {}
@@ -158,14 +188,14 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void publish_xml_stats_();
   void publish_single_stat_(const std::string &name, double value, const std::string &label);
   void register_xml_sensor_(const XmlField &field, XmlSensorKind kind, const char *command_label);
-  sensor::Sensor *get_or_create_sensor_(const std::string &name, const std::string &label);
-  sensor::Sensor *create_internal_sensor_(const std::string &name, const std::string &label);
-  bool process_tgc0_response_(const std::vector<uint8_t> &decoded);
+  sensor::Sensor *find_configured_sensor_(const std::string &name) const;
+  void apply_sensor_metadata_(const std::string &name, sensor::Sensor *sensor);
   bool stage_tgc0_value_(const std::string &name, const std::string &label, float filtered_value,
                          uint16_t header_value, uint16_t encoded_value, uint16_t raw_value);
   bool decode_field_value_(const std::vector<uint8_t> &decoded, const XmlField &field, bool little_endian,
                            std::uint64_t &out) const;
   void handle_xml_state_machine_(uint32_t now);
+  void start_new_xml_cycle_(uint32_t now);
   enum class XmlPollState {
     IDLE,
     SEND_TR32,
@@ -179,6 +209,16 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     PARSE_TGC0,
     SLEEP
   };
+  size_t xml_command_index_(XmlPollState state) const;
+  bool validate_xml_frame_(XmlPollState state, const std::vector<uint8_t> &decoded, bool had_crlf,
+                           size_t decoded_len, std::vector<uint8_t> &payload, size_t &expected_min_len,
+                           uint8_t &head0) const;
+  bool stage_counter_frame_(const XmlCommandMapping &mapping, const std::vector<uint8_t> &frame,
+                            const char *command_label);
+  bool process_valid_tgc0_frame_(const std::vector<uint8_t> &frame, bool stage_values);
+  bool should_retry_current_(XmlPollState wait_state, uint32_t now);
+  void handle_xml_failure_(XmlPollState wait_state, bool is_timeout, size_t decoded_len, uint32_t now);
+  void complete_command_success_(XmlPollState wait_state);
   bool xml_state_has_mapping_(XmlPollState state) const;
   const char *xml_state_command_(XmlPollState state) const;
   const char *xml_state_label_(XmlPollState state) const;
@@ -219,18 +259,21 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   XmlMapping xml_mapping_{};
   Stats xml_stats_{};
   std::unordered_map<std::string, sensor::Sensor *> xml_sensors_{};
-  std::vector<std::unique_ptr<sensor::Sensor>> xml_owned_sensors_{};
   struct Tgc0FilterState {
     std::deque<float> window;
     uint8_t consecutive_valid{0};
     bool logged_once{false};
   };
   std::unordered_map<std::string, Tgc0FilterState> tgc0_filters_{};
-  bool tgc0_first_frame_logged_{false};
   std::unordered_map<std::string, XmlSensorMeta> xml_sensor_meta_{};
   std::unordered_map<std::string, bool> xml_missing_sensor_logged_{};
   std::unordered_map<std::string, bool> xml_unconfigured_sensor_logged_{};
-  float last_tg43_percent_{std::numeric_limits<float>::quiet_NaN()};
+  static constexpr size_t XML_COMMAND_COUNT = 3;
+  std::array<uint8_t, XML_COMMAND_COUNT> xml_retry_count_{{0, 0, 0}};
+  std::array<bool, XML_COMMAND_COUNT> xml_invalid_len_seen_{{false, false, false}};
+  std::array<size_t, XML_COMMAND_COUNT> xml_last_invalid_len_{{0, 0, 0}};
+  uint8_t xml_tgc0_timeout_streak_{0};
+  bool xml_skip_tgc0_{false};
   void prepare_tgc0_request_();
 };
 
