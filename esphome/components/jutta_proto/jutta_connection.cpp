@@ -545,7 +545,7 @@ void JuttaConnection::reset_response_line_buffer() {
     }
 }
 
-void JuttaConnection::tx_db_command(const std::string& ascii) {
+void JuttaConnection::tx_db_command(const std::string& ascii, bool flush) {
     static const std::array<uint8_t, 8> TERMINATOR{{0xDF, 0xFF, 0xDB, 0xDB, 0xFB, 0xFB, 0xDB, 0xDB}};
     std::vector<uint8_t> encoded;
     encoded.reserve(ascii.size() * 4 + TERMINATOR.size());
@@ -578,11 +578,23 @@ void JuttaConnection::tx_db_command(const std::string& ascii) {
             return;
         }
     }
-    this->serial.flush();
+    if (flush) {
+        this->serial.flush();
+    }
 }
 
-bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t timeout_ms) {
+bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t timeout_ms, bool* had_crlf,
+                                    size_t* decoded_len) {
     decoded.clear();
+
+    bool frame_had_crlf = false;
+    size_t frame_decoded_len = 0;
+    if (had_crlf != nullptr) {
+        *had_crlf = false;
+    }
+    if (decoded_len != nullptr) {
+        *decoded_len = 0;
+    }
 
     constexpr uint32_t GAP_MS = 25;
     static const std::array<uint8_t, 8> TERMINATOR{{0xDF, 0xFF, 0xDB, 0xDB, 0xFB, 0xFB, 0xDB, 0xDB}};
@@ -621,11 +633,21 @@ bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t time
                 }
             }
             if (decoded.size() >= 2 && decoded[decoded.size() - 2] == '\r' && decoded.back() == '\n') {
+                frame_had_crlf = true;
                 decoded.resize(decoded.size() - 2);
             }
         }
 
         ESP_LOGD(TAG, "RX_DB decoded_len=%u reason=%s", static_cast<unsigned>(decoded.size()), reason);
+
+        frame_decoded_len = decoded.size();
+
+        if (had_crlf != nullptr) {
+            *had_crlf = frame_had_crlf;
+        }
+        if (decoded_len != nullptr) {
+            *decoded_len = frame_decoded_len;
+        }
 
         if (consume_len > 0) {
             auto erase_end = this->db_rx_buffer_.begin() + static_cast<std::ptrdiff_t>(consume_len);
