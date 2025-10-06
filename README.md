@@ -58,12 +58,11 @@ jutta_proto:
 3. Keine zusätzlichen `includes:` erforderlich – der Pfad unter `xml_mapping_path` genügt.
 4. Beim Kompilieren wird die Datei automatisch eingebunden, vom Parser ausgewertet und anschließend als numerische Sensorwerte veröffentlicht.
 
-### Statische Sensoren in YAML
+### Automatisch erzeugte Sensoren
 
-- Alle benötigten XML-Felder müssen als `sensor`-Einträge in der YAML vorkonfiguriert werden (IDs exakt wie im Mapping).
-- Die Komponente verknüpft nur vorhandene Sensor-IDs – dynamisches Erzeugen zur Laufzeit findet nicht mehr statt.
-- Für Zähler (`@TR:32`, `@TG:43`) setzt die Firmware automatisch `state_class: total_increasing`, `entity_category: diagnostic` sowie `force_update: true`.
-- Prozentfelder (`@TG:C0`) behalten die im Mapping hinterlegte Skalierung und erscheinen als numerische Sensoren mit Prozent-Einheit.
+- Für jedes Feld der Frames `@TR:32`, `@TG:43` und `@TG:C0` wird ein numerischer `sensor::Sensor` erstellt.
+- Typische Werte (abhängig vom Mapping): `coffee_total`, `espresso_total`, `cappuccino_total`, `cleaning_counter`, `decalc_counter`, `filter_change_counter`, `cleaning_percent`, `decalc_percent`, `filter_change_percent`.
+- Die sichtbaren Home-Assistant-Entitäten tragen den im Mapping hinterlegten Label-Text.
 
 ### Ablauf & Logging
 
@@ -72,15 +71,13 @@ jutta_proto:
 - Zeitüberschreitungen führen lediglich zu einer Warnung; beim nächsten Intervall wird automatisch weiter versucht.
 - Erfolgreich geparste Felder werden mit `XML publish: <Name>=<Wert>` protokolliert.
 
-#### Sequenzieller Ablauf & Validierung (aktuelle Firmware)
+#### Sequenzieller Ablauf & Plausibilisierung (aktuelle Firmware)
 
-- Pro Poll-Zyklus werden die XML-Kommandos strikt nacheinander gesendet: `@TR:32 → @TG:43 → @TG:C0`, dazwischen liegt eine feste Ruhezeit von 120 ms.
-- Jeder Befehl erhält ein Timeout von 1000 ms und genau einen Retry. Nach zwei Fehlschlägen wird zum nächsten Kommando gewechselt; UART-Flushs finden während des Polls nicht statt.
-- Eingehende Frames müssen mit CRLF enden, mindestens die erwartete Länge besitzen und bei `0x26` starten. Alle Kriterien werden vor dem Dekodieren geprüft und im Log (`cmd/decoded_len/expected_min_len/head0`) ausgegeben.
-- Zählerwerte aus `@TR:32` und `@TG:43` werden unverändert als Ganzzahlen veröffentlicht – es erfolgt keine Monotonie- oder Summenprüfung.
-- `@TG:C0` wird mit dem im Mapping hinterlegten Faktor skaliert. Werte < 0 % oder > 130 % führen zur Verwerfung des gesamten Frames; Ausreißer zwischen 100 % und 110 % werden sanft auf 100 % geglättet.
-- Bei drei aufeinanderfolgenden TGC0-Timeouts wird das Prozent-Kommando einmalig ausgelassen; TR32/TG43 laufen weiter.
-- Für jede veröffentlichte Größe protokolliert die Firmware Offset, Länge, Endianness und den dekodierten Wert. Home Assistant erhält ausschließlich statisch konfigurierte Sensoren mit stabilen IDs.
+- Das XML-Polling arbeitet nun strikt sequentiell: `@TR:32 → @TG:43 → @TG:C0`, zwischen den Kommandos liegt eine feste Pause.
+- Empfangene Frames werden anhand des `0x26`-Startbytes freigeschnitten; auch variable Längen (z. B. 21/22 Bytes) werden akzeptiert.
+- Prozentangaben werden automatisch skaliert (`>200` → `/10`) und anschließend auf `0‒100 %` begrenzt; Zähler werden auf Monotonie geprüft.
+- Tritt innerhalb von sechs Stunden ein negativer Zähler-Sprung auf, wird der Wert nur übernommen, wenn gleichzeitig die `@TG:43`-Prozentwerte ≈ 0 % melden.
+- Home Assistant erhält ausschließlich numerische Sensoren mit stabilen Namen; NaN- oder Ausreißerwerte werden nicht publiziert.
 
 **Kurztest:** Gerät starten, Logs beobachten (`TR32 → TG43 → TGC0 → sleep`). In Home Assistant sollten die Sensoren erscheinen und regelmäßig Werte aktualisieren.
 
