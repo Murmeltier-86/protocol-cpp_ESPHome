@@ -151,6 +151,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void handle_xml_cycle_(uint32_t now);
   bool try_receive_xml_frame_(uint32_t now);
   void finish_xml_cycle_(uint32_t now, bool success);
+  bool send_current_stage_command_(uint32_t now);
+  void complete_current_stage_(uint32_t now, bool stage_success, bool from_timeout);
+  void handle_stage_timeout_(uint32_t now);
   void publish_xml_stats_();
   void publish_single_stat_(const std::string &name, double value, const std::string &label);
   void register_xml_sensor_(const XmlField &field, XmlSensorKind kind);
@@ -158,8 +161,11 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   static const char *xml_command_for_index_(size_t index);
   static const char *xml_log_label_for_index_(size_t index);
   bool xml_command_has_mapping_(size_t index) const;
-  size_t first_mapped_xml_command_index_() const;
-  size_t next_mapped_xml_command_index_(size_t index) const;
+  enum class XmlSeqStage { IDLE, TGC0, TR32, TG43 };
+  XmlSeqStage next_stage_(XmlSeqStage stage) const;
+  size_t stage_to_index_(XmlSeqStage stage) const;
+  bool stage_has_mapping_(XmlSeqStage stage) const;
+  const char *stage_label_(XmlSeqStage stage) const;
   bool process_tgc0_response_(const std::vector<uint8_t> &decoded);
   bool stage_tgc0_value_(const std::string &name, const std::string &label, float filtered_value,
                          uint16_t header_value, uint16_t encoded_value, uint16_t raw_value);
@@ -188,6 +194,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const char *xml_mapping_data_{nullptr};
   size_t xml_mapping_length_{0};
   uint32_t xml_next_poll_{0};
+  bool xml_poll_inflight_{false};
+  XmlSeqStage xml_seq_stage_{XmlSeqStage::IDLE};
   bool xml_mapping_logged_{false};
   bool xml_mapping_loaded_{false};
   XmlMapping xml_mapping_{};
@@ -210,9 +218,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     void reset();
 
     Phase phase{Phase::Idle};
-    size_t command_index{0};
     uint32_t deadline_ms{0};
     uint32_t next_action_ms{0};
+    bool command_send_pending{false};
     std::array<std::vector<uint8_t>, 3> responses{};
     bool tgc0_extend_window_active{false};
     bool tgc0_extend_used{false};
@@ -220,6 +228,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     bool tgc0_pending_retry{false};
     bool tgc0_timeout_logged{false};
     uint8_t tgc0_attempt{0};
+    bool sequence_success{true};
     std::size_t tgc0_last_raw_len{0};
     std::size_t tgc0_last_payload_len{0};
     bool tgc0_last_frame_trimmed{false};
