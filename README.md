@@ -71,6 +71,15 @@ jutta_proto:
 - Zeitüberschreitungen führen lediglich zu einer Warnung; beim nächsten Intervall wird automatisch weiter versucht.
 - Erfolgreich geparste Felder werden mit `XML publish: <Name>=<Wert>` protokolliert.
 
+### Aktualisierte XML-Verarbeitung
+
+- Die Poll-Logik arbeitet strikt sequenziell: Auf `@TR:32` folgen `@TG:43` und `@TG:C0`, zwischen den Kommandos liegt eine kurze Pause (120 ms) und nach einem kompletten Durchlauf eine Abkühlphase von mindestens 2 s.
+- Der Decoder sucht im empfangenen Frame nach dem Startbyte `0x26` und akzeptiert dynamische Längen; überlange oder zu kurze Antworten werden protokolliert, blockieren den Zyklus aber nicht.
+- Prozentwerte (insbesondere aus `@TG:C0`) werden auf 0 … 100 % normiert, x10-Skalierungen automatisch erkannt, Zähler bleiben monoton – unerklärliche Rücksprünge werden verworfen.
+- Home-Assistant-Sensoren erscheinen stabil: Nur validierte Messwerte werden publiziert, NaN oder Ausreißer gelangen nicht mehr in den Status.
+
+**Schnelltest:** Gerät starten, Logs beobachten (`TX_DB @TR:32` → `@TG:43` → `@TG:C0` → „sleep“) und im Home Assistant prüfen, ob die Sensoren in regelmäßigen Abständen aktualisiert werden.
+
 ## Example
 The following example shows the interaction with a JURA coffee maker over [XMPP](https://xmpp.org/).
 The complete implementation for this demo can be found [here](https://github.com/COM8/esp32-jura).
