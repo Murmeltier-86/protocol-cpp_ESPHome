@@ -161,7 +161,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   static const char *xml_command_for_index_(size_t index);
   static const char *xml_log_label_for_index_(size_t index);
   bool xml_command_has_mapping_(size_t index) const;
-  enum class XmlSeqStage { IDLE, TR32, TG43, TGC0 };
+  enum class XmlSeqStage { IDLE, TGC0, TR32, TG43 };
   XmlSeqStage next_stage_(XmlSeqStage stage) const;
   size_t stage_to_index_(XmlSeqStage stage) const;
   bool stage_has_mapping_(XmlSeqStage stage) const;
@@ -201,7 +201,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   XmlMapping xml_mapping_{};
   Stats xml_stats_{};
   std::unordered_map<std::string, sensor::Sensor *> xml_sensors_{};
-  std::unordered_map<std::string, std::unique_ptr<sensor::Sensor>> xml_owned_sensors_{};
   struct Tgc0FilterState {
     std::deque<float> window;
     uint8_t consecutive_valid{0};
@@ -223,9 +222,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     uint32_t next_action_ms{0};
     bool command_send_pending{false};
     std::array<std::vector<uint8_t>, 3> responses{};
-    bool command_inflight{false};
-    std::array<uint8_t, 3> attempts{};
-    std::array<bool, 3> pending_retry{};
     bool tgc0_extend_window_active{false};
     bool tgc0_extend_used{false};
     bool tgc0_retry_used{false};
@@ -240,13 +236,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   } xml_cycle_{};
 
   void prepare_tgc0_request_();
-  void schedule_stage_send_(uint32_t now, XmlSeqStage stage, bool is_retry);
-  uint32_t stage_delay_before_send_ms_(XmlSeqStage stage, bool is_retry) const;
-  uint32_t stage_timeout_ms_(XmlSeqStage stage) const;
-  bool stage_requires_quiet_time_(XmlSeqStage stage) const;
-  std::size_t stage_expected_min_length_(XmlSeqStage stage) const;
-  bool stage_response_meets_min_length_(XmlSeqStage stage) const;
-  sensor::Sensor *ensure_sensor_slot_(const std::string &name, const std::string &label);
 };
 
 class StartBrewAction : public esphome::Action<> {
