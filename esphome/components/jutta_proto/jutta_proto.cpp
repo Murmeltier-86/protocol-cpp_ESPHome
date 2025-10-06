@@ -27,6 +27,7 @@ constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
 const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
 constexpr uint32_t kXmlRxTimeoutMs = 1000;
 constexpr uint32_t kInterCmdGapMs = 120;
+constexpr uint32_t kXmlQuietMs = 120;
 constexpr uint32_t kCycleSleepMs = 2000;
 
 constexpr double XML_COUNTER_MIN = 0.0;
@@ -39,41 +40,6 @@ constexpr bool TGC0_TRY_LITTLE_ENDIAN_FIRST = true;
 constexpr std::size_t kTR32MinFrameLength = 21;
 constexpr std::size_t kTG43MinFrameLength = 13;
 constexpr std::size_t kTGC0MinFrameLength = 13;
-
-std::string format_hex_head(const std::vector<uint8_t> &data, std::size_t max_bytes) {
-  if (data.empty() || max_bytes == 0) {
-    return {};
-  }
-  std::size_t count = std::min<std::size_t>(data.size(), max_bytes);
-  std::string out;
-  out.reserve(count * 3U);
-  char buf[4];
-  for (std::size_t i = 0; i < count; ++i) {
-    if (i > 0) {
-      out.push_back(' ');
-    }
-    std::snprintf(buf, sizeof(buf), "%02X", static_cast<unsigned>(data[i]));
-    out.append(buf);
-  }
-  return out;
-}
-
-std::string format_ascii_string(const std::vector<uint8_t> &data) {
-  if (data.empty()) {
-    return {};
-  }
-  std::string out;
-  out.reserve(data.size());
-  for (uint8_t byte : data) {
-    unsigned char c = static_cast<unsigned char>(byte);
-    if (c >= 0x20 && c <= 0x7E) {
-      out.push_back(static_cast<char>(c));
-    } else {
-      out.push_back('.');
-    }
-  }
-  return out;
-}
 
 int determine_accuracy(XmlSensorKind kind, double scale) {
   if (kind == XmlSensorKind::Counter) {
@@ -678,6 +644,7 @@ size_t JuraComponent::xml_command_index_(XmlPollState state) const {
 bool JuraComponent::validate_xml_frame_(XmlPollState state, const std::vector<uint8_t> &decoded, bool had_crlf,
                                         size_t decoded_len, std::vector<uint8_t> &payload,
                                         size_t &expected_min_len, uint8_t &head0) const {
+  (void) had_crlf;
   const XmlCommandMapping *mapping = nullptr;
   std::size_t minimum = 0;
   switch (state) {
@@ -708,11 +675,6 @@ bool JuraComponent::validate_xml_frame_(XmlPollState state, const std::vector<ui
     expected_len = std::max(expected_len, field.offset + field.size);
   }
   expected_min_len = std::max(expected_len, minimum);
-
-  if (!had_crlf) {
-    ESP_LOGW(TAG, "XML %s: fehlender CRLF-Abschluss", this->xml_state_label_(state));
-    return false;
-  }
 
   int start_index = -1;
   for (std::size_t i = 0; i < decoded.size(); ++i) {
@@ -746,18 +708,6 @@ bool JuraComponent::validate_xml_frame_(XmlPollState state, const std::vector<ui
   ESP_LOGD(TAG, "XML RX cmd=%s decoded_len=%u expected_min_len=%u head0=0x%02X", command,
            static_cast<unsigned>(decoded_len), static_cast<unsigned>(expected_min_len),
            static_cast<unsigned>(head0));
-  std::string hex_head = format_hex_head(payload, 32);
-  if (!hex_head.empty()) {
-    ESP_LOGD(TAG, "XML %s head HEX: %s", command, hex_head.c_str());
-  }
-  std::string payload_hex = format_hex_string(payload);
-  if (!payload_hex.empty()) {
-    ESP_LOGD(TAG, "XML %s payload HEX: %s", command, payload_hex.c_str());
-  }
-  std::string payload_ascii = format_ascii_string(payload);
-  if (!payload_ascii.empty()) {
-    ESP_LOGD(TAG, "XML %s payload ASCII: %s", command, payload_ascii.c_str());
-  }
   return true;
 }
 
@@ -781,15 +731,13 @@ bool JuraComponent::stage_counter_frame_(const XmlCommandMapping &mapping, const
         raw = (raw << 8U) | static_cast<std::uint64_t>(frame[field.offset + i]);
       }
     }
-    std::vector<uint8_t> raw_bytes(frame.begin() + field.offset, frame.begin() + field.offset + field.size);
-    std::string raw_hex = format_hex_string(raw_bytes);
     double value = static_cast<double>(raw) * field.scale;
     if (field.has_add) {
       value += field.add;
     }
-    ESP_LOGD(TAG, "XML field %s offset=%u size=%u endian=%s raw=%s value=%.3f", field.name.c_str(),
+    ESP_LOGD(TAG, "XML field %s offset=%u size=%u endian=%s value=%.3f", field.name.c_str(),
              static_cast<unsigned>(field.offset), static_cast<unsigned>(field.size),
-             field.little_endian ? "LE" : "BE", raw_hex.c_str(), static_cast<double>(value));
+             field.little_endian ? "LE" : "BE", static_cast<double>(value));
     this->xml_stats_.set_value(field.name, value, field.label);
     any = true;
   }
@@ -841,18 +789,10 @@ bool JuraComponent::process_valid_tgc0_frame_(const std::vector<uint8_t> &frame,
                static_cast<unsigned long long>(raw_value), percent);
       return false;
     }
-    if (percent > 100.0 && percent <= 110.0) {
-      ESP_LOGD(TAG, "XML @TG:C0 geglättet: %s raw=%.2f -> 100.0", field.name.c_str(), percent);
-      percent = 100.0;
-    }
     if (stage_values) {
-      std::vector<uint8_t> raw_bytes(frame.begin() + raw_field.offset,
-                                     frame.begin() + raw_field.offset + raw_field.size);
-      ESP_LOGD(TAG, "XML field %s offset=%u size=%u endian=%s raw=%s value=%.2f", field.name.c_str(),
+      ESP_LOGD(TAG, "XML field %s offset=%u size=%u endian=%s value=%.2f", field.name.c_str(),
                static_cast<unsigned>(field.offset), static_cast<unsigned>(field.size),
-               little_endian ? "LE" : "BE", format_hex_string(raw_bytes).c_str(), percent);
-    }
-    if (stage_values) {
+               little_endian ? "LE" : "BE", percent);
       if (this->stage_tgc0_value_(field.name, field.label, static_cast<float>(percent), header_value, encoded_value,
                                   static_cast<uint16_t>(raw_value & 0xFFFFu))) {
         any_value = true;
@@ -944,34 +884,12 @@ void JuraComponent::complete_command_success_(XmlPollState wait_state) {
 bool JuraComponent::stage_tgc0_value_(const std::string &name, const std::string &label, float raw_percent,
                                       uint16_t header_value, uint16_t encoded_value, uint16_t raw_value) {
   auto &state = this->tgc0_filters_[name];
-  if (std::isnan(raw_percent)) {
-    state.window.clear();
-    state.consecutive_valid = 0;
-    return false;
-  }
-  state.window.push_back(raw_percent);
-  if (state.window.size() > 3) {
-    state.window.pop_front();
-  }
-  if (state.consecutive_valid < std::numeric_limits<uint8_t>::max()) {
-    state.consecutive_valid += 1;
-  }
-  if (state.consecutive_valid < 2) {
-    return false;
-  }
-  float sum = 0.0f;
-  for (float value : state.window) {
-    sum += value;
-  }
-  float filtered = sum / static_cast<float>(state.window.size());
-  this->xml_stats_.set_value(name, filtered, label);
-  if (!state.logged_once) {
-    std::string log_label = label.empty() ? name : label;
-    ESP_LOGD(TAG, "TGC0 %s Frame: header=0x%02X encoded=0x%02X raw=%u percent=%.1f", log_label.c_str(),
-             static_cast<unsigned>(header_value), static_cast<unsigned>(encoded_value),
-             static_cast<unsigned>(raw_value), static_cast<double>(filtered));
-    state.logged_once = true;
-  }
+  (void) header_value;
+  (void) encoded_value;
+  (void) raw_value;
+  state.window.clear();
+  state.consecutive_valid = 0;
+  this->xml_stats_.set_value(name, raw_percent, label);
   return true;
 }
 
@@ -1026,11 +944,6 @@ void JuraComponent::publish_single_stat_(const std::string &name, double value, 
       return;
     }
     publish_value = static_cast<float>(std::round(static_cast<double>(publish_value)));
-  } else if (meta.is_percent) {
-    if (publish_value > 100.0f && publish_value <= 110.0f) {
-      ESP_LOGD(TAG, "XML Prozent geglättet: %s raw=%.2f", name.c_str(), static_cast<double>(publish_value));
-      publish_value = 100.0f;
-    }
   }
 
   if (!std::isfinite(publish_value)) {
@@ -1555,18 +1468,14 @@ bool JuraComponent::send_xml_command_(const char *command, XmlPollState wait_sta
     return false;
   }
   auto *connection = this->coffee_maker_->connection.get();
-  if (wait_state == XmlPollState::WAIT_TGC0) {
-    this->prepare_tgc0_request_();
-  } else {
-    connection->reset_db_rx_buffer();
-  }
+  connection->reset_db_rx_buffer();
   this->xml_rx_buffer_.clear();
   ESP_LOGD(TAG, "TX_DB \"%s\"", command);
   connection->tx_db_command(command, false);
   this->xml_inflight_ = true;
   this->xml_last_command_ = command;
   this->xml_deadline_ms_ = now + kXmlRxTimeoutMs;
-  this->xml_next_action_ms_ = 0;
+  this->xml_next_action_ms_ = now + kXmlQuietMs;
   this->xml_state_ = wait_state;
   return true;
 }
@@ -1583,12 +1492,7 @@ void JuraComponent::handle_xml_timeout_(XmlPollState next_state, const char *lab
 }
 
 void JuraComponent::prepare_tgc0_request_() {
-  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
-    return;
-  }
-  auto *connection = this->coffee_maker_->connection.get();
-  connection->drain_serial_input_nonblocking();
-  connection->reset_db_rx_buffer();
+  // Keine zusätzlichen Flush-Operationen während des XML-Pollings.
 }
 
 void JuraComponent::start_brew(::jutta_proto::CoffeeMaker::coffee_t coffee) {

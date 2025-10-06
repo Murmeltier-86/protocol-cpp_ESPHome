@@ -40,33 +40,22 @@ image and parsed during boot to discover the exact command strings and optional 
 If the XML is missing or malformed the defaults `@TR:32`, `@TG:43`, and `@TG:C0` are used and the sensors keep their
 generic names.
 
-### CODEX-Anpassung: Stabilisiertes `@TG:C0`
+### CODEX-Anpassung: Stabilisiertes XML-Polling
 
-- **Was wurde geändert?** Die Dekodierung von `@TG:C0` (Prozentwerte) nutzt jetzt strikt die Angaben aus der XML:
-  Header-, Encoded- und Rohbytes werden gemäß Endianness interpretiert, bei fehlender Angabe zunächst als Little-Endian
-  gelesen und bei Ausreißern auf Big-Endian gewechselt. Der Rohwert wird – abhängig von optionalen Faktor/Offset-Angaben –
-  entweder direkt skaliert oder ersatzweise durch `256` geteilt, anschließend auf `0…250 %` begrenzt, zweimal hintereinander
-  validiert und vor der Veröffentlichung über ein gleitendes Mittel (Fenstergröße drei gültige Samples) geglättet. Der
-  RX-Parser wartet bei Bedarf einmalig bis zu 10 ms auf fehlende Bytes und verwirft unvollständige Frames, sodass nur
-  vollständig dekodierte Messungen an Home Assistant weitergereicht werden.
-- **Was bleibt unverändert?** Legacy-Handshakes, sämtliche Nicht-XML-Kommandos sowie der bisherige Poll-Takt bleiben
-  unverändert bestehen.
-- **Erwartetes Ergebnis:** Die Zähler aus `@TR:32` und `@TG:43` behalten ihr etabliertes Verhalten. `@TG:C0` liefert jetzt
-  stabile Prozentwerte im Bereich `0` bis `250`, vermeidet Ausreißer und taucht als numerische Entität in Home Assistant
-  auf.
-
-#### Update: TGC0 Timeout & HA-Sensoren (CODEX)
-
-- **Was wurde getan?** Nach jedem erfolgreichen `@TG:43`-Frame wartet der XML-Poller jetzt ~75 ms, leert den UART-Empfang
-  inklusive Decoderpuffer und sendet erst danach `@TG:C0`. Der Empfang lässt einmalig ein kurzes Extend-Fenster von 25 ms
-  zu, bevor bei Bedarf exakt ein Retry mit identischer Pause ausgelöst wird. `@TG:C0` akzeptiert variable Nutzlastlängen
-  solange ein CRLF-terminierter Block vorliegt; bei Mehrfachblöcken wird der letzte vollständige Frame ausgewertet. Alle
-  TR32-, TG43- und TGC0-Felder werden als numerische Sensoren mit `state_class` (`total_increasing` bzw. `measurement`),
-  Einheiten und Änderungsschwelle (`Δ>0` bzw. `Δ≥0,1`) veröffentlicht.
-- **Was bleibt?** Legacy-Handshakes, Kommandofolge und die Verarbeitung von `@TR:32`/`@TG:43` bleiben unverändert; nur der
-  TGC0-Zweig erhält die zusätzliche Pause, Pufferpflege und Retry-Logik.
-- **Erwartetes Ergebnis:** `RX_DB timeout TGC0` verschwindet im Normalbetrieb, der erste gültige Prozent-Frame wird einmalig
-  mit Länge, CRLF-Erkennung und Byteorder geloggt und die Werte erscheinen stabil als sichtbare Home-Assistant-Sensoren.
+- **Polling-Ablauf.** Alle 30 s werden die DB-Kommandos strikt sequenziell gesendet: `@TR:32`, anschließend `@TG:43` und
+  zum Schluss `@TG:C0`. Zwischen zwei Kommandos gibt es keine parallelen Übertragungen. Nach jedem TX wartet der Treiber
+  120 ms ruhig, bevor er mit dem Empfang fortfährt. Jede Anfrage hat 1000 ms Zeit für eine Antwort und genau einen Retry,
+  danach geht es mit dem nächsten Kommando weiter.
+- **Validierung.** Ein Frame gilt als gültig, sobald der DB-Decoder Nutzdaten liefert, die mindestens so lang wie das
+  Mapping vorgeben (TR32 ≥ 21 Byte, TG43/TGC0 ≥ 13 Byte) und mit `0x26` beginnen. Ein CRLF ist nicht mehr erforderlich;
+  das Frame-Ende wird zusätzlich per 15 ms Byte-Gap erkannt. Überlange Frames werden akzeptiert, es werden nur die
+  gemappten Felder ausgewertet.
+- **Werteinterpretation.** `@TR:32` und `@TG:43` bleiben unveränderte Ganzzahlzähler (`state_class: total_increasing`).
+  `@TG:C0` liefert Prozentwerte gemäß Mapping-Skalierung. Werte kleiner 0 % oder größer 130 % verwerfen den gesamten Frame
+  und lösen den einmaligen Retry aus. Gültige Prozentwerte werden direkt veröffentlicht – ohne Clamping auf 100 %.
+- **Bestandteile, die bleiben.** Legacy-Handshakes und UART-Grundkonfigurationen bleiben unverändert. Es werden keine
+  zusätzlichen Flushes innerhalb des XML-Zyklus durchgeführt; Ruhezeit und Byte-Gap sorgen für stabile, sauber getrennte
+  Frames.
 
 ### CODEX: J.O.E.-XML ohne `includes`
 

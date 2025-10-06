@@ -596,7 +596,7 @@ bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t time
         *decoded_len = 0;
     }
 
-    constexpr uint32_t GAP_MS = 25;
+    constexpr uint32_t GAP_MS = 15;
     static const std::array<uint8_t, 8> TERMINATOR{{0xDF, 0xFF, 0xDB, 0xDB, 0xFB, 0xFB, 0xDB, 0xDB}};
 
     auto now = esphome::millis();
@@ -738,7 +738,13 @@ bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t time
 }
 
 void JuttaConnection::reset_db_rx_buffer() {
-    this->flush_db_rx_queue();
+    if (!this->db_rx_buffer_.empty()) {
+        ESP_LOGD(TAG, "Clearing %zu gepufferte DB-Byte%s.", this->db_rx_buffer_.size(),
+                 this->db_rx_buffer_.size() == 1 ? "" : "s");
+        this->db_rx_buffer_.clear();
+    }
+    this->db_frame_active_ = false;
+    this->db_frame_last_activity_ = 0;
 }
 
 void JuttaConnection::reset_all_rx_buffers() {
