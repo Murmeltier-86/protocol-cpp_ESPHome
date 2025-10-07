@@ -257,6 +257,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_state_has_mapping_(XmlPollState state) const;
   const char *xml_state_command_(XmlPollState state) const;
   const char *xml_state_label_(XmlPollState state) const;
+  uint32_t quiet_delay_for_state_(XmlPollState wait_state) const;
+  uint32_t inter_command_gap_after_(XmlPollState wait_state) const;
   void transition_to_state_(XmlPollState state, uint32_t now, uint32_t delay_ms = 0);
   bool send_xml_command_(const char *command, XmlPollState wait_state, uint32_t now);
   void handle_xml_timeout_(XmlPollState next_state, const char *label, uint32_t now);
