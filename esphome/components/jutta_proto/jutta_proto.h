@@ -280,6 +280,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string handshake_t2_response_;
   std::string handshake_t3_response_;
   uint32_t handshake_deadline_{0};
+  uint32_t handshake_settle_deadline_{0};
   bool handshake_hello_request_sent_{false};
   bool custom_cancel_flag_{false};
   text_sensor::TextSensor *machine_data_sensor_{nullptr};
