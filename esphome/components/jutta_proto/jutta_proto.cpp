@@ -9,6 +9,7 @@
 #include <limits>
 #include <sstream>
 #include <utility>
+#include <unordered_set>
 
 #include "esphome/core/application.h"
 #include "esphome/core/time.h"
@@ -29,6 +30,9 @@ constexpr uint32_t kXmlRxTimeoutMs = 1000;
 constexpr uint32_t kInterCmdGapMs = 120;
 constexpr uint32_t kXmlQuietMs = 120;
 constexpr uint32_t kCycleSleepMs = 2000;
+constexpr uint32_t kSettingsRefreshMs = 600000;
+constexpr uint32_t kErrorPollIntervalMs = 5000;
+constexpr uint32_t kCommandTimeoutMs = 1500;
 
 constexpr double XML_COUNTER_MIN = 0.0;
 constexpr double XML_COUNTER_MAX = 1'000'000.0;
@@ -225,6 +229,8 @@ void JuraComponent::loop() {
 
   this->process_machine_data_query();
   this->process_xml_polling();
+  this->poll_settings_once_();
+  this->poll_error_cycle_();
 }
 
 void JuraComponent::dump_config() {
@@ -904,6 +910,22 @@ void JuraComponent::add_configured_xml_sensor(const std::string &field, sensor::
   }
 }
 
+void JuraComponent::register_setting_sensor(const std::string &id, sensor::Sensor *sensor) {
+  if (id.empty() || sensor == nullptr) {
+    return;
+  }
+  this->setting_sensors_[id] = sensor;
+  this->settings_entities_created_ = false;
+}
+
+void JuraComponent::register_setting_text_sensor(const std::string &id, text_sensor::TextSensor *sensor) {
+  if (id.empty() || sensor == nullptr) {
+    return;
+  }
+  this->setting_text_sensors_[id] = sensor;
+  this->settings_entities_created_ = false;
+}
+
 void JuraComponent::publish_xml_stats_() {
   if (!this->enable_xml_poll_) {
     return;
@@ -1091,6 +1113,8 @@ bool JuraComponent::ensure_xml_mapping_loaded_() {
 
   std::string xml_source(this->xml_mapping_data_, this->xml_mapping_length_);
   bool valid = load_mapping_from_string(xml_source);
+  load_settings_from_xml(xml_source);
+  load_errors_from_xml(xml_source);
   this->xml_mapping_ = get_xml_mapping();
   this->xml_mapping_loaded_ = true;
   this->xml_mapping_logged_ = false;
@@ -1098,6 +1122,10 @@ bool JuraComponent::ensure_xml_mapping_loaded_() {
   this->xml_sensor_meta_.clear();
   this->tgc0_filters_.clear();
   this->xml_missing_sensor_logged_.clear();
+  this->settings_entities_created_ = false;
+  this->settings_boot_polled_ = false;
+  this->last_error_code_ = 0;
+  this->errors_entities_created_ = false;
   this->log_xml_mapping_status_();
   if (this->xml_mapping_.valid) {
     this->ensure_xml_sensors_created_();
@@ -1493,6 +1521,259 @@ void JuraComponent::handle_xml_timeout_(XmlPollState next_state, const char *lab
 
 void JuraComponent::prepare_tgc0_request_() {
   // Keine zusätzlichen Flush-Operationen während des XML-Pollings.
+}
+
+void JuraComponent::ensure_setting_entities_created_() {
+  if (this->settings_entities_created_) {
+    return;
+  }
+  this->setting_descs_.clear();
+  const auto &settings = get_settings();
+  for (const auto &desc : settings) {
+    if (!desc.id.empty()) {
+      this->setting_descs_[desc.id] = desc;
+    }
+  }
+  this->settings_entities_created_ = true;
+}
+
+bool JuraComponent::query_setting_command_(const std::string &command, std::vector<uint8_t> &decoded) {
+  decoded.clear();
+  if (command.empty()) {
+    return false;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return false;
+  }
+  std::string cmd = command;
+  if (cmd.find("\r\n") == std::string::npos) {
+    cmd.append("\r\n");
+  }
+  auto response = this->coffee_maker_->connection->write_decoded_with_response(
+      cmd, std::chrono::milliseconds{kCommandTimeoutMs});
+  if (response == nullptr) {
+    ESP_LOGW(TAG, "Einstellungspoll: keine Antwort für %s", command.c_str());
+    return false;
+  }
+  std::string payload = *response;
+  payload.erase(std::remove(payload.begin(), payload.end(), '\r'), payload.end());
+  payload.erase(std::remove(payload.begin(), payload.end(), '\n'), payload.end());
+  std::string filtered;
+  filtered.reserve(payload.size());
+  for (unsigned char c : payload) {
+    if (!std::isspace(c)) {
+      filtered.push_back(static_cast<char>(c));
+    }
+  }
+  for (std::size_t i = 0; i + 1 < filtered.size(); i += 2) {
+    std::string byte_hex = filtered.substr(i, 2);
+    char *end = nullptr;
+    auto value = std::strtoul(byte_hex.c_str(), &end, 16);
+    if (end == byte_hex.c_str()) {
+      decoded.clear();
+      break;
+    }
+    decoded.push_back(static_cast<uint8_t>(value));
+  }
+  if (decoded.empty() && !filtered.empty()) {
+    decoded.assign(filtered.begin(), filtered.end());
+  }
+  return !decoded.empty();
+}
+
+bool JuraComponent::query_error_command_(const std::string &command, std::vector<uint8_t> &decoded) {
+  return this->query_setting_command_(command, decoded);
+}
+
+void JuraComponent::publish_setting_value_(const SettingDesc &desc, float value, const std::string &raw_text) {
+  if (desc.type != SettingValueType::String) {
+    auto it = this->setting_sensors_.find(desc.id);
+    if (it != this->setting_sensors_.end() && it->second != nullptr) {
+      it->second->publish_state(value);
+    }
+  }
+  auto text_it = this->setting_text_sensors_.find(desc.id);
+  if (text_it != this->setting_text_sensors_.end() && text_it->second != nullptr) {
+    text_it->second->publish_state(raw_text);
+  }
+}
+
+void JuraComponent::poll_settings_refresh_() {
+  this->ensure_setting_entities_created_();
+  if (this->setting_descs_.empty()) {
+    return;
+  }
+  std::unordered_map<std::string, std::vector<uint8_t>> command_cache;
+  std::unordered_set<std::string> failed_commands;
+
+  auto get_command_payload = [&](const std::string &command) -> const std::vector<uint8_t> * {
+    if (command.empty()) {
+      return nullptr;
+    }
+    if (failed_commands.find(command) != failed_commands.end()) {
+      return nullptr;
+    }
+    auto cache_it = command_cache.find(command);
+    if (cache_it != command_cache.end()) {
+      return &cache_it->second;
+    }
+    std::vector<uint8_t> decoded;
+    if (!this->query_setting_command_(command, decoded)) {
+      failed_commands.insert(command);
+      return nullptr;
+    }
+    auto inserted = command_cache.emplace(command, std::move(decoded));
+    return &inserted.first->second;
+  };
+
+  auto format_numeric_text = [](float value) -> std::string {
+    char buffer[32];
+    int written = std::snprintf(buffer, sizeof(buffer), "%.6f", static_cast<double>(value));
+    if (written < 0) {
+      return std::to_string(static_cast<double>(value));
+    }
+    std::string text(buffer, static_cast<size_t>(written));
+    auto dot = text.find('.');
+    if (dot != std::string::npos) {
+      while (!text.empty() && text.back() == '0') {
+        text.pop_back();
+      }
+      if (!text.empty() && text.back() == '.') {
+        text.pop_back();
+      }
+      if (text.empty()) {
+        text = "0";
+      }
+    }
+    return text;
+  };
+
+  for (const auto &entry : this->setting_descs_) {
+    const auto &desc = entry.second;
+    if (desc.source_cmd.empty()) {
+      continue;
+    }
+    const auto *decoded_ptr = get_command_payload(desc.source_cmd);
+    if (decoded_ptr == nullptr) {
+      continue;
+    }
+    const auto &decoded = *decoded_ptr;
+    if (desc.offset + desc.width > decoded.size()) {
+      ESP_LOGW(TAG, "Einstellung %s: Antwort zu kurz (offset=%u width=%u size=%u)", desc.id.c_str(),
+               static_cast<unsigned>(desc.offset), static_cast<unsigned>(desc.width),
+               static_cast<unsigned>(decoded.size()));
+      continue;
+    }
+    const uint8_t *ptr = decoded.data() + desc.offset;
+    std::uint64_t raw = 0;
+    for (std::size_t i = 0; i < desc.width; ++i) {
+      raw = (raw << 8U) | static_cast<std::uint64_t>(ptr[i]);
+    }
+    float scaled = static_cast<float>(raw) * desc.scale;
+    std::string text_value;
+    switch (desc.type) {
+      case SettingValueType::Bool:
+        text_value = raw ? "on" : "off";
+        scaled = raw ? 1.0f : 0.0f;
+        break;
+      case SettingValueType::Enum:
+      case SettingValueType::U8:
+      case SettingValueType::U16:
+      case SettingValueType::U32:
+        text_value = format_numeric_text(scaled);
+        break;
+      case SettingValueType::String:
+        text_value.assign(reinterpret_cast<const char *>(ptr), desc.width);
+        auto zero_pos = text_value.find('\0');
+        if (zero_pos != std::string::npos) {
+          text_value.resize(zero_pos);
+        }
+        this->publish_setting_value_(desc, 0.0f, text_value);
+        continue;
+    }
+    this->publish_setting_value_(desc, scaled, text_value);
+  }
+}
+
+void JuraComponent::poll_settings_once_() {
+  if (!this->is_ready()) {
+    return;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return;
+  }
+  uint32_t now = esphome::millis();
+  if (!this->settings_boot_polled_) {
+    this->poll_settings_refresh_();
+    this->settings_boot_polled_ = true;
+    this->settings_next_refresh_ = now + kSettingsRefreshMs;
+    return;
+  }
+  if (this->settings_next_refresh_ != 0 && !time_reached(now, this->settings_next_refresh_)) {
+    return;
+  }
+  this->poll_settings_refresh_();
+  this->settings_next_refresh_ = now + kSettingsRefreshMs;
+}
+
+void JuraComponent::publish_error_state_(uint32_t code) {
+  if (this->error_code_sensor_ != nullptr) {
+    this->error_code_sensor_->publish_state(static_cast<float>(code));
+  }
+  bool has_error = code != 0;
+  if (this->error_active_sensor_ != nullptr) {
+    this->error_active_sensor_->publish_state(has_error);
+  }
+  const ErrorDesc *desc = find_error(code);
+  if (desc != nullptr) {
+    if (this->error_text_sensor_ != nullptr) {
+      this->error_text_sensor_->publish_state(desc->text);
+    }
+    if (this->error_severity_sensor_ != nullptr) {
+      this->error_severity_sensor_->publish_state(desc->severity);
+    }
+  } else {
+    if (this->error_text_sensor_ != nullptr) {
+      this->error_text_sensor_->publish_state(has_error ? "unbekannt" : "kein Fehler");
+    }
+    if (this->error_severity_sensor_ != nullptr) {
+      this->error_severity_sensor_->publish_state(has_error ? "unknown" : "none");
+    }
+  }
+  this->last_error_code_ = code;
+  this->errors_entities_created_ = true;
+}
+
+void JuraComponent::poll_error_cycle_() {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return;
+  }
+  if (!this->is_ready()) {
+    return;
+  }
+  uint32_t now = esphome::millis();
+  if (this->errors_next_poll_ != 0 && !time_reached(now, this->errors_next_poll_)) {
+    return;
+  }
+  this->errors_next_poll_ = now + kErrorPollIntervalMs;
+  std::string command = error_source_command();
+  if (command.empty()) {
+    return;
+  }
+  std::vector<uint8_t> decoded;
+  if (!this->query_error_command_(command, decoded)) {
+    return;
+  }
+  if (decoded.empty()) {
+    return;
+  }
+  uint32_t code = 0;
+  for (uint8_t byte : decoded) {
+    code = (code << 8U) | byte;
+  }
+  if (!this->errors_entities_created_ || code != this->last_error_code_) {
+    this->publish_error_state_(code);
+  }
 }
 
 void JuraComponent::start_brew(::jutta_proto::CoffeeMaker::coffee_t coffee) {
