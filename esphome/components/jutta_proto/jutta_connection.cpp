@@ -513,13 +513,7 @@ void JuttaConnection::reinject_decoded_front(const std::string& data) const {
 }
 
 bool JuttaConnection::read_line_until(std::string& line) {
-    auto trim_eol = [](std::string& value) {
-        while (!value.empty() && (value.back() == '\r' || value.back() == '\n')) {
-            value.pop_back();
-        }
-    };
     if (try_extract_line(this->response_line_buffer_, line)) {
-        trim_eol(line);
         ESP_LOGD(TAG, "Polled buffered response line: '%s'", format_printable(line).c_str());
         return true;
     }
@@ -536,7 +530,6 @@ bool JuttaConnection::read_line_until(std::string& line) {
              format_printable(this->response_line_buffer_).c_str());
 
     if (try_extract_line(this->response_line_buffer_, line)) {
-        trim_eol(line);
         ESP_LOGD(TAG, "Polled response line: '%s'", format_printable(line).c_str());
         return true;
     }
