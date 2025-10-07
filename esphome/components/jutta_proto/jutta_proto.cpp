@@ -469,10 +469,6 @@ void JuraComponent::process_handshake() {
         this->handshake_stage_ = HandshakeStage::DONE;
         this->handshake_buffer_.clear();
         this->handshake_deadline_ = 0;
-        this->handshake_settle_deadline_ = esphome::millis() + 250;
-        ESP_LOGD(TAG, "Handshake finished – settling for 250 ms");
-        this->connection_->reset_response_line_buffer();
-        this->connection_->reset_all_rx_buffers();
         if (this->enable_xml_poll_) {
           this->ensure_xml_mapping_loaded_();
         }
@@ -488,15 +484,9 @@ void JuraComponent::process_handshake() {
 
   if (this->handshake_stage_ == HandshakeStage::DONE && this->connection_ != nullptr &&
       this->coffee_maker_ == nullptr) {
-    uint32_t now = esphome::millis();
-    if (this->handshake_settle_deadline_ != 0 &&
-        static_cast<int32_t>(now - this->handshake_settle_deadline_) < 0) {
-      return;
-    }
     auto connection = std::move(this->connection_);
     this->coffee_maker_ = std::make_unique<::jutta_proto::CoffeeMaker>(std::move(connection));
     ESP_LOGI(TAG, "Coffee maker controller initialized.");
-    this->handshake_settle_deadline_ = 0;
     this->reset_xml_poll_state_();
   }
 }
@@ -507,7 +497,6 @@ void JuraComponent::restart_handshake(const char *reason) {
   }
   this->handshake_buffer_.clear();
   this->handshake_deadline_ = 0;
-  this->handshake_settle_deadline_ = 0;
   this->handshake_hello_request_sent_ = false;
   this->handshake_stage_ = HandshakeStage::HELLO;
   this->last_logged_stage_ = HandshakeStage::FAILED;

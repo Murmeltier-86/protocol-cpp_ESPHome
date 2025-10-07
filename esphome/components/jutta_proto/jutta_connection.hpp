@@ -302,10 +302,8 @@ class JuttaConnection {
     // Buffer for decoded bytes that were read ahead of the consumer.
     mutable std::deque<uint8_t> decoded_rx_buffer_{};
 
-    // Buffer for decoded bytes collected while looking for complete CR/LF-terminated lines.
+    // Buffer for decoded bytes collected while looking for complete CRLF-terminated lines.
     mutable std::string response_line_buffer_{};
-    // Timestamp of the most recent byte received for the current line (micros()).
-    mutable uint32_t response_line_last_rx_us_{0};
 
     void reinject_decoded_front(const std::string& data) const;
 

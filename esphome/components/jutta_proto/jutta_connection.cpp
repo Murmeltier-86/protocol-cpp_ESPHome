@@ -24,8 +24,6 @@ constexpr uint32_t JUTTA_TX_ECHO_WINDOW_MS = 200;
 constexpr uint8_t JUTTA_ENCODE_BASE = 0xFF;
 constexpr uint8_t JUTTA_BIT0_MASK = static_cast<uint8_t>(1u << 2);
 constexpr uint8_t JUTTA_BIT1_MASK = static_cast<uint8_t>(1u << 5);
-constexpr size_t RESPONSE_LINE_MAX_BYTES = 256;
-constexpr uint32_t RESPONSE_LINE_IDLE_TIMEOUT_US = 10000;
 std::string format_hex(const uint8_t* data, size_t length) {
     if (length == 0) {
         return "[]";
@@ -104,21 +102,14 @@ std::string format_printable(uint8_t byte) {
     return format_printable(&byte, 1);
 }
 
-void strip_trailing_newlines(std::string& line) {
-    while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) {
-        line.pop_back();
-    }
-}
-
 bool try_extract_line(std::string& buffer, std::string& line) {
-    auto newline = buffer.find('\n');
-    if (newline == std::string::npos) {
+    auto terminator = buffer.find("\r\n");
+    if (terminator == std::string::npos) {
         return false;
     }
 
-    line = buffer.substr(0, newline);
-    buffer.erase(0, newline + 1);
-    strip_trailing_newlines(line);
+    line = buffer.substr(0, terminator);
+    buffer.erase(0, terminator + 2);
     return true;
 }
 
@@ -528,46 +519,19 @@ bool JuttaConnection::read_line_until(std::string& line) {
     }
 
     std::vector<uint8_t> buffer;
-    bool have_chunk = read_decoded_unsafe(buffer) && !buffer.empty();
-    uint32_t now = esphome::micros();
-    if (this->response_line_last_rx_us_ == 0) {
-        this->response_line_last_rx_us_ = now;
-    }
-
-    if (have_chunk) {
-        std::string incoming = vec_to_string(buffer);
-        this->response_line_buffer_.append(incoming);
-        this->response_line_last_rx_us_ = now;
-        ESP_LOGD(TAG, "Received chunk while polling for response line: '%s' (hex %s) -> buffer '%s'",
-                 format_printable(incoming).c_str(), format_hex(buffer).c_str(),
-                 format_printable(this->response_line_buffer_).c_str());
-
-        if (try_extract_line(this->response_line_buffer_, line)) {
-            ESP_LOGD(TAG, "Polled response line: '%s'", format_printable(line).c_str());
-            return true;
-        }
-
-        if (this->response_line_buffer_.size() >= RESPONSE_LINE_MAX_BYTES) {
-            line = this->response_line_buffer_;
-            strip_trailing_newlines(line);
-            this->response_line_buffer_.clear();
-            ESP_LOGW(TAG, "Response line exceeded %zu bytes – forcing flush: '%s'",
-                     static_cast<size_t>(RESPONSE_LINE_MAX_BYTES), format_printable(line).c_str());
-            return true;
-        }
+    if (!read_decoded_unsafe(buffer) || buffer.empty()) {
         return false;
     }
 
-    if (!this->response_line_buffer_.empty()) {
-        if (static_cast<int32_t>(now - this->response_line_last_rx_us_) >=
-            static_cast<int32_t>(RESPONSE_LINE_IDLE_TIMEOUT_US)) {
-            line = this->response_line_buffer_;
-            strip_trailing_newlines(line);
-            this->response_line_buffer_.clear();
-            this->response_line_last_rx_us_ = now;
-            ESP_LOGD(TAG, "Idle timeout closed partial response line: '%s'", format_printable(line).c_str());
-            return true;
-        }
+    std::string incoming = vec_to_string(buffer);
+    this->response_line_buffer_.append(incoming);
+    ESP_LOGD(TAG, "Received chunk while polling for response line: '%s' (hex %s) -> buffer '%s'",
+             format_printable(incoming).c_str(), format_hex(buffer).c_str(),
+             format_printable(this->response_line_buffer_).c_str());
+
+    if (try_extract_line(this->response_line_buffer_, line)) {
+        ESP_LOGD(TAG, "Polled response line: '%s'", format_printable(line).c_str());
+        return true;
     }
 
     return false;
@@ -580,7 +544,6 @@ void JuttaConnection::reset_response_line_buffer() {
                  this->response_line_buffer_.size() == 1 ? "" : "s");
         this->response_line_buffer_.clear();
     }
-    this->response_line_last_rx_us_ = esphome::micros();
 }
 
 void JuttaConnection::tx_db_command(const std::string& ascii, bool flush) {
