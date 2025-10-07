@@ -245,14 +245,16 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     SLEEP
   };
   size_t xml_command_index_(XmlPollState state) const;
-  bool validate_xml_frame_(XmlPollState state, const std::vector<uint8_t> &decoded, bool had_crlf,
-                           size_t decoded_len, std::vector<uint8_t> &payload, size_t &expected_min_len,
-                           uint8_t &head0) const;
+  enum class XmlFrameValidationResult { Incomplete, Valid, Desync };
+  XmlFrameValidationResult validate_xml_frame_(XmlPollState state, const std::vector<uint8_t> &decoded,
+                                               bool had_crlf, size_t decoded_len, std::vector<uint8_t> &payload,
+                                               size_t &expected_min_len, uint8_t &head0) const;
   bool stage_counter_frame_(const XmlCommandMapping &mapping, const std::vector<uint8_t> &frame,
                             const char *command_label);
   bool process_valid_tgc0_frame_(const std::vector<uint8_t> &frame, bool stage_values);
-  bool should_retry_current_(XmlPollState wait_state, uint32_t now);
-  void handle_xml_failure_(XmlPollState wait_state, bool is_timeout, size_t decoded_len, uint32_t now);
+  bool should_retry_current_(XmlPollState wait_state, uint32_t now, bool force_retry);
+  enum class XmlFailureKind { Timeout, Invalid, Desync };
+  void handle_xml_failure_(XmlPollState wait_state, XmlFailureKind kind, size_t decoded_len, uint32_t now);
   void complete_command_success_(XmlPollState wait_state);
   bool xml_state_has_mapping_(XmlPollState state) const;
   const char *xml_state_command_(XmlPollState state) const;
@@ -262,6 +264,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void transition_to_state_(XmlPollState state, uint32_t now, uint32_t delay_ms = 0);
   bool send_xml_command_(const char *command, XmlPollState wait_state, uint32_t now);
   void handle_xml_timeout_(XmlPollState next_state, const char *label, uint32_t now);
+  void reset_xml_cipher_for_command_(const char *command);
+  void decrypt_xml_frame_(const char *command, std::vector<uint8_t> &frame);
   void poll_settings_once_();
   void poll_settings_refresh_();
   void poll_error_cycle_();
@@ -317,6 +321,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::array<uint8_t, XML_COMMAND_COUNT> xml_retry_count_{{0, 0, 0}};
   std::array<bool, XML_COMMAND_COUNT> xml_invalid_len_seen_{{false, false, false}};
   std::array<size_t, XML_COMMAND_COUNT> xml_last_invalid_len_{{0, 0, 0}};
+  std::array<uint8_t, XML_COMMAND_COUNT> xml_failure_streak_{{0, 0, 0}};
+  std::array<bool, XML_COMMAND_COUNT> xml_force_repeat_{{false, false, false}};
   uint8_t xml_tgc0_timeout_streak_{0};
   bool xml_skip_tgc0_{false};
   void prepare_tgc0_request_();
