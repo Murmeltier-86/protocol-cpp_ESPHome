@@ -91,6 +91,14 @@ std::string format_hex_string(const std::vector<uint8_t> &data) {
   return format_hex_string(data.data(), data.size(), true);
 }
 
+std::string strip_to_xml_start(const std::string &input) {
+  auto pos = input.find('<');
+  if (pos == std::string::npos) {
+    return {};
+  }
+  return input.substr(pos);
+}
+
 std::string format_hex_head(const std::vector<uint8_t> &data, std::size_t max_bytes) {
   if (data.empty() || max_bytes == 0) {
     return {};
@@ -731,29 +739,36 @@ const std::unordered_map<std::string, StatValue> &Stats::values() const { return
 
 bool load_mapping_from_string(const std::string &xml) {
   g_mapping = XmlMapping{};
-  bool tr32_found = parse_tr32_mapping(xml, g_mapping.tr32);
+  std::string source = strip_to_xml_start(xml);
+  if (source.empty()) {
+    ESP_LOGW(TAG, "XML Mapping enthält kein '<' – Eingabe verworfen");
+    g_mapping_loaded = true;
+    g_mapping.valid = false;
+    return false;
+  }
+  bool tr32_found = parse_tr32_mapping(source, g_mapping.tr32);
   bool tr32_has_fields = tr32_found && !g_mapping.tr32.empty();
   if (!tr32_has_fields) {
     g_mapping.tr32 = XmlCommandMapping{};
-    bool legacy_tr32 = parse_command_block(xml, "@tr:32", g_mapping.tr32);
+    bool legacy_tr32 = parse_command_block(source, "@tr:32", g_mapping.tr32);
     tr32_found = tr32_found || legacy_tr32;
     tr32_has_fields = legacy_tr32 && !g_mapping.tr32.empty();
   }
 
-  bool tg43_found = parse_textitem_mapping(xml, "@tg:43", "TG43", 2, 6, g_mapping.tg43);
+  bool tg43_found = parse_textitem_mapping(source, "@tg:43", "TG43", 2, 6, g_mapping.tg43);
   bool tg43_has_fields = tg43_found && !g_mapping.tg43.empty();
   if (!tg43_has_fields) {
     g_mapping.tg43 = XmlCommandMapping{};
-    bool legacy_tg43 = parse_command_block(xml, "@tg:43", g_mapping.tg43);
+    bool legacy_tg43 = parse_command_block(source, "@tg:43", g_mapping.tg43);
     tg43_found = tg43_found || legacy_tg43;
     tg43_has_fields = legacy_tg43 && !g_mapping.tg43.empty();
   }
 
-  bool tgc0_found = parse_textitem_mapping(xml, "@tg:c0", "TGC0", 4, 3, g_mapping.tgc0);
+  bool tgc0_found = parse_textitem_mapping(source, "@tg:c0", "TGC0", 4, 3, g_mapping.tgc0);
   bool tgc0_has_fields = tgc0_found && !g_mapping.tgc0.empty();
   if (!tgc0_has_fields) {
     g_mapping.tgc0 = XmlCommandMapping{};
-    bool legacy_tgc0 = parse_command_block(xml, "@tg:c0", g_mapping.tgc0);
+    bool legacy_tgc0 = parse_command_block(source, "@tg:c0", g_mapping.tgc0);
     tgc0_found = tgc0_found || legacy_tgc0;
     tgc0_has_fields = legacy_tgc0 && !g_mapping.tgc0.empty();
   }
