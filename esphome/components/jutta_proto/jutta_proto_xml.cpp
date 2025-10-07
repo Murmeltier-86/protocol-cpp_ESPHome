@@ -360,8 +360,10 @@ bool parse_field_tag(const std::string &tag_text, XmlCommandMapping &mapping) {
   double scale = field.scale;
   if (parse_double_attr(attrs, {"scale"}, scale)) {
     field.scale = scale;
+    field.has_scale = true;
   } else if (contains_percent_hint(field.name) || contains_percent_hint(field.label)) {
     field.scale = 0.01;
+    field.has_scale = true;
   }
   double add = field.add;
   if (parse_double_attr(attrs, {"offset_value", "bias", "add"}, add)) {

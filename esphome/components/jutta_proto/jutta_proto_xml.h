@@ -16,6 +16,7 @@ struct XmlField {
   std::size_t size{0};
   bool has_endian{false};
   bool little_endian{false};
+  bool has_scale{false};
   double scale{1.0};
   bool has_add{false};
   double add{0.0};
