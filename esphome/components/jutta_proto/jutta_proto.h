@@ -6,7 +6,6 @@
 #include <memory>
 #include <string>
 #include <string_view>
-#include <deque>
 #include <unordered_map>
 #include <vector>
 #include <limits>
@@ -141,6 +140,7 @@ struct XmlSensorMeta {
   bool is_tgc0{false};
   bool is_percent{false};
   uint32_t last_update_ms{0};
+  std::string label;
   std::string command_label;
 };
 
@@ -192,8 +192,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void register_xml_sensor_(const XmlField &field, XmlSensorKind kind, const char *command_label);
   sensor::Sensor *find_configured_sensor_(const std::string &name) const;
   void apply_sensor_metadata_(const std::string &name, sensor::Sensor *sensor);
-  bool stage_tgc0_value_(const std::string &name, const std::string &label, float filtered_value,
-                         uint16_t header_value, uint16_t encoded_value, uint16_t raw_value);
   bool decode_field_value_(const std::vector<uint8_t> &decoded, const XmlField &field, bool little_endian,
                            std::uint64_t &out) const;
   void handle_xml_state_machine_(uint32_t now);
@@ -212,14 +210,24 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     SLEEP
   };
   size_t xml_command_index_(XmlPollState state) const;
-  bool validate_xml_frame_(XmlPollState state, const std::vector<uint8_t> &decoded, bool had_crlf,
-                           size_t decoded_len, std::vector<uint8_t> &payload, size_t &expected_min_len,
-                           uint8_t &head0) const;
+  enum class XmlFrameAction { Accept, Retry, Skip };
+
+  bool extract_xml_payload_(const std::vector<uint8_t> &decoded, std::vector<uint8_t> &payload) const;
+  bool validate_xml_frame_(XmlPollState state, const std::vector<uint8_t> &payload, size_t &expected_min_len,
+                           uint8_t &head0, XmlFrameAction &action, const char *&reason) const;
   bool stage_counter_frame_(const XmlCommandMapping &mapping, const std::vector<uint8_t> &frame,
-                            const char *command_label);
-  bool process_valid_tgc0_frame_(const std::vector<uint8_t> &frame, bool stage_values);
+                            const char *command_label, const char **reason);
+  bool process_valid_tgc0_frame_(const std::vector<uint8_t> &frame, bool stage_values, const char **reason);
   bool should_retry_current_(XmlPollState wait_state, uint32_t now);
-  void handle_xml_failure_(XmlPollState wait_state, bool is_timeout, size_t decoded_len, uint32_t now);
+  void handle_xml_failure_(XmlPollState wait_state, bool is_timeout, size_t decoded_len, uint32_t now,
+                           const char *reason, bool force_skip = false);
+  std::string make_unique_id_(const std::string &field_name) const;
+  struct CounterFilterState {
+    bool has_last{false};
+    double last{0.0};
+  };
+  bool apply_counter_filter_(CounterFilterState &state, double value, const char **reason) const;
+  bool apply_tgc0_filter_(Tgc0FilterState &state, float value, const char **reason) const;
   void complete_command_success_(XmlPollState wait_state);
   bool xml_state_has_mapping_(XmlPollState state) const;
   const char *xml_state_command_(XmlPollState state) const;
@@ -262,10 +270,12 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   Stats xml_stats_{};
   std::unordered_map<std::string, sensor::Sensor *> xml_sensors_{};
   struct Tgc0FilterState {
-    std::deque<float> window;
-    uint8_t consecutive_valid{0};
-    bool logged_once{false};
+    bool has_published{false};
+    float published{0.0f};
+    bool has_pending{false};
+    float pending{0.0f};
   };
+  std::unordered_map<std::string, CounterFilterState> counter_filters_{};
   std::unordered_map<std::string, Tgc0FilterState> tgc0_filters_{};
   std::unordered_map<std::string, XmlSensorMeta> xml_sensor_meta_{};
   std::unordered_map<std::string, bool> xml_missing_sensor_logged_{};
@@ -274,6 +284,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::array<uint8_t, XML_COMMAND_COUNT> xml_retry_count_{{0, 0, 0}};
   std::array<bool, XML_COMMAND_COUNT> xml_invalid_len_seen_{{false, false, false}};
   std::array<size_t, XML_COMMAND_COUNT> xml_last_invalid_len_{{0, 0, 0}};
+  std::array<size_t, XML_COMMAND_COUNT> xml_last_payload_len_{{0, 0, 0}};
   uint8_t xml_tgc0_timeout_streak_{0};
   bool xml_skip_tgc0_{false};
   void prepare_tgc0_request_();
