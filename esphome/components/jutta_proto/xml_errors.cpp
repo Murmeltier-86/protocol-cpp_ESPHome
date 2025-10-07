@@ -49,6 +49,14 @@ std::string trim_copy(std::string value) {
   return value;
 }
 
+std::string strip_to_xml_start(const std::string &input) {
+  auto pos = input.find('<');
+  if (pos == std::string::npos) {
+    return {};
+  }
+  return input.substr(pos);
+}
+
 AttributeMap parse_attributes(const std::string &tag_text) {
   AttributeMap map;
   static const std::regex attr_regex(R"(([A-Za-z0-9_:\-]+)\s*=\s*\"([^\"]*)\")");
@@ -120,22 +128,27 @@ std::string g_error_source_cmd;
 bool load_errors_from_xml(const std::string &xml_content) {
   g_errors.clear();
   g_error_source_cmd.clear();
-  std::string lower = to_lower_copy(xml_content);
+  std::string source = strip_to_xml_start(xml_content);
+  if (source.empty()) {
+    ESP_LOGW(TAG, "XML enthält kein '<' – Errors verworfen");
+    return false;
+  }
+  std::string lower = to_lower_copy(source);
   std::string needle = "<errors";
   auto pos = lower.find(needle);
   if (pos != std::string::npos) {
     auto tag_end = lower.find('>', pos);
     if (tag_end != std::string::npos) {
-      std::string tag_text = xml_content.substr(pos, tag_end - pos + 1);
+      std::string tag_text = source.substr(pos, tag_end - pos + 1);
       auto attrs = parse_attributes(tag_text);
       g_error_source_cmd = attrs.get("source_cmd");
       trim(g_error_source_cmd);
     }
   }
   std::string block;
-  if (!extract_section(xml_content, "errors", block)) {
+  if (!extract_section(source, "errors", block)) {
     ESP_LOGW(TAG, "XML enthält keinen <Errors>-Block");
-    block = xml_content;
+    block = source;
   }
   for_each_error_tag(block, [](const std::string &tag_text) {
     auto attrs = parse_attributes(tag_text);
