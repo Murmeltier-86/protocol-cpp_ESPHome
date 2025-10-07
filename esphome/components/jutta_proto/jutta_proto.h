@@ -113,6 +113,31 @@ class TextSensor {
 }  // namespace esphome
 #endif
 #undef ESPHOME_JUTTA_TEXT_SENSOR_STUB
+
+#if defined(__has_include)
+#if __has_include("esphome/components/binary_sensor/binary_sensor.h")
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#else
+#define ESPHOME_JUTTA_BINARY_SENSOR_STUB
+#endif
+#else
+#define ESPHOME_JUTTA_BINARY_SENSOR_STUB
+#endif
+
+#ifdef ESPHOME_JUTTA_BINARY_SENSOR_STUB
+namespace esphome {
+namespace binary_sensor {
+
+class BinarySensor {
+ public:
+  virtual ~BinarySensor() = default;
+  virtual void publish_state(bool) {}
+};
+
+}  // namespace binary_sensor
+}  // namespace esphome
+#endif
+#undef ESPHOME_JUTTA_BINARY_SENSOR_STUB
 #include "esphome/components/uart/uart.h"
 
 #include "coffee_maker.hpp"
@@ -120,6 +145,8 @@ class TextSensor {
 #include "jutta_connection.hpp"
 #include "jutta_commands.hpp"
 #include "jutta_proto_xml.h"
+#include "xml_settings.hpp"
+#include "xml_errors.hpp"
 
 namespace esphome {
 namespace jutta_component {
@@ -170,6 +197,12 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   }
   void set_xml_poll_interval(uint32_t interval_ms) { this->xml_poll_interval_ms_ = interval_ms; }
   void add_configured_xml_sensor(const std::string &field, sensor::Sensor *sensor);
+  void register_setting_sensor(const std::string &id, sensor::Sensor *sensor);
+  void register_setting_text_sensor(const std::string &id, text_sensor::TextSensor *sensor);
+  void set_error_code_sensor(sensor::Sensor *sensor) { this->error_code_sensor_ = sensor; }
+  void set_error_text_sensor(text_sensor::TextSensor *sensor) { this->error_text_sensor_ = sensor; }
+  void set_error_severity_sensor(text_sensor::TextSensor *sensor) { this->error_severity_sensor_ = sensor; }
+  void set_error_active_sensor(binary_sensor::BinarySensor *sensor) { this->error_active_sensor_ = sensor; }
 
  protected:
   enum class HandshakeStage { IDLE, HELLO, SEND_T1, WAIT_T2, SEND_T2, WAIT_T3, SEND_T3, DONE, FAILED };
@@ -227,6 +260,14 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void transition_to_state_(XmlPollState state, uint32_t now, uint32_t delay_ms = 0);
   bool send_xml_command_(const char *command, XmlPollState wait_state, uint32_t now);
   void handle_xml_timeout_(XmlPollState next_state, const char *label, uint32_t now);
+  void poll_settings_once_();
+  void poll_settings_refresh_();
+  void poll_error_cycle_();
+  void ensure_setting_entities_created_();
+  void publish_setting_value_(const SettingDesc &desc, float value, const std::string &raw_text);
+  void publish_error_state_(uint32_t code);
+  bool query_setting_command_(const std::string &command, std::vector<uint8_t> &decoded);
+  bool query_error_command_(const std::string &command, std::vector<uint8_t> &decoded);
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
   std::unique_ptr<::jutta_proto::CoffeeMaker> coffee_maker_;
@@ -277,6 +318,20 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint8_t xml_tgc0_timeout_streak_{0};
   bool xml_skip_tgc0_{false};
   void prepare_tgc0_request_();
+
+  bool settings_boot_polled_{false};
+  uint32_t settings_next_refresh_{0};
+  uint32_t errors_next_poll_{0};
+  sensor::Sensor *error_code_sensor_{nullptr};
+  text_sensor::TextSensor *error_text_sensor_{nullptr};
+  text_sensor::TextSensor *error_severity_sensor_{nullptr};
+  binary_sensor::BinarySensor *error_active_sensor_{nullptr};
+  std::unordered_map<std::string, sensor::Sensor *> setting_sensors_{};
+  std::unordered_map<std::string, text_sensor::TextSensor *> setting_text_sensors_{};
+  std::unordered_map<std::string, SettingDesc> setting_descs_{};
+  bool settings_entities_created_{false};
+  bool errors_entities_created_{false};
+  uint32_t last_error_code_{0};
 };
 
 class StartBrewAction : public esphome::Action<> {
