@@ -103,23 +103,14 @@ std::string format_printable(uint8_t byte) {
 }
 
 bool try_extract_line(std::string& buffer, std::string& line) {
-    auto lf_pos = buffer.find('\n');
-    if (lf_pos == std::string::npos) {
+    auto terminator = buffer.find("\r\n");
+    if (terminator == std::string::npos) {
         return false;
     }
-    size_t end = lf_pos;
-    if (end > 0 && buffer[end - 1] == '\r') {
-        --end;
-    }
-    line.assign(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(end));
-    buffer.erase(0, lf_pos + 1);
-    return true;
-}
 
-void trim_trailing_crlf(std::string& line) {
-    while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) {
-        line.pop_back();
-    }
+    line = buffer.substr(0, terminator);
+    buffer.erase(0, terminator + 2);
+    return true;
 }
 
 inline bool is_printable_ascii(uint8_t byte) {
@@ -524,20 +515,7 @@ void JuttaConnection::reinject_decoded_front(const std::string& data) const {
 bool JuttaConnection::read_line_until(std::string& line) {
     if (try_extract_line(this->response_line_buffer_, line)) {
         ESP_LOGD(TAG, "Polled buffered response line: '%s'", format_printable(line).c_str());
-        this->response_line_last_activity_us_ = esphome::micros();
         return true;
-    }
-
-    auto now_us = esphome::micros();
-    if (!this->response_line_buffer_.empty() && this->response_line_last_activity_us_ != 0) {
-        if (static_cast<int32_t>(now_us - this->response_line_last_activity_us_ - JUTTA_LINE_IDLE_US) >= 0) {
-            line = this->response_line_buffer_;
-            trim_trailing_crlf(line);
-            this->response_line_buffer_.clear();
-            this->response_line_last_activity_us_ = now_us;
-            ESP_LOGD(TAG, "Polled idle-terminated response line: '%s'", format_printable(line).c_str());
-            return true;
-        }
     }
 
     std::vector<uint8_t> buffer;
@@ -545,8 +523,6 @@ bool JuttaConnection::read_line_until(std::string& line) {
         return false;
     }
 
-    now_us = esphome::micros();
-    this->response_line_last_activity_us_ = now_us;
     std::string incoming = vec_to_string(buffer);
     this->response_line_buffer_.append(incoming);
     ESP_LOGD(TAG, "Received chunk while polling for response line: '%s' (hex %s) -> buffer '%s'",
@@ -555,15 +531,6 @@ bool JuttaConnection::read_line_until(std::string& line) {
 
     if (try_extract_line(this->response_line_buffer_, line)) {
         ESP_LOGD(TAG, "Polled response line: '%s'", format_printable(line).c_str());
-        this->response_line_last_activity_us_ = esphome::micros();
-        return true;
-    }
-
-    if (this->response_line_buffer_.size() >= JUTTA_LINE_MAX) {
-        line.swap(this->response_line_buffer_);
-        trim_trailing_crlf(line);
-        ESP_LOGW(TAG, "Response line exceeded %u bytes – forcing close", static_cast<unsigned>(JUTTA_LINE_MAX));
-        this->response_line_last_activity_us_ = esphome::micros();
         return true;
     }
 
@@ -577,7 +544,6 @@ void JuttaConnection::reset_response_line_buffer() {
                  this->response_line_buffer_.size() == 1 ? "" : "s");
         this->response_line_buffer_.clear();
     }
-    this->response_line_last_activity_us_ = 0;
 }
 
 void JuttaConnection::tx_db_command(const std::string& ascii, bool flush) {

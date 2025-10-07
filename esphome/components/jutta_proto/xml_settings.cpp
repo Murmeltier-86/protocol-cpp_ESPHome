@@ -49,14 +49,6 @@ std::string trim_copy(std::string value) {
   return value;
 }
 
-std::string strip_to_xml_start(const std::string &input) {
-  auto pos = input.find('<');
-  if (pos == std::string::npos) {
-    return {};
-  }
-  return input.substr(pos);
-}
-
 AttributeMap parse_attributes(const std::string &tag_text) {
   AttributeMap map;
   static const std::regex attr_regex(R"(([A-Za-z0-9_:\-]+)\s*=\s*\"([^\"]*)\")");
@@ -211,15 +203,10 @@ bool g_settings_loaded = false;
 bool load_settings_from_xml(const std::string &xml_content) {
   g_settings.clear();
   g_settings_loaded = true;
-  std::string source = strip_to_xml_start(xml_content);
-  if (source.empty()) {
-    ESP_LOGW(TAG, "XML enthält kein '<' – Settings verworfen");
-    return false;
-  }
   std::string settings_block;
-  if (!extract_section(source, "settings", settings_block)) {
+  if (!extract_section(xml_content, "settings", settings_block)) {
     ESP_LOGW(TAG, "XML enthält keinen <Settings>-Block");
-    settings_block = source;
+    settings_block = xml_content;
   }
   for_each_setting_tag(settings_block, [](const std::string &tag) {
     SettingDesc desc;

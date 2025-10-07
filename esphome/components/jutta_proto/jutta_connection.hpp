@@ -8,13 +8,6 @@
 #include <vector>
 #include <deque>
 
-#ifndef JUTTA_LINE_MAX
-#define JUTTA_LINE_MAX 256
-#endif
-#ifndef JUTTA_LINE_IDLE_US
-#define JUTTA_LINE_IDLE_US 10000
-#endif
-
 #include "serial_connection.hpp"
 
 //---------------------------------------------------------------------------
@@ -109,10 +102,8 @@ class JuttaConnection {
                                                                  std::chrono::milliseconds{5000});
 
     /**
-     * Reads the next CR/LF terminated response line if available.
-     * A line is also returned if the input stayed idle for JUTTA_LINE_IDLE_US microseconds
-     * or if it exceeds JUTTA_LINE_MAX bytes.
-     * Returns true if a complete line became available and stores it in "line" without trailing CR/LF.
+     * Reads the next CRLF-terminated response line if available.
+     * Returns true if a complete line became available and stores it in "line" without the trailing CRLF.
      * Returns false when no complete line has been received yet.
      */
     bool read_line_until(std::string& line);
@@ -311,9 +302,8 @@ class JuttaConnection {
     // Buffer for decoded bytes that were read ahead of the consumer.
     mutable std::deque<uint8_t> decoded_rx_buffer_{};
 
-    // Buffer for decoded bytes collected while looking for complete lines.
+    // Buffer for decoded bytes collected while looking for complete CRLF-terminated lines.
     mutable std::string response_line_buffer_{};
-    mutable uint32_t response_line_last_activity_us_{0};
 
     void reinject_decoded_front(const std::string& data) const;
 

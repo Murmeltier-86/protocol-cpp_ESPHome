@@ -33,7 +33,6 @@ constexpr uint32_t kTr32InterCmdGapMs = 220;
 constexpr uint32_t kXmlQuietMs = 120;
 constexpr uint32_t kXmlQuietTr32Ms = 220;
 constexpr uint32_t kCycleSleepMs = 2000;
-constexpr uint32_t kXmlTimeoutBackoffMs = 300;
 constexpr uint32_t kSettingsRefreshMs = 600000;
 constexpr uint32_t kErrorPollIntervalMs = 5000;
 constexpr uint32_t kCommandTimeoutMs = 1500;
@@ -467,16 +466,9 @@ void JuraComponent::process_handshake() {
       ESP_LOGD(TAG, "SEND_T3: sending '@t3\\r\\n' to finish handshake.");
       if (this->connection_->write_decoded("@t3\r\n")) {
         ESP_LOGI(TAG, "Handshake finished successfully.");
-        ESP_LOGD(TAG, "Handshake finished – settling before first poll");
-        esphome::delay(250);
-        this->connection_->reset_all_rx_buffers();
-        this->connection_->reset_response_line_buffer();
         this->handshake_stage_ = HandshakeStage::DONE;
         this->handshake_buffer_.clear();
         this->handshake_deadline_ = 0;
-        uint32_t settle_deadline = esphome::millis() + 250;
-        this->xml_next_poll_ = settle_deadline;
-        this->xml_next_action_ms_ = settle_deadline;
         if (this->enable_xml_poll_) {
           this->ensure_xml_mapping_loaded_();
         }
@@ -893,16 +885,7 @@ void JuraComponent::handle_xml_failure_(XmlPollState wait_state, bool is_timeout
   this->xml_deadline_ms_ = 0;
   this->xml_rx_buffer_.clear();
 
-  uint32_t extra_delay = is_timeout ? kXmlTimeoutBackoffMs : 0;
-
   if (this->should_retry_current_(wait_state, now)) {
-    if (is_timeout) {
-      if (this->xml_next_action_ms_ != 0) {
-        this->xml_next_action_ms_ += extra_delay;
-      } else {
-        this->xml_next_action_ms_ = now + extra_delay;
-      }
-    }
     return;
   }
   this->xml_retry_count_[index] = 0;
@@ -917,7 +900,7 @@ void JuraComponent::handle_xml_failure_(XmlPollState wait_state, bool is_timeout
     this->xml_next_poll_ = deadline;
     this->transition_to_state_(XmlPollState::SLEEP, now);
   } else {
-    this->transition_to_state_(next_state, now, this->inter_command_gap_after_(wait_state) + extra_delay);
+    this->transition_to_state_(next_state, now, this->inter_command_gap_after_(wait_state));
   }
 }
 
@@ -1579,10 +1562,6 @@ void JuraComponent::handle_xml_timeout_(XmlPollState next_state, const char *lab
     label = "?";
   }
   ESP_LOGW(TAG, "RX_DB timeout %s", label);
-  if (this->coffee_maker_ != nullptr && this->coffee_maker_->connection != nullptr) {
-    this->coffee_maker_->connection->reset_db_rx_buffer();
-    this->coffee_maker_->connection->drain_serial_input_nonblocking();
-  }
   this->handle_xml_failure_(this->xml_state_, true, 0, now);
 }
 
