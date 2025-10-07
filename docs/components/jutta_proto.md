@@ -44,16 +44,15 @@ generic names.
 
 - **Polling-Ablauf.** Alle 30 s werden die DB-Kommandos strikt sequenziell gesendet: `@TR:32`, anschließend `@TG:43` und
   zum Schluss `@TG:C0`. Zwischen zwei Kommandos gibt es keine parallelen Übertragungen. Nach jedem TX wartet der Treiber
-  150 ms ruhig, bevor er mit dem Empfang fortfährt. Jede Anfrage hat 1000 ms Zeit für eine Antwort und genau einen Retry,
+  120 ms ruhig, bevor er mit dem Empfang fortfährt. Jede Anfrage hat 1000 ms Zeit für eine Antwort und genau einen Retry,
   danach geht es mit dem nächsten Kommando weiter.
-- **Validierung.** Ein Frame gilt als gültig, sobald der DB-Decoder nach dem letzten CRLF einen Payload liefert, der mit
-  `0x26` beginnt und die strikten Längenregeln erfüllt: `@TR:32` und `@TG:43` müssen exakt 21 Byte Nutzdaten besitzen
-  (20/22 Byte → Retry, alles andere → Skip), `@TG:C0` benötigt mindestens 13 Byte. Frames ohne CRLF gelten als
-  `len_mismatch` und werden erneut angefordert.
+- **Validierung.** Ein Frame gilt als gültig, sobald der DB-Decoder Nutzdaten liefert, die mindestens so lang wie das
+  Mapping vorgeben (TR32 ≥ 21 Byte, TG43/TGC0 ≥ 13 Byte) und mit `0x26` beginnen. Ein CRLF ist nicht mehr erforderlich;
+  das Frame-Ende wird zusätzlich per 15 ms Byte-Gap erkannt. Überlange Frames werden akzeptiert, es werden nur die
+  gemappten Felder ausgewertet.
 - **Werteinterpretation.** `@TR:32` und `@TG:43` bleiben unveränderte Ganzzahlzähler (`state_class: total_increasing`).
-  `@TG:C0` liefert Prozentwerte, deren Low-Byte (`raw & 0xFF`) als 0…100 % interpretiert wird. Werte außerhalb dieses
-  Bereichs verwerfen den gesamten Frame und lösen den einmaligen Retry aus. Es erfolgt keine zusätzliche Skalierung oder
-  Clamping.
+  `@TG:C0` liefert Prozentwerte gemäß Mapping-Skalierung. Werte kleiner 0 % oder größer 130 % verwerfen den gesamten Frame
+  und lösen den einmaligen Retry aus. Gültige Prozentwerte werden direkt veröffentlicht – ohne Clamping auf 100 %.
 - **Bestandteile, die bleiben.** Legacy-Handshakes und UART-Grundkonfigurationen bleiben unverändert. Es werden keine
   zusätzlichen Flushes innerhalb des XML-Zyklus durchgeführt; Ruhezeit und Byte-Gap sorgen für stabile, sauber getrennte
   Frames.
@@ -76,19 +75,19 @@ Die zyklische XML-Abfrage liest zusätzlich zu den Legacy-Kommandos die Status- 
 verarbeiten kann, gelten die folgenden Eckpunkte:
 
 - **Ziel.** Die J.O.E.-XML liefert Wartungszähler und Füllstände; diese werden zyklisch dekodiert und als Sensoren mit
-  stabiler `unique_id` veröffentlicht. Legacy-Handshake und klassische UART-Befehle bleiben unverändert.
+  eindeutiger `unique_id` im Schema `Jura E6 <Label>` veröffentlicht. Legacy-Handshake und klassische UART-Befehle bleiben
+  unverändert.
 - **XML-Quelle.** Die Mapping-Datei wird wie bisher per YAML in das Firmware-Image eingebunden und zur Laufzeit aus
   `/config/esphome/e6.xml` gelesen. Zusätzliche Dateisystem- oder `include`-Schritte sind nicht nötig.
 - **Sensoraufbau.** Für jedes aktivierte Feld legt die Firmware beim Start einen numerischen Sensor an. Zähler verwenden
-  `state_class: total_increasing` und werden als Diagnose-Entitäten markiert, Prozent- und Messwerte nutzen
-  `state_class: measurement`. Die Genauigkeit richtet sich nach dem Skalierungsfaktor der XML, Prozentwerte erscheinen
-  beispielsweise mit einer Nachkommastelle.
-- **Plausibilität & Änderungserkennung.** Zähler werden nur akzeptiert, wenn sie monoton steigen (Δ ≤ 1024) oder der
-  neue Wert exakt dem zuletzt bestätigten entspricht. Prozentwerte aus `@TG:C0` gelten als stabil, wenn die Änderung höchstens
-  5 Prozentpunkte beträgt oder zwei identische Frames nacheinander eintreffen. Frames außerhalb der zulässigen Bereiche
-  (`0…1.000.000` für Zähler, `0…100` % für Füllstände) werden verworfen und lösen einen Retry aus.
-- **Logging.** Für jedes valide Frame erscheint eine kompakte Zeile `XML <CMD> decoded_len=<n> ok`. Verworfenes wird mit
-  `reason=len_mismatch|percent_oob|non_monotonic|jitter` protokolliert.
+  `state_class: total_increasing`, Prozent- und Messwerte `state_class: measurement`. Die Genauigkeit richtet sich nach dem
+  Skalierungsfaktor der XML, Prozentwerte erscheinen beispielsweise mit zwei Nachkommastellen.
+- **Plausibilität & Änderungserkennung.** Jeder Messwert wird nur veröffentlicht, wenn er sich seit der letzten Meldung
+  geändert hat und innerhalb plausibler Grenzen liegt. Zähler werden auf den Bereich `0…1.000.000` begrenzt, Prozent- und
+  Statuswerte auf `0,0…250,0`. Ausreißer (z. B. `2121187790`) werden im DEBUG-Log dokumentiert und verworfen.
+- **Logging.** Die Initialisierung protokolliert das geladene Mapping und die Anzahl der Sensoren. Für jeden veröffentlichen
+  Wert bleibt die bestehende DEBUG-Zeile mit Feldname und Wert erhalten; Längenabweichungen der Rohframes erscheinen nur
+  noch auf DEBUG-Level.
 
 #### Sensoraufbau im Detail
 
@@ -135,14 +134,14 @@ Assistant übergeben – Legacy-Funktionen sind davon unberührt.
 
 ### Robuste XML-Frames (CODEX)
 
-- **Harte Längenprüfung.** Nach dem letzten CRLF verbleibt nur der eigentliche Payload; das erste Byte muss `0x26` sein.
-  `@TR:32` und `@TG:43` werden exakt mit 21 Bytes akzeptiert (20/22 Byte → Retry, alles andere → Skip), `@TG:C0` benötigt
-  mindestens 13 Bytes. Frames ohne CRLF gelten als `len_mismatch`.
+- **Tolerante Länge.** Frames werden weiterhin bis zum CRLF-Terminator eingelesen. Abweichungen zwischen erwarteter und
+  tatsächlicher Länge führen nur noch zu einem DEBUG-Hinweis. Warnungen erscheinen ausschließlich dann, wenn der
+  Startmarker `0x26` fehlt oder der Frame kürzer als das benötigte Minimum ist.
 - **Offset-gesteuertes Parsing.** Die dekodierten Bytes werden strikt anhand der im Mapping hinterlegten Offsets, Breiten
   und Endianness interpretiert; überstehende Bytes am Frameende werden ignoriert.
-- **Sequenz & Ruhezeit.** Der Poll-Zyklus läuft strikt `@TR:32 → @TG:43 → @TG:C0`. Nach jedem Kommando folgt eine
-  nicht-blockierende Ruhezeit von 150 ms; die Antwort wartet maximal 1000 ms und bekommt genau einen Retry. Drei aufeinander-
-  folgende TGC0-Timeouts sorgen für einen Cool-off-Zyklus ohne Prozentabfrage.
+- **Stabiles Timing.** Vor jedem XML-Kommando wird der UART-Puffer komplett geleert. Zwischen den drei Abfragen liegt eine
+  nicht-blockierende Pause von 25 ms, das Einzelkommando-Timeout beträgt rund 1 s. Der globale Poll-Takt aus der YAML bleibt
+  unverändert.
 - **RX-Puffer.** Der bestehende Empfangspuffer (≥256 Byte) bleibt erhalten und verhindert, dass zusammenhängende Frames
   verloren gehen.
 

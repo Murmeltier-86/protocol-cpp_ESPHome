@@ -26,8 +26,8 @@ constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
 constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
 const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
 constexpr uint32_t kXmlRxTimeoutMs = 1000;
-constexpr uint32_t kInterCmdGapMs = 150;
-constexpr uint32_t kXmlQuietMs = 150;
+constexpr uint32_t kInterCmdGapMs = 120;
+constexpr uint32_t kXmlQuietMs = 120;
 constexpr uint32_t kCycleSleepMs = 2000;
 
 constexpr double XML_COUNTER_MIN = 0.0;
@@ -37,15 +37,9 @@ constexpr double XML_MEASUREMENT_MAX = 250.0;
 constexpr float XML_COUNTER_TOLERANCE = 0.5f;
 constexpr float XML_MEASUREMENT_TOLERANCE = 0.1f;
 constexpr bool TGC0_TRY_LITTLE_ENDIAN_FIRST = true;
-constexpr std::size_t kTR32FrameLength = 21;
-constexpr std::size_t kTG43FrameLength = 21;
+constexpr std::size_t kTR32MinFrameLength = 21;
+constexpr std::size_t kTG43MinFrameLength = 13;
 constexpr std::size_t kTGC0MinFrameLength = 13;
-constexpr float kTgc0MaxPercent = 100.0f;
-
-constexpr const char *kReasonLenMismatch = "len_mismatch";
-constexpr const char *kReasonPercentOob = "percent_oob";
-constexpr const char *kReasonNonMonotonic = "non_monotonic";
-constexpr const char *kReasonJitter = "jitter";
 
 int determine_accuracy(XmlSensorKind kind, double scale) {
   if (kind == XmlSensorKind::Counter) {
@@ -88,36 +82,6 @@ std::string format_printable_string(const std::string &value) {
     stream << format_printable_char(c);
   }
   return stream.str();
-}
-
-std::string trim_copy(const std::string &value) {
-  auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
-  std::string result = value;
-  result.erase(result.begin(),
-               std::find_if(result.begin(), result.end(), [&](unsigned char c) { return !is_space(c); }));
-  result.erase(std::find_if(result.rbegin(), result.rend(), [&](unsigned char c) { return !is_space(c); }).base(),
-               result.end());
-  return result;
-}
-
-std::string sanitize_unique_part(const std::string &value) {
-  std::string result;
-  bool last_was_underscore = false;
-  for (unsigned char c : value) {
-    if (std::isalnum(c) != 0) {
-      result.push_back(static_cast<char>(std::tolower(c)));
-      last_was_underscore = false;
-    } else if (!last_was_underscore) {
-      if (!result.empty()) {
-        result.push_back('_');
-      }
-      last_was_underscore = true;
-    }
-  }
-  while (!result.empty() && result.back() == '_') {
-    result.pop_back();
-  }
-  return result;
 }
 
 std::string format_hex_string(const std::string &value) {
@@ -655,7 +619,6 @@ void JuraComponent::start_new_xml_cycle_(uint32_t now) {
   this->xml_retry_count_.fill(0);
   this->xml_invalid_len_seen_.fill(false);
   this->xml_last_invalid_len_.fill(0);
-  this->xml_last_payload_len_.fill(0);
 }
 
 size_t JuraComponent::xml_command_index_(XmlPollState state) const {
@@ -678,54 +641,32 @@ size_t JuraComponent::xml_command_index_(XmlPollState state) const {
   return 0;
 }
 
-bool JuraComponent::extract_xml_payload_(const std::vector<uint8_t> &decoded, std::vector<uint8_t> &payload) const {
-  payload.clear();
-  if (decoded.size() < 2) {
-    return false;
-  }
-  int last_crlf = -1;
-  for (int i = static_cast<int>(decoded.size()) - 2; i >= 0; --i) {
-    if (decoded[static_cast<std::size_t>(i)] == '\r' && decoded[static_cast<std::size_t>(i + 1)] == '\n') {
-      last_crlf = i;
-      break;
-    }
-  }
-  if (last_crlf < 0) {
-    return false;
-  }
-  std::size_t payload_start = static_cast<std::size_t>(last_crlf + 2);
-  if (payload_start >= decoded.size()) {
-    return false;
-  }
-  payload.assign(decoded.begin() + payload_start, decoded.end());
-  return !payload.empty();
-}
-
-bool JuraComponent::validate_xml_frame_(XmlPollState state, const std::vector<uint8_t> &payload,
-                                        size_t &expected_min_len, uint8_t &head0, XmlFrameAction &action,
-                                        const char *&reason) const {
-  action = XmlFrameAction::Accept;
-  reason = kReasonLenMismatch;
+bool JuraComponent::validate_xml_frame_(XmlPollState state, const std::vector<uint8_t> &decoded, bool had_crlf,
+                                        size_t decoded_len, std::vector<uint8_t> &payload,
+                                        size_t &expected_min_len, uint8_t &head0) const {
+  (void) had_crlf;
   const XmlCommandMapping *mapping = nullptr;
   std::size_t minimum = 0;
   switch (state) {
     case XmlPollState::WAIT_TR32:
       mapping = &this->xml_mapping_.tr32;
-      minimum = kTR32FrameLength;
+      minimum = kTR32MinFrameLength;
       break;
     case XmlPollState::WAIT_TG43:
       mapping = &this->xml_mapping_.tg43;
-      minimum = kTG43FrameLength;
+      minimum = kTG43MinFrameLength;
       break;
     case XmlPollState::WAIT_TGC0:
       mapping = &this->xml_mapping_.tgc0;
       minimum = kTGC0MinFrameLength;
       break;
     default:
+      ESP_LOGW(TAG, "XML validate: unerwarteter Zustand %d", static_cast<int>(state));
       return false;
   }
 
   if (mapping == nullptr || mapping->empty()) {
+    ESP_LOGW(TAG, "XML %s: kein Mapping aktiv", this->xml_state_label_(state));
     return false;
   }
 
@@ -735,77 +676,50 @@ bool JuraComponent::validate_xml_frame_(XmlPollState state, const std::vector<ui
   }
   expected_min_len = std::max(expected_len, minimum);
 
-  if (payload.empty()) {
+  int start_index = -1;
+  for (std::size_t i = 0; i < decoded.size(); ++i) {
+    if (decoded[i] == 0x26) {
+      start_index = static_cast<int>(i);
+      break;
+    }
+  }
+  if (start_index < 0) {
+    ESP_LOGW(TAG, "XML %s: Startbyte 0x26 nicht gefunden (decoded_len=%u)", this->xml_state_label_(state),
+             static_cast<unsigned>(decoded.size()));
     return false;
   }
 
-  head0 = payload.front();
-  if (head0 != 0x26) {
-    return false;
-  }
+  payload.assign(decoded.begin() + start_index, decoded.end());
+  head0 = payload.empty() ? 0x00 : payload.front();
 
   std::size_t avail = payload.size();
   if (avail < expected_min_len) {
+    ESP_LOGW(TAG, "XML %s: decoded_len (%u) < expected_min_len (%u)", this->xml_state_label_(state),
+             static_cast<unsigned>(avail), static_cast<unsigned>(expected_min_len));
     return false;
   }
-
-  switch (state) {
-    case XmlPollState::WAIT_TR32:
-      if (avail != kTR32FrameLength) {
-        action = XmlFrameAction::Retry;
-        return false;
-      }
-      break;
-    case XmlPollState::WAIT_TG43:
-      if (avail == kTG43FrameLength) {
-        break;
-      }
-      if (avail == kTG43FrameLength - 1 || avail == kTG43FrameLength + 1) {
-        action = XmlFrameAction::Retry;
-      } else {
-        action = XmlFrameAction::Skip;
-      }
-      return false;
-    case XmlPollState::WAIT_TGC0:
-      if (avail < kTGC0MinFrameLength) {
-        action = XmlFrameAction::Retry;
-        return false;
-      }
-      break;
-    default:
-      break;
+  if (head0 != 0x26) {
+    ESP_LOGW(TAG, "XML %s: erstes Payload-Byte 0x%02X statt 0x26", this->xml_state_label_(state),
+             static_cast<unsigned>(head0));
+    return false;
   }
 
   const char *command = this->xml_state_command_(state);
   ESP_LOGD(TAG, "XML RX cmd=%s decoded_len=%u expected_min_len=%u head0=0x%02X", command,
-           static_cast<unsigned>(avail), static_cast<unsigned>(expected_min_len), static_cast<unsigned>(head0));
+           static_cast<unsigned>(decoded_len), static_cast<unsigned>(expected_min_len),
+           static_cast<unsigned>(head0));
   return true;
 }
 
 bool JuraComponent::stage_counter_frame_(const XmlCommandMapping &mapping, const std::vector<uint8_t> &frame,
-                                         const char *command_label, const char **reason) {
-  (void) command_label;
-  if (reason != nullptr) {
-    *reason = nullptr;
-  }
-  if (mapping.empty()) {
-    return true;
-  }
-  struct CounterCandidate {
-    std::string name;
-    double value{0.0};
-    std::string label;
-    CounterFilterState next_state;
-  };
-  std::vector<CounterCandidate> candidates;
-  candidates.reserve(mapping.fields.size());
-
+                                         const char *command_label) {
+  bool any = false;
   for (const auto &field : mapping.fields) {
     if (field.offset + field.size > frame.size()) {
-      if (reason != nullptr) {
-        *reason = kReasonLenMismatch;
-      }
-      return false;
+      ESP_LOGW(TAG, "XML %s Feld %s überläuft Frame (Offset=%u, Bytes=%u, Frame=%u)", command_label,
+               field.name.c_str(), static_cast<unsigned>(field.offset), static_cast<unsigned>(field.size),
+               static_cast<unsigned>(frame.size()));
+      continue;
     }
     std::uint64_t raw = 0;
     if (field.little_endian) {
@@ -821,220 +735,74 @@ bool JuraComponent::stage_counter_frame_(const XmlCommandMapping &mapping, const
     if (field.has_add) {
       value += field.add;
     }
-    auto &state_ref = this->counter_filters_[field.name];
-    CounterFilterState candidate_state = state_ref;
-    const char *local_reason = nullptr;
-    if (!this->apply_counter_filter_(candidate_state, value, &local_reason)) {
-      if (reason != nullptr && local_reason != nullptr) {
-        *reason = local_reason;
-      }
-      return false;
-    }
-    candidates.push_back(CounterCandidate{field.name, value, field.label, candidate_state});
+    ESP_LOGD(TAG, "XML field %s offset=%u size=%u endian=%s value=%.3f", field.name.c_str(),
+             static_cast<unsigned>(field.offset), static_cast<unsigned>(field.size),
+             field.little_endian ? "LE" : "BE", static_cast<double>(value));
+    this->xml_stats_.set_value(field.name, value, field.label);
+    any = true;
   }
-
-  for (const auto &candidate : candidates) {
-    this->counter_filters_[candidate.name] = candidate.next_state;
-    this->xml_stats_.set_value(candidate.name, candidate.value, candidate.label);
-  }
-  return !candidates.empty();
+  return any;
 }
 
-bool JuraComponent::process_valid_tgc0_frame_(const std::vector<uint8_t> &frame, bool stage_values,
-                                              const char **reason) {
-  if (reason != nullptr) {
-    *reason = nullptr;
-  }
+bool JuraComponent::process_valid_tgc0_frame_(const std::vector<uint8_t> &frame, bool stage_values) {
   const auto &mapping = this->xml_mapping_.tgc0;
   if (mapping.empty()) {
+    ESP_LOGW(TAG, "XML @TG:C0: kein Mapping aktiv");
     return true;
   }
-
-  struct Tgc0Candidate {
-    std::string name;
-    double value{0.0};
-    std::string label;
-    Tgc0FilterState next_state;
-  };
-  std::vector<Tgc0Candidate> candidates;
-  candidates.reserve(mapping.fields.size());
-
+  bool any_value = false;
   for (const auto &field : mapping.fields) {
     if (field.size < 4) {
+      ESP_LOGW(TAG, "XML @TG:C0 Feld %s ignoriert (nicht unterstützte Größe %u)", field.name.c_str(),
+               static_cast<unsigned>(field.size));
       continue;
     }
     if (field.offset + field.size > frame.size()) {
-      if (reason != nullptr) {
-        *reason = kReasonLenMismatch;
-      }
-      return false;
+      ESP_LOGW(TAG, "XML @TG:C0 Feld %s überläuft Frame (Offset=%u, Bytes=%u, Frame=%u)", field.name.c_str(),
+               static_cast<unsigned>(field.offset), static_cast<unsigned>(field.size),
+               static_cast<unsigned>(frame.size()));
+      continue;
     }
 
+    uint16_t header_value = frame[field.offset];
+    uint16_t encoded_value = frame[field.offset + 1];
     XmlField raw_field = field;
     raw_field.offset = field.offset + field.size - 2;
     raw_field.size = 2;
     bool little_endian = raw_field.has_endian ? raw_field.little_endian : TGC0_TRY_LITTLE_ENDIAN_FIRST;
     std::uint64_t raw_value = 0;
     if (!this->decode_field_value_(frame, raw_field, little_endian, raw_value)) {
-      if (reason != nullptr) {
-        *reason = kReasonLenMismatch;
-      }
+      continue;
+    }
+    double percent = static_cast<double>(raw_value) * field.scale;
+    if (field.has_add) {
+      percent += field.add;
+    }
+    if (!std::isfinite(percent)) {
+      auto &state = this->tgc0_filters_[field.name];
+      state.window.clear();
+      state.consecutive_valid = 0;
+      continue;
+    }
+    if (percent < 0.0 || percent > 130.0) {
+      ESP_LOGW(TAG, "XML @TG:C0 ungültig: %s raw=%llu percent=%.2f", field.name.c_str(),
+               static_cast<unsigned long long>(raw_value), percent);
       return false;
-    }
-
-    double parsed_value = 0.0;
-    bool apply_filter = false;
-    if (field.name == "tgc0_37") {
-      uint8_t raw_percent = static_cast<uint8_t>(raw_value & 0xFFu);
-      float percent = static_cast<float>(raw_percent);
-      if (percent < 0.0f || percent > kTgc0MaxPercent) {
-        if (reason != nullptr) {
-          *reason = kReasonPercentOob;
-        }
-        return false;
-      }
-      auto &state_ref = this->tgc0_filters_[field.name];
-      Tgc0FilterState next_state = state_ref;
-      const char *local_reason = nullptr;
-      if (!this->apply_tgc0_filter_(next_state, percent, &local_reason)) {
-        state_ref.has_pending = true;
-        state_ref.pending = percent;
-        if (reason != nullptr && local_reason != nullptr) {
-          *reason = local_reason;
-        }
-        return false;
-      }
-      apply_filter = true;
-      parsed_value = static_cast<double>(percent);
-      candidates.push_back(Tgc0Candidate{field.name, parsed_value, field.label, next_state});
-    } else {
-      double scaled = static_cast<double>(raw_value) * field.scale;
-      if (field.has_add) {
-        scaled += field.add;
-      }
-      if (!std::isfinite(scaled)) {
-        if (reason != nullptr) {
-          *reason = kReasonPercentOob;
-        }
-        return false;
-      }
-      parsed_value = scaled;
-      candidates.push_back(Tgc0Candidate{field.name, parsed_value, field.label, {}});
-    }
-
-    if (!apply_filter && !std::isfinite(parsed_value)) {
-      if (reason != nullptr) {
-        *reason = kReasonPercentOob;
-      }
-      return false;
-    }
-  }
-
-  bool staged_any = false;
-  for (auto &candidate : candidates) {
-    auto state_it = this->tgc0_filters_.find(candidate.name);
-    if (state_it != this->tgc0_filters_.end() && candidate.next_state.has_published) {
-      this->tgc0_filters_[candidate.name] = candidate.next_state;
-    } else if (candidate.next_state.has_published || candidate.next_state.has_pending) {
-      this->tgc0_filters_[candidate.name] = candidate.next_state;
     }
     if (stage_values) {
-      this->xml_stats_.set_value(candidate.name, candidate.value, candidate.label);
-      staged_any = true;
+      ESP_LOGD(TAG, "XML field %s offset=%u size=%u endian=%s value=%.2f", field.name.c_str(),
+               static_cast<unsigned>(field.offset), static_cast<unsigned>(field.size),
+               little_endian ? "LE" : "BE", percent);
+      if (this->stage_tgc0_value_(field.name, field.label, static_cast<float>(percent), header_value, encoded_value,
+                                  static_cast<uint16_t>(raw_value & 0xFFFFu))) {
+        any_value = true;
+      }
     }
   }
-
-  if (stage_values && !staged_any) {
+  if (stage_values && !any_value) {
     ESP_LOGW(TAG, "XML TGC0: keine gültigen Werte im Frame");
   }
   return true;
-}
-
-bool JuraComponent::apply_counter_filter_(CounterFilterState &state, double value, const char **reason) const {
-  if (reason != nullptr) {
-    *reason = nullptr;
-  }
-  if (!std::isfinite(value)) {
-    if (reason != nullptr) {
-      *reason = kReasonJitter;
-    }
-    return false;
-  }
-  double normalized = std::round(value);
-  if (!state.has_last) {
-    state.has_last = true;
-    state.last = normalized;
-    return true;
-  }
-  double delta = normalized - state.last;
-  if (delta == 0.0) {
-    state.last = normalized;
-    return true;
-  }
-  if (delta > 0.0) {
-    if (delta <= 1024.0) {
-      state.last = normalized;
-      return true;
-    }
-    if (reason != nullptr) {
-      *reason = kReasonJitter;
-    }
-    return false;
-  }
-  if (reason != nullptr) {
-    *reason = kReasonNonMonotonic;
-  }
-  return false;
-}
-
-bool JuraComponent::apply_tgc0_filter_(Tgc0FilterState &state, float value, const char **reason) const {
-  if (reason != nullptr) {
-    *reason = nullptr;
-  }
-  if (!state.has_published) {
-    state.has_published = true;
-    state.published = value;
-    state.has_pending = false;
-    return true;
-  }
-  float delta = std::fabs(value - state.published);
-  if (delta <= 5.0f) {
-    state.published = value;
-    state.has_pending = false;
-    return true;
-  }
-  if (state.has_pending && std::fabs(value - state.pending) <= 0.01f) {
-    state.published = value;
-    state.has_pending = false;
-    return true;
-  }
-  state.pending = value;
-  state.has_pending = true;
-  if (reason != nullptr) {
-    *reason = kReasonJitter;
-  }
-  return false;
-}
-
-std::string JuraComponent::make_unique_id_(const std::string &field_name) const {
-  std::string model = this->device_type_;
-  if (model.rfind("TY:", 0) == 0) {
-    model = model.substr(3);
-  }
-  model = trim_copy(model);
-  std::string base_text = "Jura";
-  if (!model.empty()) {
-    base_text += " " + model;
-  }
-  std::string base = sanitize_unique_part(base_text);
-  if (base.empty()) {
-    base = "jura";
-  }
-  std::string field = sanitize_unique_part(field_name);
-  if (field.empty()) {
-    field = "value";
-  }
-  return base + "_" + field;
 }
 
 bool JuraComponent::should_retry_current_(XmlPollState wait_state, uint32_t now) {
@@ -1047,15 +815,13 @@ bool JuraComponent::should_retry_current_(XmlPollState wait_state, uint32_t now)
                                   ? XmlPollState::SEND_TR32
                                   : (wait_state == XmlPollState::WAIT_TG43 ? XmlPollState::SEND_TG43
                                                                            : XmlPollState::SEND_TGC0);
-  ESP_LOGW(TAG, "XML %s reason=retry", this->xml_state_label_(wait_state));
+  ESP_LOGW(TAG, "XML %s: erneuter Versuch", this->xml_state_label_(wait_state));
   this->transition_to_state_(resend_state, now, kInterCmdGapMs);
   return true;
 }
 
-void JuraComponent::handle_xml_failure_(XmlPollState wait_state, bool is_timeout, size_t decoded_len, uint32_t now,
-                                        const char *reason, bool force_skip) {
+void JuraComponent::handle_xml_failure_(XmlPollState wait_state, bool is_timeout, size_t decoded_len, uint32_t now) {
   size_t index = this->xml_command_index_(wait_state);
-  this->xml_last_payload_len_[index] = 0;
   if (wait_state == XmlPollState::WAIT_TGC0 && is_timeout) {
     if (this->xml_tgc0_timeout_streak_ < std::numeric_limits<uint8_t>::max()) {
       this->xml_tgc0_timeout_streak_ += 1;
@@ -1067,13 +833,7 @@ void JuraComponent::handle_xml_failure_(XmlPollState wait_state, bool is_timeout
     }
   }
 
-  if (is_timeout) {
-    ESP_LOGW(TAG, "XML %s timeout", this->xml_state_label_(wait_state));
-    this->xml_invalid_len_seen_[index] = false;
-    this->xml_last_invalid_len_[index] = 0;
-  } else {
-    ESP_LOGW(TAG, "XML %s reason=%s", this->xml_state_label_(wait_state),
-             reason != nullptr ? reason : kReasonLenMismatch);
+  if (!is_timeout) {
     if (!this->xml_invalid_len_seen_[index]) {
       this->xml_invalid_len_seen_[index] = true;
       this->xml_last_invalid_len_[index] = decoded_len;
@@ -1083,13 +843,16 @@ void JuraComponent::handle_xml_failure_(XmlPollState wait_state, bool is_timeout
       this->xml_retry_count_[index] = 1;
       this->xml_invalid_len_seen_[index] = false;
     }
+  } else {
+    this->xml_invalid_len_seen_[index] = false;
+    this->xml_last_invalid_len_[index] = 0;
   }
 
   this->xml_inflight_ = false;
   this->xml_deadline_ms_ = 0;
   this->xml_rx_buffer_.clear();
 
-  if (!force_skip && this->should_retry_current_(wait_state, now)) {
+  if (this->should_retry_current_(wait_state, now)) {
     return;
   }
   this->xml_retry_count_[index] = 0;
@@ -1116,6 +879,18 @@ void JuraComponent::complete_command_success_(XmlPollState wait_state) {
   if (wait_state == XmlPollState::WAIT_TGC0) {
     this->xml_tgc0_timeout_streak_ = 0;
   }
+}
+
+bool JuraComponent::stage_tgc0_value_(const std::string &name, const std::string &label, float raw_percent,
+                                      uint16_t header_value, uint16_t encoded_value, uint16_t raw_value) {
+  auto &state = this->tgc0_filters_[name];
+  (void) header_value;
+  (void) encoded_value;
+  (void) raw_value;
+  state.window.clear();
+  state.consecutive_valid = 0;
+  this->xml_stats_.set_value(name, raw_percent, label);
+  return true;
 }
 
 void JuraComponent::add_configured_xml_sensor(const std::string &field, sensor::Sensor *sensor) {
@@ -1199,7 +974,6 @@ void JuraComponent::register_xml_sensor_(const XmlField &field, XmlSensorKind ki
   meta.min_value = (kind == XmlSensorKind::Counter) ? XML_COUNTER_MIN : XML_MEASUREMENT_MIN;
   meta.max_value = (kind == XmlSensorKind::Counter) ? XML_COUNTER_MAX : XML_MEASUREMENT_MAX;
   meta.accuracy_decimals = determine_accuracy(kind, field.scale);
-  meta.label = field.label;
   meta.is_tgc0 = false;
   meta.is_percent = false;
   meta.has_unit = false;
@@ -1253,17 +1027,13 @@ void JuraComponent::apply_sensor_metadata_(const std::string &name, sensor::Sens
     return;
   }
   const auto &meta = meta_it->second;
-  sensor->set_unique_id(this->make_unique_id_(name).c_str());
   sensor->set_accuracy_decimals(meta.accuracy_decimals);
   sensor::StateClass state_class = meta.kind == XmlSensorKind::Counter
                                        ? sensor::StateClass::STATE_CLASS_TOTAL_INCREASING
                                        : sensor::StateClass::STATE_CLASS_MEASUREMENT;
   sensor->set_state_class(state_class);
   sensor->set_force_update(true);
-  EntityCategory category = meta.kind == XmlSensorKind::Counter
-                                ? EntityCategory::ENTITY_CATEGORY_DIAGNOSTIC
-                                : EntityCategory::ENTITY_CATEGORY_NONE;
-  sensor->set_entity_category(category);
+  sensor->set_entity_category(EntityCategory::ENTITY_CATEGORY_DIAGNOSTIC);
   if (meta.has_unit) {
     sensor->set_unit_of_measurement(meta.unit_of_measurement.c_str());
   }
@@ -1326,7 +1096,6 @@ bool JuraComponent::ensure_xml_mapping_loaded_() {
   this->xml_mapping_logged_ = false;
   this->xml_stats_.clear();
   this->xml_sensor_meta_.clear();
-  this->counter_filters_.clear();
   this->tgc0_filters_.clear();
   this->xml_missing_sensor_logged_.clear();
   this->log_xml_mapping_status_();
@@ -1498,26 +1267,23 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
           return;
         }
         std::vector<uint8_t> payload;
-        if (!had_crlf || !this->extract_xml_payload_(decoded, payload)) {
-          this->handle_xml_failure_(this->xml_state_, false, decoded_len, now, kReasonLenMismatch);
-          return;
-        }
         size_t expected_min_len = 0;
         uint8_t head0 = 0;
-        XmlFrameAction action = XmlFrameAction::Accept;
-        const char *reason = kReasonLenMismatch;
-        if (!this->validate_xml_frame_(this->xml_state_, payload, expected_min_len, head0, action, reason)) {
-          bool force_skip = action == XmlFrameAction::Skip;
-          this->handle_xml_failure_(this->xml_state_, false, payload.size(), now,
-                                    reason != nullptr ? reason : kReasonLenMismatch, force_skip);
+        if (!this->validate_xml_frame_(this->xml_state_, decoded, had_crlf, decoded_len, payload, expected_min_len,
+                                       head0)) {
+          this->handle_xml_failure_(this->xml_state_, false, decoded_len, now);
           return;
+        }
+        if (this->xml_state_ == XmlPollState::WAIT_TGC0) {
+          if (!this->process_valid_tgc0_frame_(payload, false)) {
+            this->handle_xml_failure_(this->xml_state_, false, payload.size(), now);
+            return;
+          }
         }
         this->xml_inflight_ = false;
         this->xml_deadline_ms_ = 0;
-        size_t payload_len = payload.size();
         this->xml_rx_buffer_ = std::move(payload);
-        size_t index = this->xml_command_index_(this->xml_state_);
-        this->xml_last_payload_len_[index] = payload_len;
+        this->complete_command_success_(this->xml_state_);
         XmlPollState parse_state = (this->xml_state_ == XmlPollState::WAIT_TR32)
                                        ? XmlPollState::PARSE_TR32
                                        : (this->xml_state_ == XmlPollState::WAIT_TG43 ? XmlPollState::PARSE_TG43
@@ -1534,29 +1300,15 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
       this->xml_inflight_ = false;
       this->xml_deadline_ms_ = 0;
       this->xml_stats_.clear();
-      bool valid = true;
-      const char *reason = nullptr;
+      bool any = false;
       if (!this->xml_rx_buffer_.empty() && this->xml_state_has_mapping_(XmlPollState::PARSE_TR32)) {
-        valid = this->stage_counter_frame_(this->xml_mapping_.tr32, this->xml_rx_buffer_, "@TR:32", &reason);
+        any = this->stage_counter_frame_(this->xml_mapping_.tr32, this->xml_rx_buffer_, "@TR:32");
       }
-      if (!valid) {
-        this->handle_xml_failure_(XmlPollState::WAIT_TR32, false, this->xml_rx_buffer_.size(), now,
-                                  reason != nullptr ? reason : kReasonLenMismatch);
-        this->xml_rx_buffer_.clear();
-        this->xml_stats_.clear();
-        return;
-      }
-      this->complete_command_success_(XmlPollState::WAIT_TR32);
-      if (!this->xml_stats_.empty()) {
+      this->xml_rx_buffer_.clear();
+      if (any) {
         this->publish_xml_stats_();
       }
       this->xml_stats_.clear();
-      size_t index = this->xml_command_index_(XmlPollState::WAIT_TR32);
-      if (this->xml_last_payload_len_[index] != 0) {
-        ESP_LOGD(TAG, "XML TR32 decoded_len=%u ok", static_cast<unsigned>(this->xml_last_payload_len_[index]));
-        this->xml_last_payload_len_[index] = 0;
-      }
-      this->xml_rx_buffer_.clear();
       this->transition_to_state_(XmlPollState::SEND_TG43, now, kInterCmdGapMs);
       return;
     }
@@ -1564,29 +1316,15 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
       this->xml_inflight_ = false;
       this->xml_deadline_ms_ = 0;
       this->xml_stats_.clear();
-      bool valid = true;
-      const char *reason = nullptr;
+      bool any = false;
       if (!this->xml_rx_buffer_.empty() && this->xml_state_has_mapping_(XmlPollState::PARSE_TG43)) {
-        valid = this->stage_counter_frame_(this->xml_mapping_.tg43, this->xml_rx_buffer_, "@TG:43", &reason);
+        any = this->stage_counter_frame_(this->xml_mapping_.tg43, this->xml_rx_buffer_, "@TG:43");
       }
-      if (!valid) {
-        this->handle_xml_failure_(XmlPollState::WAIT_TG43, false, this->xml_rx_buffer_.size(), now,
-                                  reason != nullptr ? reason : kReasonLenMismatch);
-        this->xml_rx_buffer_.clear();
-        this->xml_stats_.clear();
-        return;
-      }
-      this->complete_command_success_(XmlPollState::WAIT_TG43);
-      if (!this->xml_stats_.empty()) {
+      this->xml_rx_buffer_.clear();
+      if (any) {
         this->publish_xml_stats_();
       }
       this->xml_stats_.clear();
-      size_t index = this->xml_command_index_(XmlPollState::WAIT_TG43);
-      if (this->xml_last_payload_len_[index] != 0) {
-        ESP_LOGD(TAG, "XML TG43 decoded_len=%u ok", static_cast<unsigned>(this->xml_last_payload_len_[index]));
-        this->xml_last_payload_len_[index] = 0;
-      }
-      this->xml_rx_buffer_.clear();
       this->transition_to_state_(XmlPollState::SEND_TGC0, now, kInterCmdGapMs);
       return;
     }
@@ -1594,29 +1332,21 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
       this->xml_inflight_ = false;
       this->xml_deadline_ms_ = 0;
       this->xml_stats_.clear();
-      bool valid = true;
-      const char *reason = nullptr;
+      bool any = false;
       if (!this->xml_rx_buffer_.empty() && this->xml_state_has_mapping_(XmlPollState::PARSE_TGC0)) {
-        valid = this->process_valid_tgc0_frame_(this->xml_rx_buffer_, true, &reason);
+        if (this->process_valid_tgc0_frame_(this->xml_rx_buffer_, true)) {
+          any = !this->xml_stats_.empty();
+        } else {
+          this->handle_xml_failure_(XmlPollState::WAIT_TGC0, false, this->xml_rx_buffer_.size(), now);
+          this->xml_rx_buffer_.clear();
+          return;
+        }
       }
-      if (!valid) {
-        this->handle_xml_failure_(XmlPollState::WAIT_TGC0, false, this->xml_rx_buffer_.size(), now,
-                                  reason != nullptr ? reason : kReasonLenMismatch);
-        this->xml_rx_buffer_.clear();
-        this->xml_stats_.clear();
-        return;
-      }
-      this->complete_command_success_(XmlPollState::WAIT_TGC0);
-      if (!this->xml_stats_.empty()) {
+      this->xml_rx_buffer_.clear();
+      if (any) {
         this->publish_xml_stats_();
       }
       this->xml_stats_.clear();
-      size_t index = this->xml_command_index_(XmlPollState::WAIT_TGC0);
-      if (this->xml_last_payload_len_[index] != 0) {
-        ESP_LOGD(TAG, "XML TGC0 decoded_len=%u ok", static_cast<unsigned>(this->xml_last_payload_len_[index]));
-        this->xml_last_payload_len_[index] = 0;
-      }
-      this->xml_rx_buffer_.clear();
       uint32_t sleep = std::max(this->xml_poll_interval_ms_, kCycleSleepMs);
       uint32_t deadline = now + sleep;
       this->xml_deadline_ms_ = deadline;
@@ -1758,7 +1488,7 @@ void JuraComponent::handle_xml_timeout_(XmlPollState next_state, const char *lab
     label = "?";
   }
   ESP_LOGW(TAG, "RX_DB timeout %s", label);
-  this->handle_xml_failure_(this->xml_state_, true, 0, now, nullptr);
+  this->handle_xml_failure_(this->xml_state_, true, 0, now);
 }
 
 void JuraComponent::prepare_tgc0_request_() {
