@@ -27,7 +27,7 @@ constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
 constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
 const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
-constexpr uint32_t kXmlRxTimeoutMs = 1000;
+constexpr uint32_t kReplyTimeoutMs = 1800;
 constexpr uint32_t kInterCmdGapMs = 120;
 constexpr uint32_t kTr32InterCmdGapMs = 220;
 constexpr uint32_t kXmlQuietMs = 120;
@@ -44,7 +44,7 @@ constexpr double XML_MEASUREMENT_MAX = 250.0;
 constexpr float XML_COUNTER_TOLERANCE = 0.5f;
 constexpr float XML_MEASUREMENT_TOLERANCE = 0.1f;
 constexpr bool TGC0_TRY_LITTLE_ENDIAN_FIRST = true;
-constexpr std::size_t kTR32MinFrameLength = 21;
+constexpr std::size_t kTR32MinFrameLength = 20;
 constexpr std::size_t kTG43MinFrameLength = 13;
 constexpr std::size_t kTGC0MinFrameLength = 13;
 
@@ -466,6 +466,7 @@ void JuraComponent::process_handshake() {
       ESP_LOGD(TAG, "SEND_T3: sending '@t3\\r\\n' to finish handshake.");
       if (this->connection_->write_decoded("@t3\r\n")) {
         ESP_LOGI(TAG, "Handshake finished successfully.");
+        esphome::delay(500);
         this->handshake_stage_ = HandshakeStage::DONE;
         this->handshake_buffer_.clear();
         this->handshake_deadline_ = 0;
@@ -653,7 +654,6 @@ size_t JuraComponent::xml_command_index_(XmlPollState state) const {
 bool JuraComponent::validate_xml_frame_(XmlPollState state, const std::vector<uint8_t> &decoded, bool had_crlf,
                                         size_t decoded_len, std::vector<uint8_t> &payload,
                                         size_t &expected_min_len, uint8_t &head0) const {
-  (void) had_crlf;
   const XmlCommandMapping *mapping = nullptr;
   std::size_t minimum = 0;
   switch (state) {
@@ -677,6 +677,13 @@ bool JuraComponent::validate_xml_frame_(XmlPollState state, const std::vector<ui
   if (mapping == nullptr || mapping->empty()) {
     ESP_LOGW(TAG, "XML %s: kein Mapping aktiv", this->xml_state_label_(state));
     return false;
+  }
+
+  if (!had_crlf) {
+    ESP_LOGW(TAG,
+             "XML %s: Frame ohne CRLF (decoded_len=%d) – akzeptiere (EOL wurde im Connection-Layer entfernt).",
+             this->xml_state_label_(state), static_cast<int>(decoded_len));
+    // kein return – weiterparsen
   }
 
   std::size_t expected_len = 0;
@@ -725,9 +732,16 @@ bool JuraComponent::validate_xml_frame_(XmlPollState state, const std::vector<ui
     auto begin = payload.begin() + static_cast<std::ptrdiff_t>(kCommandOffset);
     if (!std::equal(begin, begin + static_cast<std::ptrdiff_t>(command_len), expected_command,
                     expected_command + command_len)) {
-      ESP_LOGW(TAG, "XML %s: unerwarteter Präfix '%s'", this->xml_state_label_(state),
+      ESP_LOGW(TAG, "XML %s: unerwarteter Präfix '%s' – schneide bis zum ersten '<' ab.",
+               this->xml_state_label_(state),
                format_printable_string(std::string(begin, begin + command_len)).c_str());
-      return false;
+      auto pos = std::find(payload.begin(), payload.end(), static_cast<uint8_t>('<'));
+      if (pos != payload.end()) {
+        payload.erase(payload.begin(), pos);
+        head0 = payload.empty() ? 0x00 : payload.front();
+      } else {
+        return false;
+      }
     }
   }
 
@@ -1545,9 +1559,10 @@ bool JuraComponent::send_xml_command_(const char *command, XmlPollState wait_sta
   this->xml_rx_buffer_.clear();
   ESP_LOGD(TAG, "TX_DB \"%s\"", command);
   connection->tx_db_command(command, false);
+  esphome::delay(80);
   this->xml_inflight_ = true;
   this->xml_last_command_ = command;
-  this->xml_deadline_ms_ = now + kXmlRxTimeoutMs;
+  this->xml_deadline_ms_ = now + kReplyTimeoutMs;
   uint32_t quiet_delay = this->quiet_delay_for_state_(wait_state);
   this->xml_next_action_ms_ = quiet_delay > 0 ? now + quiet_delay : 0;
   this->xml_state_ = wait_state;
