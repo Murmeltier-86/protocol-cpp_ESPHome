@@ -5,7 +5,6 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdio>
-#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -582,7 +581,6 @@ void JuttaConnection::tx_db_command(const std::string& ascii, bool flush) {
     if (flush) {
         this->serial.flush();
     }
-    this->drain_serial_input_quick();
 }
 
 bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t timeout_ms, bool* had_crlf,
@@ -649,10 +647,6 @@ bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t time
         }
         if (decoded_len != nullptr) {
             *decoded_len = frame_decoded_len;
-        }
-
-        if (reason != nullptr && std::strcmp(reason, "CRLF") == 0) {
-            this->drain_serial_input_quick();
         }
 
         if (consume_len > 0) {
@@ -759,39 +753,6 @@ void JuttaConnection::reset_all_rx_buffers() {
 
 void JuttaConnection::drain_serial_input_nonblocking() {
     this->flush_serial_input();
-}
-
-void JuttaConnection::drain_serial_input_quick(uint32_t max_duration_ms) {
-    if (max_duration_ms == 0) {
-        max_duration_ms = 1;
-    }
-    uint32_t start = esphome::millis();
-    std::array<uint8_t, 4> discard{};
-    size_t total_dropped = 0;
-    if (!this->encoded_rx_buffer_.empty() || !this->decoded_rx_buffer_.empty()) {
-        ESP_LOGV(TAG, "Quick-drain: clearing %zu encoded and %zu decoded buffered byte%s.",
-                 this->encoded_rx_buffer_.size(), this->decoded_rx_buffer_.size(),
-                 (this->encoded_rx_buffer_.size() + this->decoded_rx_buffer_.size()) == 1 ? "" : "s");
-        this->encoded_rx_buffer_.clear();
-        this->decoded_rx_buffer_.clear();
-    }
-    while (true) {
-        size_t read = this->serial.read_serial(discard);
-        if (read == 0) {
-            break;
-        }
-        total_dropped += read;
-        std::vector<uint8_t> view(discard.begin(), discard.begin() + std::min(read, discard.size()));
-        ESP_LOGVV(TAG, "Quick-drain dropped %zu byte%s: %s", read, read == 1 ? "" : "s",
-                  format_hex(view).c_str());
-        if (static_cast<int32_t>(esphome::millis() - start - max_duration_ms) >= 0) {
-            break;
-        }
-    }
-    if (total_dropped > 0) {
-        ESP_LOGV(TAG, "Quick-drain discarded %zu stray byte%s from UART.", total_dropped,
-                 total_dropped == 1 ? "" : "s");
-    }
 }
 
 void JuttaConnection::activate_tx_echo_suppressor_(const std::vector<uint8_t>& frame) {

@@ -126,8 +126,6 @@ class JuttaConnection {
     void reset_all_rx_buffers();
     /** Verwirft nicht abgeholte Bytes aus dem UART-Puffer ohne zu blockieren. */
     void drain_serial_input_nonblocking();
-    /** Entfernt eingehende Bytes für eine kurze Dauer, um Alt-Daten loszuwerden. */
-    void drain_serial_input_quick(uint32_t max_duration_ms = 10);
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
