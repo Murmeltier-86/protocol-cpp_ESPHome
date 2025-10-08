@@ -5,7 +5,6 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -29,9 +28,7 @@ constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
 const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
 constexpr uint32_t kXmlRxTimeoutMs = 1000;
 constexpr uint32_t kInterCmdGapMs = 120;
-constexpr uint32_t kTr32InterCmdGapMs = 220;
 constexpr uint32_t kXmlQuietMs = 120;
-constexpr uint32_t kXmlQuietTr32Ms = 220;
 constexpr uint32_t kCycleSleepMs = 2000;
 constexpr uint32_t kSettingsRefreshMs = 600000;
 constexpr uint32_t kErrorPollIntervalMs = 5000;
@@ -713,24 +710,6 @@ bool JuraComponent::validate_xml_frame_(XmlPollState state, const std::vector<ui
     return false;
   }
 
-  const char *expected_command = this->xml_state_command_(state);
-  if (expected_command != nullptr && expected_command[0] != '\0') {
-    std::size_t command_len = std::strlen(expected_command);
-    constexpr std::size_t kCommandOffset = 1;
-    if (payload.size() < kCommandOffset + command_len) {
-      ESP_LOGW(TAG, "XML %s: Kommando-Präfix zu kurz (decoded_len=%u)", this->xml_state_label_(state),
-               static_cast<unsigned>(payload.size()));
-      return false;
-    }
-    auto begin = payload.begin() + static_cast<std::ptrdiff_t>(kCommandOffset);
-    if (!std::equal(begin, begin + static_cast<std::ptrdiff_t>(command_len), expected_command,
-                    expected_command + command_len)) {
-      ESP_LOGW(TAG, "XML %s: unerwarteter Präfix '%s'", this->xml_state_label_(state),
-               format_printable_string(std::string(begin, begin + command_len)).c_str());
-      return false;
-    }
-  }
-
   const char *command = this->xml_state_command_(state);
   ESP_LOGD(TAG, "XML RX cmd=%s decoded_len=%u expected_min_len=%u head0=0x%02X", command,
            static_cast<unsigned>(decoded_len), static_cast<unsigned>(expected_min_len),
@@ -801,15 +780,9 @@ bool JuraComponent::process_valid_tgc0_frame_(const std::vector<uint8_t> &frame,
     if (!this->decode_field_value_(frame, raw_field, little_endian, raw_value)) {
       continue;
     }
-    double percent = 0.0;
-    if (field.has_scale) {
-      percent = static_cast<double>(raw_value) * field.scale;
-      if (field.has_add) {
-        percent += field.add;
-      }
-    } else {
-      percent = std::round(static_cast<double>(raw_value) * 100.0 / 65535.0);
-      percent = std::clamp(percent, 0.0, 110.0);
+    double percent = static_cast<double>(raw_value) * field.scale;
+    if (field.has_add) {
+      percent += field.add;
     }
     if (!std::isfinite(percent)) {
       auto &state = this->tgc0_filters_[field.name];
@@ -849,7 +822,7 @@ bool JuraComponent::should_retry_current_(XmlPollState wait_state, uint32_t now)
                                   : (wait_state == XmlPollState::WAIT_TG43 ? XmlPollState::SEND_TG43
                                                                            : XmlPollState::SEND_TGC0);
   ESP_LOGW(TAG, "XML %s: erneuter Versuch", this->xml_state_label_(wait_state));
-  this->transition_to_state_(resend_state, now, this->inter_command_gap_after_(wait_state));
+  this->transition_to_state_(resend_state, now, kInterCmdGapMs);
   return true;
 }
 
@@ -900,7 +873,7 @@ void JuraComponent::handle_xml_failure_(XmlPollState wait_state, bool is_timeout
     this->xml_next_poll_ = deadline;
     this->transition_to_state_(XmlPollState::SLEEP, now);
   } else {
-    this->transition_to_state_(next_state, now, this->inter_command_gap_after_(wait_state));
+    this->transition_to_state_(next_state, now, kInterCmdGapMs);
   }
 }
 
@@ -1306,7 +1279,7 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
           this->xml_next_poll_ = deadline;
           this->transition_to_state_(XmlPollState::SLEEP, now);
         } else {
-          this->transition_to_state_(next, now, this->inter_command_gap_after_(this->xml_state_));
+          this->transition_to_state_(next, now, kInterCmdGapMs);
         }
         return;
       }
@@ -1326,13 +1299,11 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         uint8_t head0 = 0;
         if (!this->validate_xml_frame_(this->xml_state_, decoded, had_crlf, decoded_len, payload, expected_min_len,
                                        head0)) {
-          connection->drain_serial_input_quick();
           this->handle_xml_failure_(this->xml_state_, false, decoded_len, now);
           return;
         }
         if (this->xml_state_ == XmlPollState::WAIT_TGC0) {
           if (!this->process_valid_tgc0_frame_(payload, false)) {
-            connection->drain_serial_input_quick();
             this->handle_xml_failure_(this->xml_state_, false, payload.size(), now);
             return;
           }
@@ -1366,8 +1337,7 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         this->publish_xml_stats_();
       }
       this->xml_stats_.clear();
-      this->transition_to_state_(XmlPollState::SEND_TG43, now,
-                                 this->inter_command_gap_after_(XmlPollState::WAIT_TR32));
+      this->transition_to_state_(XmlPollState::SEND_TG43, now, kInterCmdGapMs);
       return;
     }
     case XmlPollState::PARSE_TG43: {
@@ -1383,8 +1353,7 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         this->publish_xml_stats_();
       }
       this->xml_stats_.clear();
-      this->transition_to_state_(XmlPollState::SEND_TGC0, now,
-                                 this->inter_command_gap_after_(XmlPollState::WAIT_TG43));
+      this->transition_to_state_(XmlPollState::SEND_TGC0, now, kInterCmdGapMs);
       return;
     }
     case XmlPollState::PARSE_TGC0: {
@@ -1503,20 +1472,6 @@ const char *JuraComponent::xml_state_label_(XmlPollState state) const {
   return "?";
 }
 
-uint32_t JuraComponent::quiet_delay_for_state_(XmlPollState wait_state) const {
-  if (wait_state == XmlPollState::WAIT_TR32) {
-    return kXmlQuietTr32Ms;
-  }
-  return kXmlQuietMs;
-}
-
-uint32_t JuraComponent::inter_command_gap_after_(XmlPollState wait_state) const {
-  if (wait_state == XmlPollState::WAIT_TR32) {
-    return kTr32InterCmdGapMs;
-  }
-  return kInterCmdGapMs;
-}
-
 void JuraComponent::transition_to_state_(XmlPollState state, uint32_t now, uint32_t delay_ms) {
   this->xml_state_ = state;
   if (delay_ms > 0) {
@@ -1548,8 +1503,7 @@ bool JuraComponent::send_xml_command_(const char *command, XmlPollState wait_sta
   this->xml_inflight_ = true;
   this->xml_last_command_ = command;
   this->xml_deadline_ms_ = now + kXmlRxTimeoutMs;
-  uint32_t quiet_delay = this->quiet_delay_for_state_(wait_state);
-  this->xml_next_action_ms_ = quiet_delay > 0 ? now + quiet_delay : 0;
+  this->xml_next_action_ms_ = now + kXmlQuietMs;
   this->xml_state_ = wait_state;
   return true;
 }
