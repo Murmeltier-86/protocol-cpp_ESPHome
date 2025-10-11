@@ -1,11 +1,15 @@
+import os
+import re
+import xml.etree.ElementTree as ET
+
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
-from esphome.components import text_sensor, uart
-from esphome.const import CONF_ID
+from esphome.components import sensor, text_sensor, uart
+from esphome.const import CONF_ID, CONF_NAME
 
 DEPENDENCIES = ["uart"]
-AUTO_LOAD = ["uart"]
+AUTO_LOAD = ["uart", "sensor"]
 
 CONF_COFFEE = "coffee"
 CONF_GRIND_DURATION = "grind_duration"
@@ -19,6 +23,17 @@ CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
+CONF_MACHINE_SETTINGS = "machine_settings"
+CONF_XML = "xml"
+CONF_ENABLE_XML_POLL = "enable_xml_poll"
+CONF_XML_MAPPING_PATH = "xml_mapping_path"
+CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
+CONF_XML_SENSORS = "xml_sensors"
+CONF_FIELD = "field"
+CONF_MULTIPLIER = "multiplier"
+CONF_OFFSET = "offset"
+
+DEFAULT_XML_POLL_INTERVAL = cv.TimePeriod(milliseconds=60000)
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -35,6 +50,12 @@ CancelCustomBrewAction = jutta_component_ns.class_(
 )
 SwitchPageAction = jutta_component_ns.class_("SwitchPageAction", automation.Action)
 RunSequenceAction = jutta_component_ns.class_("RunSequenceAction", automation.Action)
+RequestMachineSettingsAction = jutta_component_ns.class_(
+    "RequestMachineSettingsAction", automation.Action
+)
+WriteMachineSettingsAction = jutta_component_ns.class_(
+    "WriteMachineSettingsAction", automation.Action
+)
 
 COFFEE_TYPES = {
     "espresso": CoffeeType.ESPRESSO,
@@ -56,6 +77,87 @@ COFFEE_TYPES = {
 DEFAULT_GRIND_DURATION = cv.TimePeriod(milliseconds=3600)
 DEFAULT_WATER_DURATION = cv.TimePeriod(milliseconds=40000)
 DEFAULT_COMMAND_TIMEOUT = cv.TimePeriod(milliseconds=5000)
+
+
+def _slugify(value):
+    value = value.lower()
+    value = (
+        value.replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+        .replace("ß", "ss")
+    )
+    value = re.sub(r"[^0-9a-z]+", "_", value)
+    return value.strip("_")
+
+
+def _load_xml_mapping(path):
+    try:
+        tree = ET.parse(path)
+    except (ET.ParseError, OSError) as err:
+        raise cv.Invalid(f"Fehler beim Einlesen der XML-Datei '{path}': {err}") from err
+
+    root = tree.getroot()
+    namespace = ""
+    if root.tag.startswith("{") and "}" in root.tag:
+        namespace = root.tag[1 : root.tag.find("}")]
+    ns = {"joe": namespace} if namespace else {}
+
+    mapping = {}
+
+    def register(field, command, key, default_name=None):
+        field_key = field.lower()
+        if field_key not in mapping:
+            mapping[field_key] = {
+                "command": command,
+                "key": key.upper(),
+                "default_name": default_name,
+                "field": field,
+            }
+
+    bank_command = "TR:32"
+    total_counter = root.findall(".//joe:TOTALCOUNTER", ns)
+    for counter in total_counter:
+        code = counter.get("Code")
+        name = counter.get("Name", code)
+        if code:
+            field = f"tr32_{_slugify(name)}"
+            register(field, bank_command, code, name)
+
+    for product in root.findall(".//joe:PRODUCT", ns):
+        code = product.get("Code")
+        name = product.get("Name", code)
+        if not code:
+            continue
+        slug = _slugify(name)
+        if slug == "2_espressi":
+            aliases = ["two_espresso", "two_espressi"]
+        elif slug == "2_coffee":
+            aliases = ["two_coffee"]
+        else:
+            aliases = []
+        field = f"tr32_{slug}"
+        register(field, bank_command, code, name)
+        for alias in aliases:
+            register(f"tr32_{alias}", bank_command, code, name)
+
+    for bank in root.findall(".//joe:STATISTIC/joe:MAINTENANCEPAGE/joe:BANK", ns):
+        command_attr = bank.get("Command")
+        if not command_attr or not command_attr.startswith("@TG:"):
+            continue
+        command = command_attr[1:]
+        code = command.split(":", 1)[-1].lower()
+        for item in bank.findall("joe:TEXTITEM", ns):
+            text_code = item.get("Text")
+            item_type = item.get("Type", text_code or "")
+            if not text_code:
+                continue
+            field = f"tg{code}_{text_code.lower()}"
+            register(field, command, text_code, item_type)
+            if item_type:
+                register(f"tg{code}_{_slugify(item_type)}", command, text_code, item_type)
+
+    return mapping
 
 SEQUENCE_COMMAND_KEYS = {
     "grinder_on": "grinder_on",
@@ -86,15 +188,39 @@ SEQUENCE_COMMAND_EXPRESSIONS = {
 JURA_COMPONENT_IDS = []
 
 
-CONFIG_SCHEMA = (
+XML_SENSOR_SCHEMA = sensor.sensor_schema().extend(
+    {
+        cv.Required(CONF_FIELD): cv.string,
+        cv.Optional(CONF_MULTIPLIER, default=1.0): cv.float_,
+        cv.Optional(CONF_OFFSET, default=0.0): cv.float_,
+    }
+)
+
+
+def _validate_xml_config(value):
+    sensors_conf = value.get(CONF_XML_SENSORS, [])
+    if sensors_conf and CONF_XML_MAPPING_PATH not in value:
+        raise cv.Invalid("'xml_mapping_path' muss gesetzt sein, wenn 'xml_sensors' verwendet werden")
+    if value.get(CONF_ENABLE_XML_POLL) and not sensors_conf:
+        raise cv.Invalid("'enable_xml_poll' benötigt mindestens einen Eintrag in 'xml_sensors'")
+    return value
+
+
+CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(JuraComponent),
             cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_SETTINGS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
+            cv.Optional(CONF_XML_MAPPING_PATH): cv.file_,
+            cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=DEFAULT_XML_POLL_INTERVAL): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_XML_SENSORS, default=[]): cv.ensure_list(XML_SENSOR_SCHEMA),
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
-    .extend(cv.COMPONENT_SCHEMA)
+    .extend(cv.COMPONENT_SCHEMA),
+    _validate_xml_config,
 )
 
 
@@ -227,6 +353,25 @@ def _normalize_sequence(value):
     )(value)
 
 
+def _normalize_request_machine_settings(value):
+    if value is None:
+        value = {}
+    if isinstance(value, str):
+        value = {CONF_ID: value}
+    return cv.Schema({cv.Optional(CONF_ID): cv.use_id(JuraComponent)})(value)
+
+
+def _normalize_write_machine_settings(value):
+    if isinstance(value, str):
+        value = {CONF_XML: value}
+    return cv.Schema(
+        {
+            cv.Optional(CONF_ID): cv.use_id(JuraComponent),
+            cv.Required(CONF_XML): cv.string,
+        }
+    )(value)
+
+
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     JURA_COMPONENT_IDS.append(config[CONF_ID])
@@ -236,6 +381,52 @@ async def to_code(config):
     if CONF_MACHINE_DATA in config:
         sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
         cg.add(var.set_machine_data_sensor(sensor))
+
+    if CONF_MACHINE_SETTINGS in config:
+        sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_SETTINGS])
+        cg.add(var.set_machine_settings_sensor(sensor))
+
+    xml_sensors = config.get(CONF_XML_SENSORS, [])
+
+    if config.get(CONF_ENABLE_XML_POLL):
+        cg.add(var.set_xml_poll_enabled(True))
+
+    if CONF_XML_POLL_INTERVAL_MS in config:
+        interval = config[CONF_XML_POLL_INTERVAL_MS]
+        cg.add(var.set_xml_poll_interval(interval.total_milliseconds))
+
+    mapping = {}
+    if xml_sensors:
+        mapping_path = config[CONF_XML_MAPPING_PATH]
+        mapping_path = os.path.expanduser(mapping_path)
+        if not os.path.isabs(mapping_path):
+            mapping_path = os.path.abspath(mapping_path)
+        mapping = _load_xml_mapping(mapping_path)
+
+    for sensor_conf in xml_sensors:
+        sensor_conf = sensor_conf.copy()
+        field = sensor_conf.pop(CONF_FIELD)
+        multiplier = sensor_conf.pop(CONF_MULTIPLIER)
+        offset = sensor_conf.pop(CONF_OFFSET)
+
+        info = mapping.get(field.lower())
+        if info is None:
+            raise cv.Invalid(f"Unbekanntes XML-Feld '{field}'. Bitte prüfe die Mapping-Datei")
+
+        if CONF_NAME not in sensor_conf and info.get("default_name"):
+            sensor_conf[CONF_NAME] = info["default_name"]
+
+        sens = await sensor.new_sensor(sensor_conf)
+        cg.add(
+            var.register_xml_sensor(
+                cg.std_string(info["field"]),
+                cg.std_string(info["command"]),
+                cg.std_string(info["key"]),
+                multiplier,
+                offset,
+                sens,
+            )
+        )
 
 
 async def _get_parent(config):
@@ -309,5 +500,26 @@ async def run_sequence_action_to_code(config, action_id, template_args, args):
             delay_ms = step[CONF_DELAY].total_milliseconds
             cg.add(var.add_delay_step(delay_ms, description))
 
+    return var
+
+
+@automation.register_action(
+    "jutta_proto.request_machine_settings", RequestMachineSettingsAction, _normalize_request_machine_settings
+)
+async def request_machine_settings_action_to_code(config, action_id, template_args, args):
+    _ = args
+    parent = await _get_parent(config)
+    var = cg.new_Pvariable(action_id, parent)
+    return var
+
+
+@automation.register_action(
+    "jutta_proto.write_machine_settings", WriteMachineSettingsAction, _normalize_write_machine_settings
+)
+async def write_machine_settings_action_to_code(config, action_id, template_args, args):
+    _ = args
+    parent = await _get_parent(config)
+    var = cg.new_Pvariable(action_id, parent)
+    cg.add(var.set_xml(cg.std_string(config[CONF_XML])))
     return var
 

@@ -9,6 +9,7 @@
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
+#include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/uart/uart.h"
 
@@ -36,9 +37,18 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const std::string &device_type() const { return this->device_type_; }
 
   void set_machine_data_sensor(text_sensor::TextSensor *sensor) { this->machine_data_sensor_ = sensor; }
+  void set_machine_settings_sensor(text_sensor::TextSensor *sensor) { this->machine_settings_sensor_ = sensor; }
+  void set_xml_poll_enabled(bool enabled) { this->xml_poll_enabled_ = enabled; }
+  void set_xml_poll_interval(uint32_t interval_ms) { this->xml_poll_interval_ms_ = interval_ms; }
+  void register_xml_sensor(const std::string &field, const std::string &command, const std::string &key,
+                           float multiplier, float offset, sensor::Sensor *sensor);
+  void request_machine_settings();
+  void write_machine_settings(const std::string &xml);
 
  protected:
   enum class HandshakeStage { IDLE, HELLO, SEND_T1, WAIT_T2, SEND_T2, WAIT_T3, SEND_T3, DONE, FAILED };
+
+  enum class LegacyCodecMode { Unknown, Plain, Auto, Escaped };
 
   static const char *handshake_stage_name(HandshakeStage stage);
 
@@ -48,6 +58,21 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   static bool time_reached(uint32_t now, uint32_t target);
   void process_machine_data_query();
   void publish_machine_data_(const std::string &response);
+  void process_xml_poll();
+  void run_legacy_probe_handshake_();
+  std::shared_ptr<std::string> wait_for_response_(::jutta_proto::JuttaConnection *connection,
+                                                  const std::string &command, uint32_t timeout_ms);
+  bool ensure_transaction_ready_(const char *operation);
+  void publish_machine_settings_(const std::string &payload);
+
+  struct XmlSensorEntry {
+    std::string field;
+    std::string command;
+    std::string key;
+    float multiplier{1.0f};
+    float offset{0.0f};
+    sensor::Sensor *sensor{nullptr};
+  };
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
   std::unique_ptr<::jutta_proto::CoffeeMaker> coffee_maker_;
@@ -61,9 +86,20 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool handshake_hello_request_sent_{false};
   bool custom_cancel_flag_{false};
   text_sensor::TextSensor *machine_data_sensor_{nullptr};
+  text_sensor::TextSensor *machine_settings_sensor_{nullptr};
   uint32_t machine_data_query_next_{0};
   bool machine_data_request_pending_{false};
   uint32_t machine_data_request_start_{0};
+  bool xml_poll_enabled_{false};
+  uint32_t xml_poll_interval_ms_{60000};
+  uint32_t xml_next_poll_{0};
+  std::vector<XmlSensorEntry> xml_sensors_{};
+  LegacyCodecMode legacy_codec_mode_{LegacyCodecMode::Unknown};
+  std::string legacy_probe_command_{};
+  std::string legacy_probe_response_{};
+  std::string last_machine_settings_xml_{};
+  bool last_machine_settings_write_ok_{false};
+  bool machine_settings_write_attempted_{false};
 };
 
 class StartBrewAction : public esphome::Action<> {
@@ -135,6 +171,26 @@ class RunSequenceAction : public esphome::Action<> {
  protected:
   JuraComponent *parent_;
   std::vector<::jutta_proto::CoffeeMaker::SequenceStep> steps_{};
+};
+
+class RequestMachineSettingsAction : public esphome::Action<> {
+ public:
+  explicit RequestMachineSettingsAction(JuraComponent *parent) : parent_(parent) {}
+  void play() override { this->parent_->request_machine_settings(); }
+
+ protected:
+  JuraComponent *parent_;
+};
+
+class WriteMachineSettingsAction : public esphome::Action<> {
+ public:
+  explicit WriteMachineSettingsAction(JuraComponent *parent) : parent_(parent) {}
+  void set_xml(const std::string &xml) { this->xml_ = xml; }
+  void play() override { this->parent_->write_machine_settings(this->xml_); }
+
+ protected:
+  JuraComponent *parent_;
+  std::string xml_{};
 };
 
 }  // namespace jutta_component

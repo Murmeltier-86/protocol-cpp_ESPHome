@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <iomanip>
+#include <map>
+#include <set>
 #include <sstream>
 #include <utility>
 
@@ -19,6 +22,7 @@ constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
 constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
 const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
+constexpr uint32_t XML_POLL_REQUEST_TIMEOUT_MS = 2000;
 
 std::string format_printable_char(uint8_t byte) {
   switch (byte) {
@@ -85,7 +89,190 @@ std::string format_buffer_hex_preview(const std::string &value) {
   return formatted_suffix;
 }
 
+std::string sanitize_response(const std::string &value) {
+  std::string sanitized = value;
+  sanitized.erase(std::remove(sanitized.begin(), sanitized.end(), '\r'), sanitized.end());
+  sanitized.erase(std::remove(sanitized.begin(), sanitized.end(), '\n'), sanitized.end());
+  return sanitized;
+}
+
+std::string trim_copy(const std::string &value) {
+  size_t start = 0;
+  size_t end = value.size();
+  while (start < end && std::isspace(static_cast<unsigned char>(value[start])) != 0) {
+    ++start;
+  }
+  while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+    --end;
+  }
+  return value.substr(start, end - start);
+}
+
+bool parse_numeric_value(const std::string &text, double &out) {
+  if (text.empty()) {
+    return false;
+  }
+  char *end_ptr = nullptr;
+  double value = std::strtod(text.c_str(), &end_ptr);
+  if (end_ptr == text.c_str() || trim_copy(std::string(end_ptr)).size() != 0) {
+    end_ptr = nullptr;
+    long fallback = std::strtol(text.c_str(), &end_ptr, 16);
+    if (end_ptr == text.c_str() || trim_copy(std::string(end_ptr)).size() != 0) {
+      return false;
+    }
+    value = static_cast<double>(fallback);
+  }
+  out = value;
+  return true;
+}
+
+std::map<std::string, double> parse_key_value_response(const std::string &command, const std::string &response) {
+  std::map<std::string, double> values;
+  if (response.empty()) {
+    return values;
+  }
+
+  std::string normalized = response;
+  if (!normalized.empty() && normalized[0] == '@') {
+    normalized.erase(0, 1);
+  }
+
+  std::string expected = command;
+  if (!expected.empty() && expected[0] == '@') {
+    expected.erase(0, 1);
+  }
+
+  // Strip prefix (e.g. "TR:32")
+  if (!expected.empty()) {
+    if (normalized.rfind(expected, 0) == 0) {
+      normalized.erase(0, expected.size());
+    }
+  }
+
+  if (!normalized.empty() && (normalized[0] == ':' || normalized[0] == ',')) {
+    normalized.erase(0, 1);
+  }
+
+  size_t pos = 0;
+  while (pos <= normalized.size()) {
+    size_t next = normalized.find_first_of(",;", pos);
+    std::string token = normalized.substr(pos, next == std::string::npos ? std::string::npos : next - pos);
+    token = trim_copy(token);
+    if (!token.empty()) {
+      size_t eq = token.find('=');
+      if (eq == std::string::npos) {
+        eq = token.find(':');
+      }
+      if (eq != std::string::npos) {
+        std::string key = trim_copy(token.substr(0, eq));
+        std::string value_str = trim_copy(token.substr(eq + 1));
+        if (!key.empty() && !value_str.empty()) {
+          std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+          double parsed_value = 0.0;
+          if (parse_numeric_value(value_str, parsed_value)) {
+            values[key] = parsed_value;
+          }
+        }
+      }
+    }
+    if (next == std::string::npos) {
+      break;
+    }
+    pos = next + 1;
+  }
+
+  return values;
+}
+
 }  // namespace
+
+std::shared_ptr<std::string> JuraComponent::wait_for_response_(::jutta_proto::JuttaConnection *connection,
+                                                               const std::string &command, uint32_t timeout_ms) {
+  if (connection == nullptr) {
+    return nullptr;
+  }
+  auto timeout = std::chrono::milliseconds{timeout_ms};
+  uint32_t start = esphome::millis();
+  auto response = connection->write_decoded_with_response(command, timeout);
+  while (response == nullptr) {
+    if (timeout_ms > 0 && JuraComponent::time_reached(esphome::millis(), start + timeout_ms)) {
+      break;
+    }
+    esphome::delay(10);
+    response = connection->write_decoded_with_response(command, timeout);
+  }
+  return response;
+}
+
+bool JuraComponent::ensure_transaction_ready_(const char *operation) {
+  if (!this->is_ready()) {
+    ESP_LOGW(TAG, "%s nicht möglich - Handshake läuft noch.", operation != nullptr ? operation : "Aktion");
+    return false;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    ESP_LOGW(TAG, "%s nicht möglich - Verbindung zur Maschine fehlt.", operation != nullptr ? operation : "Aktion");
+    return false;
+  }
+  if (this->is_busy()) {
+    ESP_LOGW(TAG, "%s nicht möglich - Maschine ist beschäftigt.", operation != nullptr ? operation : "Aktion");
+    return false;
+  }
+  return true;
+}
+
+void JuraComponent::publish_machine_settings_(const std::string &payload) {
+  this->last_machine_settings_xml_ = payload;
+  if (this->machine_settings_sensor_ != nullptr) {
+    this->machine_settings_sensor_->publish_state(payload);
+  }
+}
+
+void JuraComponent::run_legacy_probe_handshake_() {
+  if (this->connection_ == nullptr) {
+    return;
+  }
+  this->legacy_probe_command_.clear();
+  this->legacy_probe_response_.clear();
+  this->legacy_codec_mode_ = LegacyCodecMode::Auto;
+
+  auto store_result = [&](const std::string &command, const std::shared_ptr<std::string> &response) {
+    std::string trimmed_command = command;
+    trimmed_command.erase(std::remove(trimmed_command.begin(), trimmed_command.end(), '\r'), trimmed_command.end());
+    trimmed_command.erase(std::remove(trimmed_command.begin(), trimmed_command.end(), '\n'), trimmed_command.end());
+    this->legacy_probe_command_ = trimmed_command;
+    if (response != nullptr) {
+      this->legacy_probe_response_ = sanitize_response(*response);
+    } else {
+      this->legacy_probe_response_.clear();
+    }
+  };
+
+  auto response = this->wait_for_response_(this->connection_.get(), "&WHO\r\n", 500);
+  if (response != nullptr) {
+    this->legacy_codec_mode_ = LegacyCodecMode::Plain;
+    store_result("&WHO", response);
+    ESP_LOGI(TAG, "Legacy-Probe '&WHO' beantwortet mit '%s'.", this->legacy_probe_response_.c_str());
+    this->connection_->reset_response_line_buffer();
+    return;
+  }
+
+  static const char *const PROBES[] = {"@TR:37\r\n", "@TR:32\r\n", "@t2:8188\r\n", "@TS:00\r\n"};
+  for (const char *probe : PROBES) {
+    response = this->wait_for_response_(this->connection_.get(), probe, 800);
+    if (response != nullptr) {
+      this->legacy_codec_mode_ = LegacyCodecMode::Auto;
+      store_result(probe, response);
+      ESP_LOGI(TAG, "Legacy-Probe '%s' beantwortet mit '%s'.", format_printable_string(probe).c_str(),
+               this->legacy_probe_response_.c_str());
+      this->connection_->reset_response_line_buffer();
+      return;
+    }
+  }
+
+  this->legacy_codec_mode_ = LegacyCodecMode::Escaped;
+  ESP_LOGW(TAG, "Legacy-Probe erhielt keine Antwort, gehe von ESC-Mode aus.");
+  this->connection_->reset_response_line_buffer();
+}
 
 const char *JuraComponent::handshake_stage_name(JuraComponent::HandshakeStage stage) {
   switch (stage) {
@@ -121,6 +308,8 @@ void JuraComponent::setup() {
   this->connection_ = std::make_unique<::jutta_proto::JuttaConnection>(this->parent_);
   this->connection_->init();
 
+  this->run_legacy_probe_handshake_();
+
   this->handshake_stage_ = HandshakeStage::HELLO;
   ESP_LOGI(TAG, "Starting handshake with coffee maker...");
 }
@@ -148,6 +337,7 @@ void JuraComponent::loop() {
   }
 
   this->process_machine_data_query();
+  this->process_xml_poll();
 }
 
 void JuraComponent::dump_config() {
@@ -197,10 +387,53 @@ void JuraComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  Last key exchange T3: %s", this->handshake_t3_response_.c_str());
   }
 
+  const char *legacy_mode = "unbekannt";
+  switch (this->legacy_codec_mode_) {
+    case LegacyCodecMode::Unknown:
+      legacy_mode = "unbekannt";
+      break;
+    case LegacyCodecMode::Plain:
+      legacy_mode = "kein Codec";
+      break;
+    case LegacyCodecMode::Auto:
+      legacy_mode = "automatisch";
+      break;
+    case LegacyCodecMode::Escaped:
+      legacy_mode = "ESC";
+      break;
+  }
+  ESP_LOGCONFIG(TAG, "  Legacy-Kompatibilitätsprobe: %s", legacy_mode);
+  if (!this->legacy_probe_command_.empty()) {
+    ESP_LOGCONFIG(TAG, "    Letzte Anfrage: %s -> %s", this->legacy_probe_command_.c_str(),
+                  this->legacy_probe_response_.empty() ? "(keine Antwort)" : this->legacy_probe_response_.c_str());
+  }
+
   if (this->coffee_maker_ != nullptr) {
     ESP_LOGCONFIG(TAG, "  Coffee maker ready: %s", YESNO(true));
   } else {
     ESP_LOGCONFIG(TAG, "  Coffee maker ready: %s", YESNO(false));
+  }
+
+  if (this->machine_settings_sensor_ != nullptr) {
+    ESP_LOGCONFIG(TAG, "  Sensor für Maschineneinstellungen aktiv: %s", YESNO(true));
+    if (!this->last_machine_settings_xml_.empty()) {
+      ESP_LOGCONFIG(TAG, "    Letzte gelesene XML-Länge: %zu Zeichen", this->last_machine_settings_xml_.size());
+    }
+    if (this->machine_settings_write_attempted_) {
+      ESP_LOGCONFIG(TAG, "    Letzter Schreibversuch: %s", YESNO(this->last_machine_settings_write_ok_));
+    }
+  }
+
+  if (!this->xml_sensors_.empty()) {
+    if (this->xml_poll_enabled_) {
+      ESP_LOGCONFIG(TAG, "  XML polling interval: %u ms", this->xml_poll_interval_ms_);
+    } else {
+      ESP_LOGCONFIG(TAG, "  XML polling disabled (configured sensors: %zu)", this->xml_sensors_.size());
+    }
+    for (const auto &sensor : this->xml_sensors_) {
+      ESP_LOGCONFIG(TAG, "    XML field '%s' via %s -> key %s (multiplier=%.3f offset=%.3f)", sensor.field.c_str(),
+                    sensor.command.c_str(), sensor.key.c_str(), sensor.multiplier, sensor.offset);
+    }
   }
 }
 
@@ -478,6 +711,172 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
   ESP_LOGD(TAG, "Machine data response: %s", sanitized.c_str());
   if (this->machine_data_sensor_ != nullptr) {
     this->machine_data_sensor_->publish_state(sanitized);
+  }
+}
+
+void JuraComponent::register_xml_sensor(const std::string &field, const std::string &command, const std::string &key,
+                                        float multiplier, float offset, sensor::Sensor *sensor) {
+  XmlSensorEntry entry;
+  entry.field = field;
+  entry.command = command;
+  entry.key = key;
+  std::transform(entry.command.begin(), entry.command.end(), entry.command.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+  std::transform(entry.key.begin(), entry.key.end(), entry.key.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+  entry.multiplier = multiplier;
+  entry.offset = offset;
+  entry.sensor = sensor;
+  this->xml_sensors_.push_back(entry);
+}
+
+void JuraComponent::process_xml_poll() {
+  if (!this->xml_poll_enabled_) {
+    return;
+  }
+  if (this->xml_sensors_.empty()) {
+    return;
+  }
+  if (!this->is_ready()) {
+    return;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return;
+  }
+  if (this->is_busy()) {
+    return;
+  }
+
+  uint32_t now = esphome::millis();
+  if (this->xml_next_poll_ != 0 && !time_reached(now, this->xml_next_poll_)) {
+    return;
+  }
+
+  std::map<std::string, std::vector<XmlSensorEntry *>> sensors_by_command;
+  for (auto &entry : this->xml_sensors_) {
+    sensors_by_command[entry.command].push_back(&entry);
+  }
+
+  bool any_success = false;
+
+  for (auto &item : sensors_by_command) {
+    const std::string &command = item.first;
+    std::string request = std::string("@") + command + "\r\n";
+    ESP_LOGV(TAG, "Requesting XML bank %s", command.c_str());
+    auto response = this->coffee_maker_->connection->write_decoded_with_response(
+        request, std::chrono::milliseconds{XML_POLL_REQUEST_TIMEOUT_MS});
+    if (response == nullptr) {
+      ESP_LOGW(TAG, "Keine Antwort auf %s erhalten", command.c_str());
+      continue;
+    }
+    std::string sanitized = sanitize_response(*response);
+    if (sanitized.empty()) {
+      ESP_LOGW(TAG, "Leere Antwort auf %s erhalten", command.c_str());
+      continue;
+    }
+    ESP_LOGD(TAG, "XML-Antwort %s: %s", command.c_str(), sanitized.c_str());
+    auto values = parse_key_value_response(command, sanitized);
+    if (values.empty()) {
+      ESP_LOGW(TAG, "Antwort für %s konnte nicht interpretiert werden: %s", command.c_str(), sanitized.c_str());
+      continue;
+    }
+    any_success = true;
+    for (auto *sensor_entry : item.second) {
+      auto key_it = values.find(sensor_entry->key);
+      if (key_it == values.end()) {
+        ESP_LOGV(TAG, "Feld %s (%s) nicht in Antwort von %s gefunden", sensor_entry->field.c_str(),
+                 sensor_entry->key.c_str(), command.c_str());
+        continue;
+      }
+      double value = key_it->second;
+      value = value * sensor_entry->multiplier + sensor_entry->offset;
+      if (sensor_entry->sensor != nullptr) {
+        sensor_entry->sensor->publish_state(value);
+      }
+    }
+  }
+
+  if (!any_success) {
+    ESP_LOGW(TAG, "XML-Abfrage lieferte keine verwertbaren Daten");
+  }
+  this->xml_next_poll_ = now + this->xml_poll_interval_ms_;
+}
+
+void JuraComponent::request_machine_settings() {
+  if (!this->ensure_transaction_ready_("Maschineneinstellungen lesen")) {
+    return;
+  }
+  auto *connection = this->coffee_maker_->connection.get();
+  auto response = this->wait_for_response_(connection, "@hr:00\r\n", 1500);
+  std::string payload;
+  if (response != nullptr) {
+    payload = *response;
+  }
+  if (payload.size() < 32) {
+    response = this->wait_for_response_(connection, "@hr:05\r\n", 1500);
+    if (response != nullptr) {
+      payload = *response;
+    }
+  }
+  if (payload.empty()) {
+    ESP_LOGW(TAG, "Maschineneinstellungen konnten nicht gelesen werden.");
+    return;
+  }
+  while (!payload.empty() && (payload.back() == '\r' || payload.back() == '\n')) {
+    payload.pop_back();
+  }
+  ESP_LOGI(TAG, "Maschineneinstellungen gelesen (%zu Zeichen).", payload.size());
+  this->publish_machine_settings_(payload);
+}
+
+void JuraComponent::write_machine_settings(const std::string &xml) {
+  if (xml.empty()) {
+    ESP_LOGW(TAG, "Leere XML-Daten werden nicht zur Maschine gesendet.");
+    return;
+  }
+  if (!this->ensure_transaction_ready_("Maschineneinstellungen schreiben")) {
+    return;
+  }
+  auto *connection = this->coffee_maker_->connection.get();
+  if (connection == nullptr) {
+    ESP_LOGW(TAG, "Keine Verbindung für das Schreiben der Maschineneinstellungen verfügbar.");
+    return;
+  }
+
+  auto expect_response = [&](const std::string &command, uint32_t timeout_ms, const char *label) -> bool {
+    auto reply = this->wait_for_response_(connection, command, timeout_ms);
+    if (reply == nullptr) {
+      ESP_LOGW(TAG, "%s: keine Antwort auf '%s' erhalten.", label, format_printable_string(command).c_str());
+      return false;
+    }
+    ESP_LOGD(TAG, "%s: Antwort '%s'", label, sanitize_response(*reply).c_str());
+    return true;
+  };
+
+  bool ok = true;
+  if (!expect_response("@ha:00\r\n", 1000, "Schreibstart")) {
+    ok = false;
+  }
+  if (ok && !expect_response("@HD:000000000040\r\n", 1000, "Header")) {
+    ok = false;
+  }
+  if (ok) {
+    if (!connection->write_decoded(xml)) {
+      ESP_LOGW(TAG, "Übertragung der XML-Daten fehlgeschlagen.");
+      ok = false;
+    }
+  }
+  if (ok && !expect_response("@hu:ok\r\n", 1000, "Abschluss")) {
+    ok = false;
+  }
+
+  this->machine_settings_write_attempted_ = true;
+  this->last_machine_settings_write_ok_ = ok;
+  if (ok) {
+    ESP_LOGI(TAG, "Maschineneinstellungen erfolgreich geschrieben (%zu Zeichen).", xml.size());
+    this->publish_machine_settings_(xml);
+  } else {
+    ESP_LOGW(TAG, "Maschineneinstellungen konnten nicht vollständig geschrieben werden.");
   }
 }
 
