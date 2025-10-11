@@ -19,7 +19,7 @@ static const char* TAG = "jutta_connection";
 
 namespace {
 constexpr uint32_t JUTTA_SERIAL_GAP_MS = 8;
-constexpr std::array<uint8_t, 4> DEFAULT_PAIR_TO_CODEWORD = {0xFF, 0xDF, 0xFB, 0xDB};
+constexpr std::array<uint8_t, 4> DEFAULT_PAIR_TO_CODEWORD = {0xDB, 0xDF, 0xFB, 0xFF};
 constexpr float PRINTABLE_THRESHOLD = 0.7f;
 constexpr int SCORE_INVALID = -1000;
 constexpr size_t MAX_FRAME_BYTES = 1024;
@@ -381,7 +381,7 @@ JuttaConnection::FrameOutcome JuttaConnection::decode_best_ascii_frame(std::vect
     size_t symbol_count = this->encoded_rx_buffer_.size();
 
     auto sym2bits = [](uint8_t b) -> int {
-        if (b == 0xFF) {
+        if (b == 0xDB) {
             return 0;
         }
         if (b == 0xDF) {
@@ -390,7 +390,7 @@ JuttaConnection::FrameOutcome JuttaConnection::decode_best_ascii_frame(std::vect
         if (b == 0xFB) {
             return 2;
         }
-        if (b == 0xDB) {
+        if (b == 0xFF) {
             return 3;
         }
         return -1;
