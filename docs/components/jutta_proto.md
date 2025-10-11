@@ -38,7 +38,8 @@ des XML-Startbefehls an oder meldet `fehlgeschlagen`, wodurch sich die Initialis
    sowie optionale XOR-Schlüssel `0x00`, `0xFF` und `0xA5`. Für jeden Frame wird die Variante mit den meisten druckbaren ASCII-Zeichen
    ausgewählt; das Log meldet die Entscheidung als `Auto-Decoder: align=…`. Blöcke mit weniger als 70 % druckbaren Zeichen werden
    verworfen, damit Störsignale den Ablauf nicht blockieren. Eine globale Ausrichtung über mehrere Sekunden hinweg ist nicht nötig,
-   weil jeder Frame erneut analysiert wird.
+   weil jeder Frame erneut analysiert wird. Der Sender startet aus Kompatibilitätsgründen mit dem bewährten LSB-zuerst-Schema; sobald
+   der Decoder eine andere Bitreihenfolge oder einen XOR-Schlüssel ermittelt, werden Folgebefehle automatisch in dasselbe Schema kodiert.
 2. **T1/T2/T3-Handshake** – Nach erfolgreicher Probe erfolgt der etablierte Sequenztausch `@T1` → `@t1` → `@T2` → `@t2` → `@T3` →
    `@t3`, womit der Bediencontroller freigeschaltet wird.
 3. **XML-Handshake** – Sobald die Maschine betriebsbereit ist, wird automatisch `@hr:00` (Fallback `@hr:05`) angefragt. Die Antwort

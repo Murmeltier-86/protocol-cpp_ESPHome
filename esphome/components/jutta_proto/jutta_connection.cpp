@@ -299,7 +299,7 @@ std::vector<uint8_t> JuttaConnection::encode_stream(const std::vector<uint8_t>& 
     encoded.reserve(data.size() * 4);
 
     const auto& pair_to_codeword = DEFAULT_PAIR_TO_CODEWORD;
-    bool msb_first = this->codec_state_.have_detection ? this->codec_state_.msb_first : true;
+    bool msb_first = this->codec_state_.have_detection ? this->codec_state_.msb_first : false;
     uint8_t xor_key = this->codec_state_.have_detection ? this->codec_state_.xor_key : 0x00;
 
     for (uint8_t value : data) {
@@ -359,10 +359,10 @@ void JuttaConnection::print_bytes(const std::vector<uint8_t>& data) {
 void JuttaConnection::reset_codec_state() const {
     this->codec_state_ = CodecRuntimeState{};
     this->codec_state_.have_detection = false;
-    this->codec_state_.msb_first = true;
+    this->codec_state_.msb_first = false;
     this->codec_state_.xor_key = 0x00;
     this->last_logged_align_ = -1;
-    this->last_logged_msb_first_ = true;
+    this->last_logged_msb_first_ = false;
     this->last_logged_xor_ = 0x00;
 }
 
