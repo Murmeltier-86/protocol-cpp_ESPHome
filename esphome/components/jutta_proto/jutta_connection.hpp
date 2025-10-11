@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <deque>
+#include <limits>
 
 #include "serial_connection.hpp"
 
@@ -258,16 +259,24 @@ class JuttaConnection {
     StringWaitContext wait_string_context_{};
 
 
-    struct DbCodecState {
-        bool configured{false};
-        bool msb_first{false};
-        uint8_t align{0};
-        std::array<uint8_t, 4> pair_for_codeword{{0, 1, 2, 3}};
-        std::array<uint8_t, 4> codeword_for_pair{{0xDB, 0xDF, 0xFB, 0xFF}};
+    struct CodecRuntimeState {
+        bool have_detection{false};
+        bool msb_first{true};
+        uint8_t xor_key{0x00};
     };
 
-    // Buffer of partially received encoded bytes that haven't formed a full
-    // decoded data byte yet.
+    struct FrameDiagnostics {
+        int align{0};
+        bool msb_first{true};
+        uint8_t xor_key{0x00};
+        float printable_ratio{0.0f};
+        size_t decoded_length{0};
+        int score{std::numeric_limits<int>::min()};
+    };
+
+    enum class FrameOutcome { Success, NeedMoreData, Failure };
+
+    // Buffer of partially received encoded bytes that haven't formed a full decoded data byte yet.
     mutable std::vector<uint8_t> encoded_rx_buffer_{};
 
     // Buffer for decoded bytes that were read ahead of the consumer.
@@ -276,26 +285,17 @@ class JuttaConnection {
     // Buffer for decoded bytes collected while looking for complete CRLF-terminated lines.
     mutable std::string response_line_buffer_{};
 
-    mutable std::vector<uint8_t> codec_detection_buffer_{};
-    mutable DbCodecState codec_state_{};
-    mutable bool codec_alignment_applied_{false};
-    struct CodecCandidateLog {
-        bool valid{false};
-        float ratio{0.0f};
-        bool msb_first{false};
-        uint8_t align{0};
-        std::array<uint8_t, 4> mapping{{0, 1, 2, 3}};
-    };
-    mutable CodecCandidateLog codec_last_candidate_{};
+    mutable CodecRuntimeState codec_state_{};
+    mutable int last_logged_align_{-1};
+    mutable bool last_logged_msb_first_{true};
+    mutable uint8_t last_logged_xor_{0x00};
 
     void reinject_decoded_front(const std::string& data) const;
 
     void reset_codec_state() const;
-    void collect_detection_samples(const uint8_t* data, size_t length) const;
-    bool ensure_codec_configured() const;
     bool decode_buffer(std::vector<uint8_t>& data) const;
-    bool decode_stream_into(std::vector<uint8_t>& output, const DbCodecState& state,
-                           const uint8_t* data, size_t symbol_count) const;
+    FrameOutcome decode_best_ascii_frame(std::vector<uint8_t>& ascii, size_t& consumed_symbols,
+                                         FrameDiagnostics& diagnostics) const;
     std::vector<uint8_t> encode_stream(const std::vector<uint8_t>& data) const;
     std::vector<uint8_t> encode_stream(const std::string& data) const;
 

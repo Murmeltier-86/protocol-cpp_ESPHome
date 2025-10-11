@@ -19,67 +19,48 @@ static const char* TAG = "jutta_connection";
 
 namespace {
 constexpr uint32_t JUTTA_SERIAL_GAP_MS = 8;
-constexpr std::array<uint8_t, 4> JUTTA_DB_CODEWORDS = {0xFF, 0xDF, 0xFB, 0xDB};
-constexpr std::array<uint8_t, 4> DEFAULT_PAIR_TO_CODEWORD = {0xDB, 0xDF, 0xFB, 0xFF};
+constexpr std::array<uint8_t, 4> DEFAULT_PAIR_TO_CODEWORD = {0xFF, 0xDF, 0xFB, 0xDB};
 constexpr float PRINTABLE_THRESHOLD = 0.7f;
-constexpr float DETECTOR_SUCCESS_THRESHOLD = 0.9f;
-constexpr float DETECTOR_LOG_THRESHOLD = 0.5f;
-constexpr size_t DETECTOR_MIN_SYMBOLS = 16;
-constexpr size_t DETECTOR_BUFFER_LIMIT = 512;
+constexpr int SCORE_INVALID = -1000;
+constexpr size_t MAX_FRAME_BYTES = 1024;
 
-struct PrintableStats {
-    size_t printable{0};
-    size_t total{0};
+struct FrameScore {
+    int score{SCORE_INVALID};
+    float printable_ratio{0.0f};
     bool has_crlf{false};
-    float ratio{0.0f};
 };
 
-PrintableStats analyze_printable(const std::string& text) {
-    PrintableStats stats{};
-    stats.total = text.size();
-    stats.has_crlf = text.find("\r\n") != std::string::npos;
-    for (unsigned char c : text) {
-        if (std::isprint(c) != 0 || c == '\r' || c == '\n' || c == '\t') {
-            ++stats.printable;
-        }
-    }
-    if (stats.total > 0) {
-        stats.ratio = static_cast<float>(stats.printable) / static_cast<float>(stats.total);
-    }
-    return stats;
-}
-
-int codeword_index(uint8_t symbol) {
-    for (size_t i = 0; i < JUTTA_DB_CODEWORDS.size(); ++i) {
-        if (JUTTA_DB_CODEWORDS[i] == symbol) {
-            return static_cast<int>(i);
-        }
-    }
-    return -1;
-}
-
-const std::vector<std::array<uint8_t, 4>>& all_symbol_mappings() {
-    static const std::vector<std::array<uint8_t, 4>> mappings = [] {
-        std::vector<std::array<uint8_t, 4>> result;
-        std::array<uint8_t, 4> values{0, 1, 2, 3};
-        do {
-            result.push_back(values);
-        } while (std::next_permutation(values.begin(), values.end()));
+FrameScore evaluate_ascii_buffer(const uint8_t* data, size_t length) {
+    FrameScore result{};
+    if (data == nullptr || length == 0) {
+        result.score = SCORE_INVALID;
         return result;
-    }();
-    return mappings;
-}
-
-std::string describe_mapping(const std::array<uint8_t, 4>& mapping) {
-    std::ostringstream stream;
-    for (size_t i = 0; i < mapping.size(); ++i) {
-        if (i > 0) {
-            stream << ", ";
-        }
-        stream << "0x" << std::uppercase << std::setfill('0') << std::setw(2) << std::hex
-               << static_cast<int>(JUTTA_DB_CODEWORDS[i]) << "→" << std::dec << static_cast<int>(mapping[i]);
     }
-    return stream.str();
+
+    size_t printable = 0;
+    bool has_crlf = false;
+    for (size_t i = 0; i < length; ++i) {
+        unsigned char c = data[i];
+        if (c == '\r' && i + 1 < length && data[i + 1] == '\n') {
+            has_crlf = true;
+        }
+        if (std::isprint(c) != 0 || c == '\r' || c == '\n' || c == '\t') {
+            ++printable;
+        }
+    }
+
+    result.printable_ratio = static_cast<float>(printable) / static_cast<float>(length);
+    result.has_crlf = has_crlf;
+
+    int score = static_cast<int>(printable);
+    if (has_crlf) {
+        score += 5;
+    }
+    if (data[0] == '@' || data[0] == '&') {
+        score += 5;
+    }
+    result.score = score;
+    return result;
 }
 std::string format_hex(const uint8_t* data, size_t length) {
     if (length == 0) {
@@ -317,14 +298,15 @@ std::vector<uint8_t> JuttaConnection::encode_stream(const std::vector<uint8_t>& 
     std::vector<uint8_t> encoded;
     encoded.reserve(data.size() * 4);
 
-    const auto& pair_to_codeword = this->codec_state_.configured ? this->codec_state_.codeword_for_pair
-                                                                  : DEFAULT_PAIR_TO_CODEWORD;
-    bool msb_first = this->codec_state_.configured ? this->codec_state_.msb_first : false;
+    const auto& pair_to_codeword = DEFAULT_PAIR_TO_CODEWORD;
+    bool msb_first = this->codec_state_.have_detection ? this->codec_state_.msb_first : true;
+    uint8_t xor_key = this->codec_state_.have_detection ? this->codec_state_.xor_key : 0x00;
 
     for (uint8_t value : data) {
+        uint8_t prepared = static_cast<uint8_t>(value ^ xor_key);
         for (int group = 0; group < 4; ++group) {
             size_t shift = msb_first ? static_cast<size_t>(3 - group) * 2 : static_cast<size_t>(group) * 2;
-            uint8_t pair = static_cast<uint8_t>((value >> shift) & 0x03);
+            uint8_t pair = static_cast<uint8_t>((prepared >> shift) & 0x03);
             encoded.push_back(pair_to_codeword[pair]);
         }
     }
@@ -375,202 +357,248 @@ void JuttaConnection::print_bytes(const std::vector<uint8_t>& data) {
 }
 
 void JuttaConnection::reset_codec_state() const {
-    this->codec_state_ = DbCodecState{};
-    this->codec_state_.codeword_for_pair = DEFAULT_PAIR_TO_CODEWORD;
-    this->codec_detection_buffer_.clear();
-    this->codec_alignment_applied_ = false;
+    this->codec_state_ = CodecRuntimeState{};
+    this->codec_state_.have_detection = false;
+    this->codec_state_.msb_first = true;
+    this->codec_state_.xor_key = 0x00;
+    this->last_logged_align_ = -1;
+    this->last_logged_msb_first_ = true;
+    this->last_logged_xor_ = 0x00;
 }
 
-void JuttaConnection::collect_detection_samples(const uint8_t* data, size_t length) const {
-    if (data == nullptr || length == 0 || this->codec_state_.configured) {
-        return;
-    }
-    this->codec_detection_buffer_.insert(this->codec_detection_buffer_.end(), data, data + length);
-    if (this->codec_detection_buffer_.size() > DETECTOR_BUFFER_LIMIT) {
-        size_t excess = this->codec_detection_buffer_.size() - DETECTOR_BUFFER_LIMIT;
-        this->codec_detection_buffer_.erase(this->codec_detection_buffer_.begin(),
-                                            this->codec_detection_buffer_.begin() + excess);
-    }
-}
+JuttaConnection::FrameOutcome JuttaConnection::decode_best_ascii_frame(std::vector<uint8_t>& ascii,
+                                                                      size_t& consumed_symbols,
+                                                                      FrameDiagnostics& diagnostics) const {
+    ascii.clear();
+    consumed_symbols = 0;
+    diagnostics = {};
 
-bool JuttaConnection::decode_stream_into(std::vector<uint8_t>& output, const DbCodecState& state,
-                                         const uint8_t* data, size_t symbol_count) const {
-    if (data == nullptr || symbol_count == 0 || symbol_count % 4 != 0) {
-        return false;
+    if (this->encoded_rx_buffer_.size() < 4) {
+        return FrameOutcome::NeedMoreData;
     }
 
-    output.clear();
-    size_t frames = symbol_count / 4;
-    output.reserve(frames);
-    for (size_t frame = 0; frame < frames; ++frame) {
-        uint8_t decoded = 0;
-        for (size_t group = 0; group < 4; ++group) {
-            uint8_t symbol = data[frame * 4 + group];
-            int index = codeword_index(symbol);
-            if (index < 0) {
-                ESP_LOGV(TAG, "Unbekanntes Codewort 0x%02X beim Dekodieren", symbol);
-                return false;
-            }
-            uint8_t pair = state.pair_for_codeword[index];
-            size_t shift = state.msb_first ? (3 - group) * 2 : group * 2;
-            decoded |= static_cast<uint8_t>((pair & 0x3) << shift);
+    const uint8_t* symbols = this->encoded_rx_buffer_.data();
+    size_t symbol_count = this->encoded_rx_buffer_.size();
+
+    auto sym2bits = [](uint8_t b) -> int {
+        if (b == 0xFF) {
+            return 0;
         }
-        output.push_back(decoded);
-    }
-    return true;
-}
-
-bool JuttaConnection::ensure_codec_configured() const {
-    if (this->codec_state_.configured) {
-        return true;
-    }
-
-    if (this->codec_detection_buffer_.size() < DETECTOR_MIN_SYMBOLS) {
-        return false;
-    }
+        if (b == 0xDF) {
+            return 1;
+        }
+        if (b == 0xFB) {
+            return 2;
+        }
+        if (b == 0xDB) {
+            return 3;
+        }
+        return -1;
+    };
 
     struct Candidate {
         bool valid{false};
-        float ratio{0.0f};
-        size_t decoded_bytes{0};
-        bool msb_first{false};
-        uint8_t align{0};
-        std::array<uint8_t, 4> mapping{{0, 1, 2, 3}};
-        std::string preview;
+        bool ascii_complete{false};
+        int score{SCORE_INVALID};
+        int align{0};
+        bool msb_first{true};
+        uint8_t xor_key{0};
+        size_t used_symbols{0};
+        size_t length{0};
+        float printable_ratio{0.0f};
+        std::array<uint8_t, MAX_FRAME_BYTES> ascii{};
     };
 
-    Candidate best{};
-    const auto& mappings = all_symbol_mappings();
-    const uint8_t* symbols = this->codec_detection_buffer_.data();
-    size_t symbol_count = this->codec_detection_buffer_.size();
+    Candidate best_complete{};
+    Candidate best_partial{};
+    best_complete.score = SCORE_INVALID;
+    best_partial.score = SCORE_INVALID;
+    bool saw_invalid_symbol = false;
 
-    for (uint8_t align = 0; align < 4; ++align) {
-        if (symbol_count <= align) {
+    const uint8_t xor_keys[] = {0x00, 0xFF, 0xA5};
+
+    for (int align = 0; align < 4; ++align) {
+        if (symbol_count <= static_cast<size_t>(align) + 3) {
             continue;
         }
-        size_t available = symbol_count - align;
-        size_t frames = available / 4;
-        if (frames < 2) {
-            continue;
-        }
-        size_t used_symbols = frames * 4;
-        const uint8_t* start = symbols + align;
 
-        for (const auto& mapping : mappings) {
-            DbCodecState candidate_state{};
-            candidate_state.pair_for_codeword = mapping;
+        for (bool msb_first : {true, false}) {
+            Candidate candidate{};
+            candidate.align = align;
+            candidate.msb_first = msb_first;
 
-            for (bool msb_first : {false, true}) {
-                candidate_state.msb_first = msb_first;
-                std::vector<uint8_t> decoded;
-                if (!decode_stream_into(decoded, candidate_state, start, used_symbols)) {
-                    continue;
+            std::array<uint8_t, MAX_FRAME_BYTES> raw{};
+            size_t raw_len = 0;
+            size_t used_symbols_local = 0;
+            bool invalid = false;
+
+            for (size_t idx = static_cast<size_t>(align); idx + 3 < symbol_count && raw_len < MAX_FRAME_BYTES;
+                 idx += 4) {
+                int q0 = sym2bits(symbols[idx + 0]);
+                int q1 = sym2bits(symbols[idx + 1]);
+                int q2 = sym2bits(symbols[idx + 2]);
+                int q3 = sym2bits(symbols[idx + 3]);
+                if ((q0 | q1 | q2 | q3) < 0) {
+                    invalid = true;
+                    break;
                 }
-                std::string decoded_text(decoded.begin(), decoded.end());
-                auto stats = analyze_printable(decoded_text);
 
-                if (!best.valid || stats.ratio > best.ratio + 1e-3f ||
-                    (std::abs(stats.ratio - best.ratio) < 1e-3f && decoded.size() > best.decoded_bytes)) {
-                    best.valid = true;
-                    best.ratio = stats.ratio;
-                    best.decoded_bytes = decoded.size();
-                    best.msb_first = msb_first;
-                    best.align = align;
-                    best.mapping = mapping;
-                    best.preview = decoded_text;
+                uint8_t decoded = 0;
+                if (msb_first) {
+                    decoded = static_cast<uint8_t>((q0 << 6) | (q1 << 4) | (q2 << 2) | q3);
+                } else {
+                    decoded = static_cast<uint8_t>((q3 << 6) | (q2 << 4) | (q1 << 2) | q0);
+                }
+                raw[raw_len++] = decoded;
+                used_symbols_local = (idx + 4) - static_cast<size_t>(align);
+
+                if (raw_len >= 2 && raw[raw_len - 2] == 0x0D && raw[raw_len - 1] == 0x0A) {
+                    break;
+                }
+            }
+
+            if (invalid) {
+                saw_invalid_symbol = true;
+                continue;
+            }
+
+            if (raw_len == 0) {
+                continue;
+            }
+
+            candidate.length = raw_len;
+            candidate.used_symbols = static_cast<size_t>(align) + used_symbols_local;
+            if (candidate.used_symbols == 0) {
+                candidate.used_symbols = raw_len * 4;  // fallback
+            }
+
+            std::array<uint8_t, MAX_FRAME_BYTES> tmp_ascii{};
+            FrameScore best_score{};
+            best_score.score = SCORE_INVALID;
+            uint8_t best_key = 0x00;
+            std::array<uint8_t, MAX_FRAME_BYTES> best_ascii{};
+
+            for (uint8_t key : xor_keys) {
+                for (size_t i = 0; i < raw_len; ++i) {
+                    tmp_ascii[i] = static_cast<uint8_t>(raw[i] ^ key);
+                }
+                FrameScore score = evaluate_ascii_buffer(tmp_ascii.data(), raw_len);
+                if (score.score > best_score.score) {
+                    best_score = score;
+                    best_key = key;
+                    std::copy(tmp_ascii.begin(), tmp_ascii.begin() + raw_len, best_ascii.begin());
+                }
+            }
+
+            if (best_score.score <= SCORE_INVALID) {
+                continue;
+            }
+
+            candidate.valid = true;
+            candidate.score = best_score.score;
+            candidate.xor_key = best_key;
+            candidate.printable_ratio = best_score.printable_ratio;
+            candidate.ascii_complete = best_score.has_crlf;
+            candidate.ascii = best_ascii;
+
+            if (candidate.ascii_complete && candidate.printable_ratio >= PRINTABLE_THRESHOLD) {
+                if (!best_complete.valid || candidate.score > best_complete.score) {
+                    best_complete = candidate;
+                }
+            } else {
+                if (!best_partial.valid || candidate.score > best_partial.score) {
+                    best_partial = candidate;
                 }
             }
         }
     }
 
-    if (!best.valid) {
-        return false;
+    if (best_complete.valid) {
+        ascii.assign(best_complete.ascii.begin(), best_complete.ascii.begin() + best_complete.length);
+        consumed_symbols = best_complete.used_symbols;
+        diagnostics.align = best_complete.align;
+        diagnostics.msb_first = best_complete.msb_first;
+        diagnostics.xor_key = best_complete.xor_key;
+        diagnostics.printable_ratio = best_complete.printable_ratio;
+        diagnostics.decoded_length = best_complete.length;
+        diagnostics.score = best_complete.score;
+        return FrameOutcome::Success;
     }
 
-    std::string mapping_desc = describe_mapping(best.mapping);
-    if (best.ratio < DETECTOR_SUCCESS_THRESHOLD) {
-        bool should_log = !this->codec_last_candidate_.valid ||
-                          std::abs(best.ratio - this->codec_last_candidate_.ratio) > 0.01f ||
-                          best.msb_first != this->codec_last_candidate_.msb_first ||
-                          best.align != this->codec_last_candidate_.align ||
-                          best.mapping != this->codec_last_candidate_.mapping;
-        if (should_log) {
-            ESP_LOGD(TAG,
-                     "Auto-Detektor Kandidat: mapping=%s, msb_first=%s, align=%u, druckbar=%.1f%% (%zu Byte)",
-                     mapping_desc.c_str(), best.msb_first ? "true" : "false", best.align, best.ratio * 100.0f,
-                     best.decoded_bytes);
-            this->codec_last_candidate_.valid = true;
-            this->codec_last_candidate_.ratio = best.ratio;
-            this->codec_last_candidate_.msb_first = best.msb_first;
-            this->codec_last_candidate_.align = best.align;
-            this->codec_last_candidate_.mapping = best.mapping;
-        }
-        return false;
+    if (best_partial.valid) {
+        return FrameOutcome::NeedMoreData;
     }
 
-    DbCodecState state{};
-    state.configured = true;
-    state.msb_first = best.msb_first;
-    state.align = best.align;
-    state.pair_for_codeword = best.mapping;
-    state.codeword_for_pair = DEFAULT_PAIR_TO_CODEWORD;
-    for (size_t i = 0; i < best.mapping.size(); ++i) {
-        uint8_t pair = best.mapping[i];
-        if (pair < state.codeword_for_pair.size()) {
-            state.codeword_for_pair[pair] = JUTTA_DB_CODEWORDS[i];
-        }
-    }
-
-    this->codec_state_ = state;
-    this->codec_alignment_applied_ = false;
-    this->codec_detection_buffer_.clear();
-    this->codec_last_candidate_.valid = false;
-
-    ESP_LOGI(TAG,
-             "Auto-Detektor aktiviert: mapping=%s, msb_first=%s, align=%u, druckbar=%.1f%%, Beispiel='%s'",
-             mapping_desc.c_str(), state.msb_first ? "true" : "false", state.align, best.ratio * 100.0f,
-             format_printable(best.preview).c_str());
-    return true;
+    return saw_invalid_symbol ? FrameOutcome::Failure : FrameOutcome::NeedMoreData;
 }
 
 bool JuttaConnection::decode_buffer(std::vector<uint8_t>& data) const {
     data.clear();
 
     while (true) {
-        std::array<uint8_t, 4> chunk{};
+        std::array<uint8_t, 16> chunk{};
         size_t read = serial.read_serial(chunk);
         if (read == 0) {
             break;
         }
         this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + read);
-        collect_detection_samples(chunk.data(), read);
     }
 
-    if (!ensure_codec_configured()) {
-        return false;
+    bool produced = false;
+
+    while (!this->encoded_rx_buffer_.empty()) {
+        std::vector<uint8_t> frame_ascii;
+        size_t consumed = 0;
+        FrameDiagnostics diag{};
+        FrameOutcome outcome = this->decode_best_ascii_frame(frame_ascii, consumed, diag);
+
+        if (outcome == FrameOutcome::Success) {
+            if (consumed == 0 || consumed > this->encoded_rx_buffer_.size()) {
+                this->encoded_rx_buffer_.clear();
+            } else {
+                this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin(),
+                                               this->encoded_rx_buffer_.begin() + consumed);
+            }
+
+            if (!frame_ascii.empty()) {
+                data.insert(data.end(), frame_ascii.begin(), frame_ascii.end());
+                produced = true;
+            }
+
+            if (!frame_ascii.empty()) {
+                this->codec_state_.have_detection = true;
+                this->codec_state_.msb_first = diag.msb_first;
+                this->codec_state_.xor_key = diag.xor_key;
+
+                if (diag.align != this->last_logged_align_ || diag.msb_first != this->last_logged_msb_first_ ||
+                    diag.xor_key != this->last_logged_xor_) {
+                    ESP_LOGI(TAG,
+                             "Auto-Decoder: align=%d, msb_first=%s, xor=0x%02X, Länge=%zu, druckbar=%.1f%%, Score=%d",
+                             diag.align, diag.msb_first ? "true" : "false", diag.xor_key, diag.decoded_length,
+                             diag.printable_ratio * 100.0f, diag.score);
+                    this->last_logged_align_ = diag.align;
+                    this->last_logged_msb_first_ = diag.msb_first;
+                    this->last_logged_xor_ = diag.xor_key;
+                }
+            }
+            continue;
+        }
+
+        if (outcome == FrameOutcome::NeedMoreData) {
+            break;
+        }
+
+        if (!this->encoded_rx_buffer_.empty()) {
+            uint8_t dropped = this->encoded_rx_buffer_.front();
+            this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin());
+            ESP_LOGW(TAG, "Verwerfe einzelnes Codewort 0x%02X zur Neu-Synchronisation.", dropped);
+            continue;
+        }
+
+        break;
     }
 
-    if (!this->codec_alignment_applied_ && this->codec_state_.align > 0) {
-        size_t drop = std::min<size_t>(this->codec_state_.align, this->encoded_rx_buffer_.size());
-        this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin(), this->encoded_rx_buffer_.begin() + drop);
-        this->codec_alignment_applied_ = true;
-    }
-
-    size_t usable_symbols = (this->encoded_rx_buffer_.size() / 4) * 4;
-    if (usable_symbols == 0) {
-        return false;
-    }
-
-    if (!decode_stream_into(data, this->codec_state_, this->encoded_rx_buffer_.data(), usable_symbols)) {
-        ESP_LOGW(TAG, "Dekodierung von %zu Symbolen mit aktueller Zuordnung fehlgeschlagen.", usable_symbols);
-        size_t drop = std::min<size_t>(usable_symbols, static_cast<size_t>(4));
-        this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin(), this->encoded_rx_buffer_.begin() + drop);
-        return false;
-    }
-
-    this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin(),
-                                   this->encoded_rx_buffer_.begin() + usable_symbols);
-    return !data.empty();
+    return produced;
 }
 
 void JuttaConnection::flush_serial_input() const {
