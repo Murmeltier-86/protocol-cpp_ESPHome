@@ -17,6 +17,7 @@ bool load_errors_from_xml(const std::string &xml_content);
 const ErrorDesc *find_error(uint32_t code);
 const std::vector<ErrorDesc> &all_errors();
 const std::string &error_source_command();
+const std::string &error_source_path();
 
 }  // namespace jutta_component
 }  // namespace esphome

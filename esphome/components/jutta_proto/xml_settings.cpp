@@ -139,6 +139,8 @@ bool parse_setting_tag(const std::string &tag_text, SettingDesc &out) {
   trim(out.unit);
   out.source_cmd = attrs.get("source_cmd");
   trim(out.source_cmd);
+  out.path = attrs.get("path");
+  trim(out.path);
   parse_size_t(attrs, "offset", out.offset);
   parse_size_t(attrs, "width", out.width);
   parse_float(attrs, "scale", out.scale);
