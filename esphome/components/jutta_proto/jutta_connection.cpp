@@ -346,7 +346,7 @@ void JuttaConnection::run_encode_decode_test() {
 std::array<uint8_t, 4> JuttaConnection::encode(const uint8_t& decData) {
     std::array<uint8_t, 4> encData{};
     for (int group = 0; group < 4; ++group) {
-        int shift = 6 - (group * 2);
+        int shift = group * 2;
         uint8_t bits = static_cast<uint8_t>((decData >> shift) & 0x03);
         encData[group] = JUTTA_DB_CODEWORDS[bits];
     }
@@ -362,7 +362,7 @@ uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
             ESP_LOGW(TAG, "Ungültiges 2b4b-Symbol 0x%02X in Frame", static_cast<unsigned>(encoded));
             continue;
         }
-        int shift = 6 - (group * 2);
+        int shift = group * 2;
         decData |= static_cast<uint8_t>(bits << shift);
     }
     return decData;
