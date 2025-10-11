@@ -379,12 +379,16 @@ async def to_code(config):
     await uart.register_uart_device(var, config)
 
     if CONF_MACHINE_DATA in config:
-        sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
-        cg.add(var.set_machine_data_sensor(sensor))
+        machine_data_sensor = await text_sensor.new_text_sensor(
+            config[CONF_MACHINE_DATA]
+        )
+        cg.add(var.set_machine_data_sensor(machine_data_sensor))
 
     if CONF_MACHINE_SETTINGS in config:
-        sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_SETTINGS])
-        cg.add(var.set_machine_settings_sensor(sensor))
+        machine_settings_sensor = await text_sensor.new_text_sensor(
+            config[CONF_MACHINE_SETTINGS]
+        )
+        cg.add(var.set_machine_settings_sensor(machine_settings_sensor))
 
     xml_sensors = config.get(CONF_XML_SENSORS, [])
 
