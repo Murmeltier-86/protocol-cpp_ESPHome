@@ -1,6 +1,7 @@
 #include "jutta_connection.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cassert>
 #include <cctype>
 #include <cstddef>
@@ -18,16 +19,68 @@ static const char* TAG = "jutta_connection";
 
 namespace {
 constexpr uint32_t JUTTA_SERIAL_GAP_MS = 8;
-constexpr uint8_t JUTTA_ENCODE_BASE = 0xFF;
-constexpr uint8_t JUTTA_BIT0_MASK = static_cast<uint8_t>(1u << 2);
-constexpr uint8_t JUTTA_BIT1_MASK = static_cast<uint8_t>(1u << 5);
-constexpr std::array<uint8_t, 4> JUTTA_DB_CODEWORDS = {
-    JUTTA_ENCODE_BASE,
-    static_cast<uint8_t>(JUTTA_ENCODE_BASE - JUTTA_BIT0_MASK),
-    static_cast<uint8_t>(JUTTA_ENCODE_BASE - JUTTA_BIT1_MASK),
-    static_cast<uint8_t>(JUTTA_ENCODE_BASE - JUTTA_BIT0_MASK - JUTTA_BIT1_MASK),
-};
+constexpr std::array<uint8_t, 4> JUTTA_DB_CODEWORDS = {0xFF, 0xDF, 0xFB, 0xDB};
+constexpr std::array<uint8_t, 4> DEFAULT_PAIR_TO_CODEWORD = {0xDB, 0xDF, 0xFB, 0xFF};
 constexpr float PRINTABLE_THRESHOLD = 0.7f;
+constexpr float DETECTOR_SUCCESS_THRESHOLD = 0.9f;
+constexpr float DETECTOR_LOG_THRESHOLD = 0.5f;
+constexpr size_t DETECTOR_MIN_SYMBOLS = 16;
+constexpr size_t DETECTOR_BUFFER_LIMIT = 512;
+
+struct PrintableStats {
+    size_t printable{0};
+    size_t total{0};
+    bool has_crlf{false};
+    float ratio{0.0f};
+};
+
+PrintableStats analyze_printable(const std::string& text) {
+    PrintableStats stats{};
+    stats.total = text.size();
+    stats.has_crlf = text.find("\r\n") != std::string::npos;
+    for (unsigned char c : text) {
+        if (std::isprint(c) != 0 || c == '\r' || c == '\n' || c == '\t') {
+            ++stats.printable;
+        }
+    }
+    if (stats.total > 0) {
+        stats.ratio = static_cast<float>(stats.printable) / static_cast<float>(stats.total);
+    }
+    return stats;
+}
+
+int codeword_index(uint8_t symbol) {
+    for (size_t i = 0; i < JUTTA_DB_CODEWORDS.size(); ++i) {
+        if (JUTTA_DB_CODEWORDS[i] == symbol) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+const std::vector<std::array<uint8_t, 4>>& all_symbol_mappings() {
+    static const std::vector<std::array<uint8_t, 4>> mappings = [] {
+        std::vector<std::array<uint8_t, 4>> result;
+        std::array<uint8_t, 4> values{0, 1, 2, 3};
+        do {
+            result.push_back(values);
+        } while (std::next_permutation(values.begin(), values.end()));
+        return result;
+    }();
+    return mappings;
+}
+
+std::string describe_mapping(const std::array<uint8_t, 4>& mapping) {
+    std::ostringstream stream;
+    for (size_t i = 0; i < mapping.size(); ++i) {
+        if (i > 0) {
+            stream << ", ";
+        }
+        stream << "0x" << std::uppercase << std::setfill('0') << std::setw(2) << std::hex
+               << static_cast<int>(JUTTA_DB_CODEWORDS[i]) << "→" << std::dec << static_cast<int>(mapping[i]);
+    }
+    return stream.str();
+}
 std::string format_hex(const uint8_t* data, size_t length) {
     if (length == 0) {
         return "[]";
@@ -117,15 +170,6 @@ bool try_extract_line(std::string& buffer, std::string& line) {
     return true;
 }
 
-inline bool is_possible_encoded_byte(uint8_t byte) {
-    for (uint8_t codeword : JUTTA_DB_CODEWORDS) {
-        if (byte == codeword) {
-            return true;
-        }
-    }
-    return false;
-}
-
 bool is_mostly_printable(const std::string& text) {
     if (text.empty()) {
         return true;
@@ -142,15 +186,6 @@ bool is_mostly_printable(const std::string& text) {
     return ratio >= PRINTABLE_THRESHOLD;
 }
 
-inline bool frames_equivalent(const std::array<uint8_t, 4>& lhs, const std::array<uint8_t, 4>& rhs) {
-    for (size_t i = 0; i < lhs.size(); ++i) {
-        if (lhs[i] != rhs[i]) {
-            return false;
-        }
-    }
-    return true;
-}
-
 inline void wait_for_jutta_gap() {
     if (JUTTA_SERIAL_GAP_MS > 0) {
         esphome::delay(JUTTA_SERIAL_GAP_MS);
@@ -159,7 +194,9 @@ inline void wait_for_jutta_gap() {
 
 }  // namespace
 
-JuttaConnection::JuttaConnection(esphome::uart::UARTComponent* parent) : serial(parent) {}
+JuttaConnection::JuttaConnection(esphome::uart::UARTComponent* parent) : serial(parent) {
+    this->reset_codec_state();
+}
 
 void JuttaConnection::init() {
     serial.init();
@@ -176,6 +213,7 @@ bool JuttaConnection::read_decoded(uint8_t* byte) {
 bool JuttaConnection::read_decoded_unsafe(uint8_t* byte) const {
     ESP_LOGVV(TAG, "Attempting to read single decoded byte (encoded buffer size=%zu, decoded buffer size=%zu).",
               this->encoded_rx_buffer_.size(), this->decoded_rx_buffer_.size());
+
     if (!this->decoded_rx_buffer_.empty()) {
         *byte = this->decoded_rx_buffer_.front();
         this->decoded_rx_buffer_.pop_front();
@@ -183,12 +221,23 @@ bool JuttaConnection::read_decoded_unsafe(uint8_t* byte) const {
                  format_hex(*byte).c_str());
         return true;
     }
-    std::array<uint8_t, 4> buffer{};
-    if (!read_encoded_unsafe(buffer)) {
-        ESP_LOGVV(TAG, "Unable to read encoded frame for single byte - waiting for more data.");
+
+    std::vector<uint8_t> chunk;
+    if (!this->decode_buffer(chunk) || chunk.empty()) {
+        ESP_LOGVV(TAG, "Decoder not ready for single byte yet.");
         return false;
     }
-    *byte = decode(buffer);
+
+    for (uint8_t value : chunk) {
+        this->decoded_rx_buffer_.push_back(value);
+    }
+
+    if (this->decoded_rx_buffer_.empty()) {
+        return false;
+    }
+
+    *byte = this->decoded_rx_buffer_.front();
+    this->decoded_rx_buffer_.pop_front();
     ESP_LOGD(TAG, "Decoded byte: '%s' (%s)", format_printable(*byte).c_str(), format_hex(*byte).c_str());
     return true;
 }
@@ -196,78 +245,49 @@ bool JuttaConnection::read_decoded_unsafe(uint8_t* byte) const {
 bool JuttaConnection::read_decoded_unsafe(std::vector<uint8_t>& data) const {
     ESP_LOGVV(TAG, "Attempting to read decoded bytes (encoded buffer size=%zu, decoded buffer size=%zu).",
               this->encoded_rx_buffer_.size(), this->decoded_rx_buffer_.size());
+
+    data.clear();
     bool any_data = false;
 
     if (!this->decoded_rx_buffer_.empty()) {
-        while (!this->decoded_rx_buffer_.empty()) {
-            uint8_t buffered_byte = this->decoded_rx_buffer_.front();
-            this->decoded_rx_buffer_.pop_front();
-            data.push_back(buffered_byte);
-        }
+        data.insert(data.end(), this->decoded_rx_buffer_.begin(), this->decoded_rx_buffer_.end());
+        this->decoded_rx_buffer_.clear();
+        any_data = !data.empty();
+    }
+
+    std::vector<uint8_t> chunk;
+    if (this->decode_buffer(chunk) && !chunk.empty()) {
+        data.insert(data.end(), chunk.begin(), chunk.end());
         any_data = true;
     }
 
-    std::vector<std::array<uint8_t, 4>> dataBuffer;
-    size_t frames_read = read_encoded_unsafe(dataBuffer);
-    if (frames_read == 0) {
-        if (any_data) {
-            ESP_LOGD(TAG, "Read decoded payload from buffer (%zu byte%s).", data.size(), data.size() == 1 ? "" : "s");
-            return true;
-        }
-        ESP_LOGVV(TAG, "No complete encoded frames available to decode yet.");
-        return false;
+    if (any_data) {
+        ESP_LOGD(TAG, "Read decoded payload (%zu byte%s): '%s' (hex %s)", data.size(),
+                 data.size() == 1 ? "" : "s", format_printable(data).c_str(), format_hex(data).c_str());
     }
 
-    size_t index = 0;
-    std::vector<uint8_t> newly_decoded;
-    newly_decoded.reserve(dataBuffer.size());
-    for (const std::array<uint8_t, 4>& buffer : dataBuffer) {
-        uint8_t decoded_byte = decode(buffer);
-        data.push_back(decoded_byte);
-        newly_decoded.push_back(decoded_byte);
-        ESP_LOGVV(TAG, "Decoded frame %zu: %s -> '%s' (%s)", index, format_hex(buffer).c_str(),
-                  format_printable(decoded_byte).c_str(), format_hex(decoded_byte).c_str());
-        ++index;
-    }
-    std::string decoded = vec_to_string(newly_decoded);
-    ESP_LOGD(TAG, "Read decoded payload (%zu byte%s): '%s' (hex %s)", dataBuffer.size(),
-             dataBuffer.size() == 1 ? "" : "s", format_printable(decoded).c_str(), format_hex(newly_decoded).c_str());
-    return true;
+    return any_data;
 }
 
 bool JuttaConnection::write_decoded_unsafe(const uint8_t& byte) const {
-    ESP_LOGD(TAG, "Queueing single decoded byte for transmission: '%s' (%s)",
-             format_printable(byte).c_str(), format_hex(byte).c_str());
-    auto encoded = encode(byte);
-    ESP_LOGVV(TAG, "Encoded representation: %s", format_hex(encoded).c_str());
-    bool result = write_encoded_unsafe(encoded);
-    ESP_LOGVV(TAG, "Transmission of decoded byte %s", result ? "succeeded" : "failed");
-    return result;
+    return write_decoded_unsafe(std::vector<uint8_t>{byte});
 }
 
 bool JuttaConnection::write_decoded_unsafe(const std::vector<uint8_t>& data) const {
-    // Bad compiler support:
-    // return std::ranges::all_of(data.begin(), data.end(), [this](uint8_t byte) { return write_decoded_unsafe(byte); });
-    // So we use this until it gets better:
     if (!data.empty()) {
         ESP_LOGD(TAG, "Queueing %zu decoded byte%s for transmission: '%s' (hex %s)", data.size(),
                  data.size() == 1 ? "" : "s", format_printable(data).c_str(), format_hex(data).c_str());
     } else {
         ESP_LOGVV(TAG, "Requested to write an empty decoded payload.");
+        return true;
     }
-    bool result = true;
-    for (uint8_t byte : data) {
-        if (!write_decoded_unsafe(byte)) {
-            result = false;
-        }
-    }
-    return result;
+
+    std::vector<uint8_t> encoded = this->encode_stream(data);
+    ESP_LOGVV(TAG, "Encoded block: %s", format_hex(encoded).c_str());
+    return this->write_encoded_unsafe(encoded);
 }
 
 bool JuttaConnection::write_decoded_unsafe(const std::string& data) const {
-    // Bad compiler support:
-    // return std::ranges::all_of(data.begin(), data.end(), [this](char c) { return write_decoded_unsafe(static_cast<uint8_t>(c)); });
-    // So we use this until it gets better:
     std::vector<uint8_t> bytes(data.begin(), data.end());
     return write_decoded_unsafe(bytes);
 }
@@ -293,6 +313,53 @@ bool JuttaConnection::write_decoded(const std::string& data) {
     return write_decoded_unsafe(data);
 }
 
+std::vector<uint8_t> JuttaConnection::encode_stream(const std::vector<uint8_t>& data) const {
+    std::vector<uint8_t> encoded;
+    encoded.reserve(data.size() * 4);
+
+    const auto& pair_to_codeword = this->codec_state_.configured ? this->codec_state_.codeword_for_pair
+                                                                  : DEFAULT_PAIR_TO_CODEWORD;
+    bool msb_first = this->codec_state_.configured ? this->codec_state_.msb_first : false;
+
+    for (uint8_t value : data) {
+        for (int group = 0; group < 4; ++group) {
+            size_t shift = msb_first ? static_cast<size_t>(3 - group) * 2 : static_cast<size_t>(group) * 2;
+            uint8_t pair = static_cast<uint8_t>((value >> shift) & 0x03);
+            encoded.push_back(pair_to_codeword[pair]);
+        }
+    }
+
+    return encoded;
+}
+
+std::vector<uint8_t> JuttaConnection::encode_stream(const std::string& data) const {
+    std::vector<uint8_t> bytes(data.begin(), data.end());
+    return encode_stream(bytes);
+}
+
+bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData) const {
+    std::vector<uint8_t> block(encData.begin(), encData.end());
+    return this->write_encoded_unsafe(block);
+}
+
+bool JuttaConnection::write_encoded_unsafe(const std::vector<uint8_t>& encData) const {
+    if (encData.empty()) {
+        ESP_LOGVV(TAG, "Requested to write empty encoded block.");
+        return true;
+    }
+
+    ESP_LOGVV(TAG, "Writing encoded block (%zu Byte): %s", encData.size(), format_hex(encData).c_str());
+    if (!serial.write_serial(encData)) {
+        ESP_LOGE(TAG, "Failed to write encoded block to UART.");
+        return false;
+    }
+
+    serial.flush();
+    wait_for_jutta_gap();
+    ESP_LOGVV(TAG, "Encoded block transmitted successfully.");
+    return true;
+}
+
 void JuttaConnection::print_byte(const uint8_t& byte) {
     for (size_t i = 0; i < 8; i++) {
         ESP_LOGI(TAG, "%d ", ((byte >> (7 - i)) & 0b00000001));
@@ -307,132 +374,203 @@ void JuttaConnection::print_bytes(const std::vector<uint8_t>& data) {
     }
 }
 
-void JuttaConnection::run_encode_decode_test() {
-    bool success = true;
-
-    for (uint16_t i = 0b00000000; i <= 0b11111111; i++) {
-        if (i != decode(encode(i))) {
-            success = false;
-            ESP_LOGE(TAG, "data:");
-            print_byte(i);
-
-            std::array<uint8_t, 4> dataEnc = encode(i);
-            for (size_t i = 0; i < 4; i++) {
-                ESP_LOGE(TAG, "dataEnc[%zu]", i);
-                print_byte(dataEnc.at(i));
-            }
-
-            uint8_t dataDec = decode(dataEnc);
-            ESP_LOGE(TAG, "dataDec:");
-            print_byte(dataDec);
-        }
-    }
-    // Flush the stdout to ensure the result gets printed when assert(success) fails:
-    ESP_LOGI(TAG, "Encode decode test: %s", success ? "true" : "false");
-    assert(success);
+void JuttaConnection::reset_codec_state() const {
+    this->codec_state_ = DbCodecState{};
+    this->codec_state_.codeword_for_pair = DEFAULT_PAIR_TO_CODEWORD;
+    this->codec_detection_buffer_.clear();
+    this->codec_alignment_applied_ = false;
 }
 
-std::array<uint8_t, 4> JuttaConnection::encode(const uint8_t& decData) {
-    std::array<uint8_t, 4> encData{};
-    for (int group = 0; group < 4; ++group) {
-        uint8_t encoded = JUTTA_ENCODE_BASE;
-        uint8_t bit0 = static_cast<uint8_t>((decData >> (group * 2)) & 0x1);
-        uint8_t bit1 = static_cast<uint8_t>((decData >> (group * 2 + 1)) & 0x1);
-        if (bit0 == 0) {
-            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT0_MASK);
-        }
-        if (bit1 == 0) {
-            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT1_MASK);
-        }
-        encData[group] = encoded;
+void JuttaConnection::collect_detection_samples(const uint8_t* data, size_t length) const {
+    if (data == nullptr || length == 0 || this->codec_state_.configured) {
+        return;
     }
-    return encData;
+    this->codec_detection_buffer_.insert(this->codec_detection_buffer_.end(), data, data + length);
+    if (this->codec_detection_buffer_.size() > DETECTOR_BUFFER_LIMIT) {
+        size_t excess = this->codec_detection_buffer_.size() - DETECTOR_BUFFER_LIMIT;
+        this->codec_detection_buffer_.erase(this->codec_detection_buffer_.begin(),
+                                            this->codec_detection_buffer_.begin() + excess);
+    }
 }
 
-uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
-    uint8_t decData = 0;
-    for (int group = 0; group < 4; ++group) {
-        uint8_t encoded = encData[group];
-        uint8_t bit0 = static_cast<uint8_t>((encoded >> 2) & 0x1);
-        uint8_t bit1 = static_cast<uint8_t>((encoded >> 5) & 0x1);
-        decData |= static_cast<uint8_t>(bit0 << (group * 2));
-        decData |= static_cast<uint8_t>(bit1 << (group * 2 + 1));
-    }
-    return decData;
-}
-
-bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData) const {
-    ESP_LOGVV(TAG, "Writing encoded frame: %s", format_hex(encData).c_str());
-
-    if (!serial.write_serial(encData)) {
-        ESP_LOGE(TAG, "Failed to write encoded frame to UART.");
+bool JuttaConnection::decode_stream_into(std::vector<uint8_t>& output, const DbCodecState& state,
+                                         const uint8_t* data, size_t symbol_count) const {
+    if (data == nullptr || symbol_count == 0 || symbol_count % 4 != 0) {
         return false;
     }
 
-    ESP_LOGVV(TAG, " -> Flushing UART TX buffer after encoded frame");
-    serial.flush();
-    ESP_LOGVV(TAG, " -> Waiting %u ms for inter-frame gap", JUTTA_SERIAL_GAP_MS);
-    wait_for_jutta_gap();
-    ESP_LOGVV(TAG, "Encoded frame transmitted successfully.");
+    output.clear();
+    size_t frames = symbol_count / 4;
+    output.reserve(frames);
+    for (size_t frame = 0; frame < frames; ++frame) {
+        uint8_t decoded = 0;
+        for (size_t group = 0; group < 4; ++group) {
+            uint8_t symbol = data[frame * 4 + group];
+            int index = codeword_index(symbol);
+            if (index < 0) {
+                ESP_LOGV(TAG, "Unbekanntes Codewort 0x%02X beim Dekodieren", symbol);
+                return false;
+            }
+            uint8_t pair = state.pair_for_codeword[index];
+            size_t shift = state.msb_first ? (3 - group) * 2 : group * 2;
+            decoded |= static_cast<uint8_t>((pair & 0x3) << shift);
+        }
+        output.push_back(decoded);
+    }
     return true;
 }
 
-bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const {
-    ESP_LOGVV(TAG, "Attempting to read encoded frame (buffered bytes=%zu).", this->encoded_rx_buffer_.size());
-    if (this->encoded_rx_buffer_.size() < buffer.size()) {
-        wait_for_jutta_gap();
+bool JuttaConnection::ensure_codec_configured() const {
+    if (this->codec_state_.configured) {
+        return true;
+    }
+
+    if (this->codec_detection_buffer_.size() < DETECTOR_MIN_SYMBOLS) {
+        return false;
+    }
+
+    struct Candidate {
+        bool valid{false};
+        float ratio{0.0f};
+        size_t decoded_bytes{0};
+        bool msb_first{false};
+        uint8_t align{0};
+        std::array<uint8_t, 4> mapping{{0, 1, 2, 3}};
+        std::string preview;
+    };
+
+    Candidate best{};
+    const auto& mappings = all_symbol_mappings();
+    const uint8_t* symbols = this->codec_detection_buffer_.data();
+    size_t symbol_count = this->codec_detection_buffer_.size();
+
+    for (uint8_t align = 0; align < 4; ++align) {
+        if (symbol_count <= align) {
+            continue;
+        }
+        size_t available = symbol_count - align;
+        size_t frames = available / 4;
+        if (frames < 2) {
+            continue;
+        }
+        size_t used_symbols = frames * 4;
+        const uint8_t* start = symbols + align;
+
+        for (const auto& mapping : mappings) {
+            DbCodecState candidate_state{};
+            candidate_state.pair_for_codeword = mapping;
+
+            for (bool msb_first : {false, true}) {
+                candidate_state.msb_first = msb_first;
+                std::vector<uint8_t> decoded;
+                if (!decode_stream_into(decoded, candidate_state, start, used_symbols)) {
+                    continue;
+                }
+                std::string decoded_text(decoded.begin(), decoded.end());
+                auto stats = analyze_printable(decoded_text);
+
+                if (!best.valid || stats.ratio > best.ratio + 1e-3f ||
+                    (std::abs(stats.ratio - best.ratio) < 1e-3f && decoded.size() > best.decoded_bytes)) {
+                    best.valid = true;
+                    best.ratio = stats.ratio;
+                    best.decoded_bytes = decoded.size();
+                    best.msb_first = msb_first;
+                    best.align = align;
+                    best.mapping = mapping;
+                    best.preview = decoded_text;
+                }
+            }
+        }
+    }
+
+    if (!best.valid) {
+        return false;
+    }
+
+    std::string mapping_desc = describe_mapping(best.mapping);
+    if (best.ratio < DETECTOR_SUCCESS_THRESHOLD) {
+        bool should_log = !this->codec_last_candidate_.valid ||
+                          std::abs(best.ratio - this->codec_last_candidate_.ratio) > 0.01f ||
+                          best.msb_first != this->codec_last_candidate_.msb_first ||
+                          best.align != this->codec_last_candidate_.align ||
+                          best.mapping != this->codec_last_candidate_.mapping;
+        if (should_log) {
+            ESP_LOGD(TAG,
+                     "Auto-Detektor Kandidat: mapping=%s, msb_first=%s, align=%u, druckbar=%.1f%% (%zu Byte)",
+                     mapping_desc.c_str(), best.msb_first ? "true" : "false", best.align, best.ratio * 100.0f,
+                     best.decoded_bytes);
+            this->codec_last_candidate_.valid = true;
+            this->codec_last_candidate_.ratio = best.ratio;
+            this->codec_last_candidate_.msb_first = best.msb_first;
+            this->codec_last_candidate_.align = best.align;
+            this->codec_last_candidate_.mapping = best.mapping;
+        }
+        return false;
+    }
+
+    DbCodecState state{};
+    state.configured = true;
+    state.msb_first = best.msb_first;
+    state.align = best.align;
+    state.pair_for_codeword = best.mapping;
+    state.codeword_for_pair = DEFAULT_PAIR_TO_CODEWORD;
+    for (size_t i = 0; i < best.mapping.size(); ++i) {
+        uint8_t pair = best.mapping[i];
+        if (pair < state.codeword_for_pair.size()) {
+            state.codeword_for_pair[pair] = JUTTA_DB_CODEWORDS[i];
+        }
+    }
+
+    this->codec_state_ = state;
+    this->codec_alignment_applied_ = false;
+    this->codec_detection_buffer_.clear();
+    this->codec_last_candidate_.valid = false;
+
+    ESP_LOGI(TAG,
+             "Auto-Detektor aktiviert: mapping=%s, msb_first=%s, align=%u, druckbar=%.1f%%, Beispiel='%s'",
+             mapping_desc.c_str(), state.msb_first ? "true" : "false", state.align, best.ratio * 100.0f,
+             format_printable(best.preview).c_str());
+    return true;
+}
+
+bool JuttaConnection::decode_buffer(std::vector<uint8_t>& data) const {
+    data.clear();
+
+    while (true) {
         std::array<uint8_t, 4> chunk{};
         size_t read = serial.read_serial(chunk);
-        if (read > chunk.size()) {
-            ESP_LOGW(TAG, "Invalid amount of UART data found (%zu byte) - ignoring.", read);
-            read = chunk.size();
-        }
-
-        if (read > 0) {
-            this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + read);
-            std::vector<uint8_t> chunk_vec(chunk.begin(), chunk.begin() + read);
-            ESP_LOGVV(TAG, "Read %zu encoded byte%s from UART: %s (buffer now %zu bytes)", read,
-                      read == 1 ? "" : "s", format_hex(chunk_vec).c_str(), this->encoded_rx_buffer_.size());
-        } else if (this->encoded_rx_buffer_.empty()) {
-            ESP_LOGV(TAG, "No serial data found.");
-            return false;
-        }
-    }
-
-    if (this->encoded_rx_buffer_.size() < buffer.size()) {
-        ESP_LOGVV(TAG, "Not enough encoded bytes buffered yet (size=%zu).", this->encoded_rx_buffer_.size());
-        return false;
-    }
-
-    if (this->encoded_rx_buffer_.size() < buffer.size()) {
-        ESP_LOGW(TAG, "Invalid amount of UART data found while forming encoded frame (%zu byte).",
-                 this->encoded_rx_buffer_.size());
-        return false;
-    }
-
-    std::copy_n(this->encoded_rx_buffer_.begin(), buffer.size(), buffer.begin());
-    this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin(),
-                                   this->encoded_rx_buffer_.begin() + buffer.size());
-
-    ESP_LOGV(TAG, "Read encoded frame: %s (buffer remaining %zu bytes)", format_hex(buffer).c_str(),
-             this->encoded_rx_buffer_.size());
-    return true;
-}
-
-size_t JuttaConnection::read_encoded_unsafe(std::vector<std::array<uint8_t, 4>>& data) const {
-    ESP_LOGVV(TAG, "Attempting to read sequence of encoded frames.");
-    size_t count = 0;
-    while (true) {
-        std::array<uint8_t, 4> buffer{};
-        if (!read_encoded_unsafe(buffer)) {
-            ESP_LOGVV(TAG, "Stopping encoded frame read loop after %zu frame%s.", count, count == 1 ? "" : "s");
+        if (read == 0) {
             break;
         }
-        data.push_back(buffer);
-        ++count;
-        ESP_LOGVV(TAG, "Buffered encoded frame %zu: %s", count, format_hex(buffer).c_str());
+        this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + read);
+        collect_detection_samples(chunk.data(), read);
     }
-    return count;
+
+    if (!ensure_codec_configured()) {
+        return false;
+    }
+
+    if (!this->codec_alignment_applied_ && this->codec_state_.align > 0) {
+        size_t drop = std::min<size_t>(this->codec_state_.align, this->encoded_rx_buffer_.size());
+        this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin(), this->encoded_rx_buffer_.begin() + drop);
+        this->codec_alignment_applied_ = true;
+    }
+
+    size_t usable_symbols = (this->encoded_rx_buffer_.size() / 4) * 4;
+    if (usable_symbols == 0) {
+        return false;
+    }
+
+    if (!decode_stream_into(data, this->codec_state_, this->encoded_rx_buffer_.data(), usable_symbols)) {
+        ESP_LOGW(TAG, "Dekodierung von %zu Symbolen mit aktueller Zuordnung fehlgeschlagen.", usable_symbols);
+        size_t drop = std::min<size_t>(usable_symbols, static_cast<size_t>(4));
+        this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin(), this->encoded_rx_buffer_.begin() + drop);
+        return false;
+    }
+
+    this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin(),
+                                   this->encoded_rx_buffer_.begin() + usable_symbols);
+    return !data.empty();
 }
 
 void JuttaConnection::flush_serial_input() const {
@@ -444,6 +582,8 @@ void JuttaConnection::flush_serial_input() const {
                  this->decoded_rx_buffer_.size() == 1 ? "" : "s");
         this->decoded_rx_buffer_.clear();
     }
+
+    this->reset_codec_state();
 
     std::array<uint8_t, 4> discard{};
     while (true) {
@@ -466,12 +606,7 @@ void JuttaConnection::reinject_decoded_front(const std::string& data) const {
         return;
     }
 
-    std::vector<uint8_t> encoded;
-    encoded.reserve(data.size() * 4);
-    for (char c : data) {
-        auto enc = encode(static_cast<uint8_t>(static_cast<unsigned char>(c)));
-        encoded.insert(encoded.end(), enc.begin(), enc.end());
-    }
+    std::vector<uint8_t> encoded = this->encode_stream(data);
 
     this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.begin(), encoded.begin(), encoded.end());
     ESP_LOGV(TAG, "Re-injected %zu decoded byte%s (encoded %zu bytes) to front of buffer: '%s' (hex %s)", data.size(),

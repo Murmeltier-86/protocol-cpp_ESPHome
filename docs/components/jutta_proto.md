@@ -33,13 +33,20 @@ des XML-Startbefehls an oder meldet `fehlgeschlagen`, wodurch sich die Initialis
 ### Handshake-Überblick
 
 1. **Legacy-Probe** – Zu Beginn wird im Modus `DB_AUTO` `&WHO` gesendet. Bleibt die Antwort aus, folgen `@TR:37`, `@TR:32`, `@t2:8188`
-   und `@TS:00`. Die Leitung nutzt einen 2b4b-Codec, dessen Codewörter `{0xFF, 0xDF, 0xFB, 0xDB}` jeweils zwei Bit transportieren.
-   Entscheidend ist die Reihenfolge: Das **erste** Symbol enthält die niederwertigen Bits 1..0, das zweite 3..2, das dritte 5..4 und das vierte 7..6.
-   Eingehende Blöcke mit weniger als 70 % druckbaren ASCII-Zeichen werden verworfen, damit Störsignale den Ablauf nicht blockieren.
+   und `@TS:00`. Die Leitung nutzt einen 2b4b-Codec mit den Symbolen `{0xFF, 0xDF, 0xFB, 0xDB}`. Der Treiber dekodiert eingehende
+   Antworten erst, nachdem ein Auto-Detektor Symbolmapping, Bitreihenfolge (MSB- oder LSB-zuerst) und eine mögliche Startverschiebung
+   (`align`) ermittelt hat. Solange weniger als 90 % druckbare Zeichen erkannt werden, protokolliert das Debug-Log die jeweils beste
+   Schätzung (`Auto-Detektor Kandidat: …`). Sobald ein gültiges Mapping gefunden ist, folgt eine `Auto-Detektor aktiviert`-Meldung
+   mit Beispielzeile. Eingehende Blöcke mit weniger als 70 % druckbaren ASCII-Zeichen werden verworfen, damit Störsignale den Ablauf
+   nicht blockieren.
 2. **T1/T2/T3-Handshake** – Nach erfolgreicher Probe erfolgt der etablierte Sequenztausch `@T1` → `@t1` → `@T2` → `@t2` → `@T3` →
    `@t3`, womit der Bediencontroller freigeschaltet wird.
 3. **XML-Handshake** – Sobald die Maschine betriebsbereit ist, wird automatisch `@hr:00` (Fallback `@hr:05`) angefragt. Die Antwort
    bzw. ein Fehlerstatus landet im Textsensor `xml_handshake`. Erst danach startet – sofern konfiguriert – das zyklische XML-Polling.
+
+Sende- und Empfangspfad arbeiten mit vollständigen ASCII-Zeilen: Befehle wie `@TR:32\r\n` werden zuerst komplett aufgebaut und
+anschließend in den erkanntem 2b4b-Modus kodiert, sodass die Vierergruppen der Symbolfolge garantiert zusammen auf der Leitung
+landen.
 
 ## Automationsaktionen
 

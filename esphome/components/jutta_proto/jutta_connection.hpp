@@ -152,12 +152,6 @@ class JuttaConnection {
      **/
     static void print_bytes(const std::vector<uint8_t>& data);
 
-    /**
-     * Runs the encode and decode test.
-     * Ensures encoding and decoding is reversable.
-     * Should be run at least once per session to ensure proper functionality.
-     **/
-    static void run_encode_decode_test();
 
     /**
      * Converts the given binary vector to a string and returns it.
@@ -180,23 +174,11 @@ class JuttaConnection {
      * A full documentation of the process can be found here:
      * https://github.com/Jutta-Proto/protocol-cpp#deobfuscating
      **/
-    static uint8_t decode(const std::array<uint8_t, 4>& encData);
     /**
      * Writes four bytes of encoded data to the coffee maker and then waits 8ms.
      **/
     [[nodiscard]] bool write_encoded_unsafe(const std::array<uint8_t, 4>& encData) const;
-    /**
-     * Reads four bytes of encoded data which represent one byte of actual data.
-     * Returns true on success.
-     * Not thread safe!
-     **/
-    [[nodiscard]] bool read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const;
-    /**
-     * Reads multiples of four bytes. Every four bytes represent one actual byte.
-     * Returns the number of 4 byte tuples read.
-     * Not thread safe!
-     **/
-    [[nodiscard]] size_t read_encoded_unsafe(std::vector<std::array<uint8_t, 4>>& data) const;
+    [[nodiscard]] bool write_encoded_unsafe(const std::vector<uint8_t>& encData) const;
     /**
      * Tries to read a single decoded byte.
      * This requires reading 4 JUTTA bytes and converting them to a single actual data byte.
@@ -276,6 +258,14 @@ class JuttaConnection {
     StringWaitContext wait_string_context_{};
 
 
+    struct DbCodecState {
+        bool configured{false};
+        bool msb_first{false};
+        uint8_t align{0};
+        std::array<uint8_t, 4> pair_for_codeword{{0, 1, 2, 3}};
+        std::array<uint8_t, 4> codeword_for_pair{{0xDB, 0xDF, 0xFB, 0xFF}};
+    };
+
     // Buffer of partially received encoded bytes that haven't formed a full
     // decoded data byte yet.
     mutable std::vector<uint8_t> encoded_rx_buffer_{};
@@ -286,7 +276,28 @@ class JuttaConnection {
     // Buffer for decoded bytes collected while looking for complete CRLF-terminated lines.
     mutable std::string response_line_buffer_{};
 
+    mutable std::vector<uint8_t> codec_detection_buffer_{};
+    mutable DbCodecState codec_state_{};
+    mutable bool codec_alignment_applied_{false};
+    struct CodecCandidateLog {
+        bool valid{false};
+        float ratio{0.0f};
+        bool msb_first{false};
+        uint8_t align{0};
+        std::array<uint8_t, 4> mapping{{0, 1, 2, 3}};
+    };
+    mutable CodecCandidateLog codec_last_candidate_{};
+
     void reinject_decoded_front(const std::string& data) const;
+
+    void reset_codec_state() const;
+    void collect_detection_samples(const uint8_t* data, size_t length) const;
+    bool ensure_codec_configured() const;
+    bool decode_buffer(std::vector<uint8_t>& data) const;
+    bool decode_stream_into(std::vector<uint8_t>& output, const DbCodecState& state,
+                           const uint8_t* data, size_t symbol_count) const;
+    std::vector<uint8_t> encode_stream(const std::vector<uint8_t>& data) const;
+    std::vector<uint8_t> encode_stream(const std::string& data) const;
 
 };
 //---------------------------------------------------------------------------
