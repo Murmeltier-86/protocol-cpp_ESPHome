@@ -368,7 +368,8 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_xml_line(const std::chron
 
         if (timeout.count() > 0) {
             uint32_t now = esphome::millis();
-            if (time_reached(now, start + static_cast<uint32_t>(timeout.count()))) {
+            uint32_t elapsed = now - start;
+            if (elapsed >= static_cast<uint32_t>(timeout.count())) {
                 break;
             }
         }
