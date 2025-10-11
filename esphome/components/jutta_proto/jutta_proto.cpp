@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -24,8 +25,10 @@ static const char *const TAG = "jutta_proto";
 
 constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
-constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
-const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
+constexpr uint32_t MACHINE_XML_TIMEOUT_MS = 1500;
+constexpr std::size_t MACHINE_XML_MIN_LENGTH = 32;
+const char *const MACHINE_XML_PRIMARY_COMMAND = "@hr:00\r\n";
+const char *const MACHINE_XML_FALLBACK_COMMAND = "@hr:05\r\n";
 constexpr uint32_t kXmlRxTimeoutMs = 1000;
 constexpr uint32_t kInterCmdGapMs = 120;
 constexpr uint32_t kXmlQuietMs = 120;
@@ -140,6 +143,152 @@ std::string format_buffer_hex_preview(const std::string &value) {
     return std::string("...") + formatted_suffix;
   }
   return formatted_suffix;
+}
+
+void trim_in_place(std::string &value) {
+  auto begin = value.find_first_not_of(" \t\r\n");
+  auto end = value.find_last_not_of(" \t\r\n");
+  if (begin == std::string::npos || end == std::string::npos) {
+    value.clear();
+    return;
+  }
+  value.assign(value.begin() + static_cast<std::ptrdiff_t>(begin),
+               value.begin() + static_cast<std::ptrdiff_t>(end) + 1);
+}
+
+std::string collapse_whitespace(std::string value) {
+  std::string result;
+  result.reserve(value.size());
+  bool last_space = false;
+  for (unsigned char c : value) {
+    if (std::isspace(c) != 0) {
+      if (!last_space) {
+        result.push_back(' ');
+        last_space = true;
+      }
+    } else {
+      result.push_back(static_cast<char>(c));
+      last_space = false;
+    }
+  }
+  trim_in_place(result);
+  return result;
+}
+
+std::string to_pascal_case(const std::string &value) {
+  std::string result;
+  result.reserve(value.size());
+  bool capitalize = true;
+  for (unsigned char c : value) {
+    if (c == '_' || c == '-' || c == ' ') {
+      capitalize = true;
+      continue;
+    }
+    if (capitalize) {
+      result.push_back(static_cast<char>(std::toupper(c)));
+      capitalize = false;
+    } else {
+      result.push_back(static_cast<char>(std::tolower(c)));
+    }
+  }
+  return result;
+}
+
+bool find_tag_in_scope(const std::string &xml, const std::string &tag, size_t scope_begin, size_t scope_end,
+                       size_t &content_begin, size_t &content_end) {
+  std::string open_tag = "<" + tag;
+  std::string close_tag = "</" + tag + ">";
+  size_t search_pos = scope_begin;
+  while (true) {
+    size_t open = xml.find(open_tag, search_pos);
+    if (open == std::string::npos || open >= scope_end) {
+      return false;
+    }
+    size_t name_end = open + open_tag.size();
+    if (name_end < xml.size()) {
+      unsigned char next = static_cast<unsigned char>(xml[name_end]);
+      if (!(std::isspace(next) != 0 || next == '>' || next == '/')) {
+        search_pos = name_end;
+        continue;
+      }
+    }
+    size_t open_end = xml.find('>', name_end);
+    if (open_end == std::string::npos) {
+      return false;
+    }
+    bool self_closing = open_end > open && xml[open_end - 1] == '/';
+    size_t start = open_end + 1;
+    if (self_closing) {
+      content_begin = start;
+      content_end = start;
+      return true;
+    }
+    size_t close = xml.find(close_tag, start);
+    if (close == std::string::npos) {
+      search_pos = open_end + 1;
+      continue;
+    }
+    if (close > scope_end) {
+      search_pos = open_end + 1;
+      continue;
+    }
+    content_begin = start;
+    content_end = close;
+    return true;
+  }
+}
+
+bool xml_get_value_simple(const std::string &xml, const std::string &path, std::string &out) {
+  if (path.empty()) {
+    return false;
+  }
+  size_t scope_begin = 0;
+  size_t scope_end = xml.size();
+  size_t pos = 0;
+  while (pos < path.size()) {
+    size_t next = path.find('/', pos);
+    std::string segment = (next == std::string::npos) ? path.substr(pos) : path.substr(pos, next - pos);
+    if (segment.empty()) {
+      pos = (next == std::string::npos) ? path.size() : next + 1;
+      continue;
+    }
+    size_t content_begin = 0;
+    size_t content_end = 0;
+    if (!find_tag_in_scope(xml, segment, scope_begin, scope_end, content_begin, content_end)) {
+      return false;
+    }
+    scope_begin = content_begin;
+    scope_end = content_end;
+    pos = (next == std::string::npos) ? path.size() : next + 1;
+  }
+  if (scope_begin > scope_end || scope_end > xml.size()) {
+    return false;
+  }
+  out = xml.substr(scope_begin, scope_end - scope_begin);
+  trim_in_place(out);
+  return true;
+}
+
+std::string format_numeric_text(double value) {
+  char buffer[32];
+  int written = std::snprintf(buffer, sizeof(buffer), "%.6f", value);
+  if (written < 0) {
+    return std::to_string(value);
+  }
+  std::string text(buffer, static_cast<size_t>(written));
+  auto dot = text.find('.');
+  if (dot != std::string::npos) {
+    while (!text.empty() && text.back() == '0') {
+      text.pop_back();
+    }
+    if (!text.empty() && text.back() == '.') {
+      text.pop_back();
+    }
+    if (text.empty()) {
+      text = "0";
+    }
+  }
+  return text;
 }
 
 template<typename ArrayT>
@@ -544,44 +693,18 @@ void JuraComponent::process_machine_data_query() {
   }
 
   uint32_t now = esphome::millis();
+  if (this->machine_data_query_next_ != 0 && !time_reached(now, this->machine_data_query_next_)) {
+    return;
+  }
+  this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
 
-  auto handle_response = [&](const std::shared_ptr<std::string> &response) {
-    if (response != nullptr) {
-      this->publish_machine_data_(*response);
-      this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
-      this->machine_data_request_pending_ = false;
-      return true;
-    }
-    return false;
-  };
-
-  if (this->machine_data_request_pending_) {
-    auto response = this->coffee_maker_->connection->write_decoded_with_response(
-        MACHINE_DATA_COMMAND, std::chrono::milliseconds{MACHINE_DATA_REQUEST_TIMEOUT_MS});
-    if (handle_response(response)) {
-      return;
-    }
-    if (time_reached(now, this->machine_data_request_start_ + MACHINE_DATA_REQUEST_TIMEOUT_MS)) {
-      ESP_LOGW(TAG, "Timeout while waiting for machine data response.");
-      this->machine_data_request_pending_ = false;
-      this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
-    }
+  std::string xml;
+  if (!this->request_machine_xml_(xml)) {
+    ESP_LOGW(TAG, "Machine-XML konnte nicht abgefragt werden.");
     return;
   }
 
-  if (this->machine_data_query_next_ != 0 &&
-      !time_reached(now, this->machine_data_query_next_)) {
-    return;
-  }
-
-  this->machine_data_request_start_ = now;
-  auto response = this->coffee_maker_->connection->write_decoded_with_response(
-      MACHINE_DATA_COMMAND, std::chrono::milliseconds{MACHINE_DATA_REQUEST_TIMEOUT_MS});
-  if (handle_response(response)) {
-    return;
-  }
-
-  this->machine_data_request_pending_ = true;
+  this->handle_machine_xml_(xml);
 }
 
 void JuraComponent::publish_machine_data_(const std::string &response) {
@@ -593,6 +716,258 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
   if (this->machine_data_sensor_ != nullptr) {
     this->machine_data_sensor_->publish_state(sanitized);
   }
+}
+
+bool JuraComponent::request_machine_xml_(std::string &xml) {
+  xml.clear();
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return false;
+  }
+
+  auto *connection = this->coffee_maker_->connection.get();
+
+  auto send_and_receive = [&](const char *command, std::string &out) -> bool {
+    if (command == nullptr || command[0] == '\0') {
+      return false;
+    }
+    connection->reset_db_rx_buffer();
+    if (!connection->write_decoded(command)) {
+      ESP_LOGW(TAG, "Machine-XML Befehl %s konnte nicht gesendet werden.", command);
+      return false;
+    }
+    std::vector<uint8_t> decoded;
+    bool had_crlf = false;
+    size_t decoded_len = 0;
+    if (!connection->read_db_frame(decoded, MACHINE_XML_TIMEOUT_MS, &had_crlf, &decoded_len)) {
+      return false;
+    }
+    if (decoded.empty()) {
+      return false;
+    }
+    out.assign(decoded.begin(), decoded.end());
+    out.erase(std::remove(out.begin(), out.end(), '\r'), out.end());
+    trim_in_place(out);
+    return !out.empty();
+  };
+
+  std::string primary;
+  if (send_and_receive(MACHINE_XML_PRIMARY_COMMAND, primary)) {
+    if (primary.size() >= MACHINE_XML_MIN_LENGTH) {
+      xml.swap(primary);
+      return true;
+    }
+    ESP_LOGW(TAG, "Machine-XML Antwort zu kurz (%u Byte) – versuche Fallback.",
+             static_cast<unsigned>(primary.size()));
+  } else {
+    ESP_LOGW(TAG, "Machine-XML Primärkommando ohne Antwort – versuche Fallback.");
+  }
+
+  std::string fallback;
+  if (send_and_receive(MACHINE_XML_FALLBACK_COMMAND, fallback)) {
+    xml.swap(fallback);
+    return true;
+  }
+
+  if (!primary.empty()) {
+    xml.swap(primary);
+    return true;
+  }
+
+  return false;
+}
+
+void JuraComponent::handle_machine_xml_(const std::string &xml) {
+  uint32_t now = esphome::millis();
+  std::string normalized = xml;
+  normalized.erase(std::remove(normalized.begin(), normalized.end(), '\r'), normalized.end());
+  this->machine_xml_cache_ = normalized;
+  this->machine_xml_timestamp_ = now;
+
+  std::string summary = this->format_machine_status_summary_(normalized);
+  this->publish_machine_data_(summary);
+  this->update_settings_from_xml_(normalized);
+  this->update_errors_from_xml_(normalized);
+}
+
+bool JuraComponent::ensure_machine_xml_(uint32_t max_age_ms, std::string &xml_out) {
+  uint32_t now = esphome::millis();
+  if (!this->machine_xml_cache_.empty()) {
+    bool fresh = max_age_ms == 0;
+    if (!fresh && this->machine_xml_timestamp_ != 0) {
+      fresh = static_cast<int32_t>(now - this->machine_xml_timestamp_) <= static_cast<int32_t>(max_age_ms);
+    }
+    if (fresh) {
+      xml_out = this->machine_xml_cache_;
+      return true;
+    }
+  }
+
+  std::string fetched;
+  if (!this->request_machine_xml_(fetched)) {
+    return false;
+  }
+  this->handle_machine_xml_(fetched);
+  xml_out = this->machine_xml_cache_;
+  return !xml_out.empty();
+}
+
+std::string JuraComponent::format_machine_status_summary_(const std::string &xml) const {
+  std::vector<std::pair<std::string, std::string>> fields;
+  std::string value;
+  if (this->xml_get_value_(xml, "Machine/Status/State", value) && !value.empty()) {
+    fields.emplace_back("State", value);
+  }
+  if (this->xml_get_value_(xml, "Machine/Status/WaterLevel", value) && !value.empty()) {
+    fields.emplace_back("Water", value);
+  }
+  if (this->xml_get_value_(xml, "Machine/Status/BeanLevel", value) && !value.empty()) {
+    fields.emplace_back("Beans", value);
+  }
+  if (this->xml_get_value_(xml, "Machine/Status/ErrorCode", value) && !value.empty()) {
+    fields.emplace_back("Error", value);
+  }
+
+  if (fields.empty()) {
+    std::string collapsed = collapse_whitespace(xml);
+    if (collapsed.size() > 160) {
+      collapsed.resize(157);
+      collapsed.append("...");
+    }
+    return collapsed;
+  }
+
+  std::string summary;
+  for (size_t i = 0; i < fields.size(); ++i) {
+    if (i > 0) {
+      summary.append(", ");
+    }
+    summary.append(fields[i].first);
+    summary.push_back('=');
+    summary.append(fields[i].second);
+  }
+  return summary;
+}
+
+void JuraComponent::update_settings_from_xml_(const std::string &xml) {
+  this->ensure_setting_entities_created_();
+  if (this->setting_descs_.empty()) {
+    return;
+  }
+
+  for (const auto &entry : this->setting_descs_) {
+    const auto &desc = entry.second;
+    if (!desc.source_cmd.empty()) {
+      continue;
+    }
+    std::string path = this->determine_setting_path_(desc);
+    if (path.empty()) {
+      continue;
+    }
+    std::string raw_value;
+    if (!this->xml_get_value_(xml, path, raw_value)) {
+      continue;
+    }
+    if (desc.type == SettingValueType::String) {
+      this->publish_setting_value_(desc, 0.0f, raw_value);
+      continue;
+    }
+    if (raw_value.empty()) {
+      continue;
+    }
+
+    double numeric = 0.0;
+    bool parsed = false;
+    {
+      char *end = nullptr;
+      numeric = std::strtod(raw_value.c_str(), &end);
+      parsed = end != nullptr && end != raw_value.c_str();
+      if (!parsed) {
+        long long as_int = std::strtoll(raw_value.c_str(), &end, 0);
+        if (end != nullptr && end != raw_value.c_str()) {
+          numeric = static_cast<double>(as_int);
+          parsed = true;
+        }
+      }
+    }
+    if (!parsed) {
+      std::string lowered = raw_value;
+      std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      if (desc.type == SettingValueType::Bool) {
+        bool value_bool = (lowered == "true" || lowered == "on" || lowered == "1" || lowered == "yes");
+        this->publish_setting_value_(desc, value_bool ? 1.0f : 0.0f, value_bool ? "on" : "off");
+      }
+      continue;
+    }
+
+    double scaled = numeric * static_cast<double>(desc.scale);
+    std::string text_value;
+    float publish_value = static_cast<float>(scaled);
+    switch (desc.type) {
+      case SettingValueType::Bool: {
+        bool value_bool = scaled != 0.0;
+        publish_value = value_bool ? 1.0f : 0.0f;
+        text_value = value_bool ? "on" : "off";
+        break;
+      }
+      case SettingValueType::String:
+        text_value = raw_value;
+        break;
+      case SettingValueType::Enum:
+      case SettingValueType::U8:
+      case SettingValueType::U16:
+      case SettingValueType::U32:
+        text_value = format_numeric_text(scaled);
+        break;
+    }
+    this->publish_setting_value_(desc, publish_value, text_value);
+  }
+}
+
+void JuraComponent::update_errors_from_xml_(const std::string &xml) {
+  std::string path = error_source_path();
+  if (path.empty()) {
+    path = "Machine/Status/ErrorCode";
+  }
+  if (path.empty()) {
+    return;
+  }
+  std::string raw;
+  if (!this->xml_get_value_(xml, path, raw)) {
+    return;
+  }
+  if (raw.empty()) {
+    if (this->errors_entities_created_ && this->last_error_code_ != 0) {
+      this->publish_error_state_(0);
+    }
+    return;
+  }
+  char *end = nullptr;
+  uint32_t code = static_cast<uint32_t>(std::strtoul(raw.c_str(), &end, 0));
+  if (end == raw.c_str()) {
+    return;
+  }
+  if (!this->errors_entities_created_ || code != this->last_error_code_) {
+    this->publish_error_state_(code);
+  }
+}
+
+bool JuraComponent::xml_get_value_(const std::string &xml, const std::string &path, std::string &out) const {
+  return xml_get_value_simple(xml, path, out);
+}
+
+std::string JuraComponent::determine_setting_path_(const SettingDesc &desc) const {
+  if (!desc.path.empty()) {
+    return desc.path;
+  }
+  if (desc.id.empty()) {
+    return {};
+  }
+  std::string tag = to_pascal_case(desc.id);
+  if (tag.empty()) {
+    tag = desc.id;
+  }
+  return "Machine/Settings/" + tag;
 }
 
 bool JuraComponent::decode_field_value_(const std::vector<uint8_t> &decoded, const XmlField &field,
@@ -1603,95 +1978,94 @@ void JuraComponent::poll_settings_refresh_() {
   if (this->setting_descs_.empty()) {
     return;
   }
-  std::unordered_map<std::string, std::vector<uint8_t>> command_cache;
-  std::unordered_set<std::string> failed_commands;
-
-  auto get_command_payload = [&](const std::string &command) -> const std::vector<uint8_t> * {
-    if (command.empty()) {
-      return nullptr;
-    }
-    if (failed_commands.find(command) != failed_commands.end()) {
-      return nullptr;
-    }
-    auto cache_it = command_cache.find(command);
-    if (cache_it != command_cache.end()) {
-      return &cache_it->second;
-    }
-    std::vector<uint8_t> decoded;
-    if (!this->query_setting_command_(command, decoded)) {
-      failed_commands.insert(command);
-      return nullptr;
-    }
-    auto inserted = command_cache.emplace(command, std::move(decoded));
-    return &inserted.first->second;
-  };
-
-  auto format_numeric_text = [](float value) -> std::string {
-    char buffer[32];
-    int written = std::snprintf(buffer, sizeof(buffer), "%.6f", static_cast<double>(value));
-    if (written < 0) {
-      return std::to_string(static_cast<double>(value));
-    }
-    std::string text(buffer, static_cast<size_t>(written));
-    auto dot = text.find('.');
-    if (dot != std::string::npos) {
-      while (!text.empty() && text.back() == '0') {
-        text.pop_back();
-      }
-      if (!text.empty() && text.back() == '.') {
-        text.pop_back();
-      }
-      if (text.empty()) {
-        text = "0";
-      }
-    }
-    return text;
-  };
-
+  bool has_command_settings = false;
+  bool has_xml_settings = false;
   for (const auto &entry : this->setting_descs_) {
-    const auto &desc = entry.second;
-    if (desc.source_cmd.empty()) {
-      continue;
+    if (!entry.second.source_cmd.empty()) {
+      has_command_settings = true;
+    } else {
+      has_xml_settings = true;
     }
-    const auto *decoded_ptr = get_command_payload(desc.source_cmd);
-    if (decoded_ptr == nullptr) {
-      continue;
-    }
-    const auto &decoded = *decoded_ptr;
-    if (desc.offset + desc.width > decoded.size()) {
-      ESP_LOGW(TAG, "Einstellung %s: Antwort zu kurz (offset=%u width=%u size=%u)", desc.id.c_str(),
-               static_cast<unsigned>(desc.offset), static_cast<unsigned>(desc.width),
-               static_cast<unsigned>(decoded.size()));
-      continue;
-    }
-    const uint8_t *ptr = decoded.data() + desc.offset;
-    std::uint64_t raw = 0;
-    for (std::size_t i = 0; i < desc.width; ++i) {
-      raw = (raw << 8U) | static_cast<std::uint64_t>(ptr[i]);
-    }
-    float scaled = static_cast<float>(raw) * desc.scale;
-    std::string text_value;
-    switch (desc.type) {
-      case SettingValueType::Bool:
-        text_value = raw ? "on" : "off";
-        scaled = raw ? 1.0f : 0.0f;
-        break;
-      case SettingValueType::Enum:
-      case SettingValueType::U8:
-      case SettingValueType::U16:
-      case SettingValueType::U32:
-        text_value = format_numeric_text(scaled);
-        break;
-      case SettingValueType::String:
-        text_value.assign(reinterpret_cast<const char *>(ptr), desc.width);
-        auto zero_pos = text_value.find('\0');
-        if (zero_pos != std::string::npos) {
-          text_value.resize(zero_pos);
-        }
-        this->publish_setting_value_(desc, 0.0f, text_value);
+  }
+
+  if (has_command_settings) {
+    std::unordered_map<std::string, std::vector<uint8_t>> command_cache;
+    std::unordered_set<std::string> failed_commands;
+
+    auto get_command_payload = [&](const std::string &command) -> const std::vector<uint8_t> * {
+      if (command.empty()) {
+        return nullptr;
+      }
+      if (failed_commands.find(command) != failed_commands.end()) {
+        return nullptr;
+      }
+      auto cache_it = command_cache.find(command);
+      if (cache_it != command_cache.end()) {
+        return &cache_it->second;
+      }
+      std::vector<uint8_t> decoded;
+      if (!this->query_setting_command_(command, decoded)) {
+        failed_commands.insert(command);
+        return nullptr;
+      }
+      auto inserted = command_cache.emplace(command, std::move(decoded));
+      return &inserted.first->second;
+    };
+
+    for (const auto &entry : this->setting_descs_) {
+      const auto &desc = entry.second;
+      if (desc.source_cmd.empty()) {
         continue;
+      }
+      const auto *decoded_ptr = get_command_payload(desc.source_cmd);
+      if (decoded_ptr == nullptr) {
+        continue;
+      }
+      const auto &decoded = *decoded_ptr;
+      if (desc.offset + desc.width > decoded.size()) {
+        ESP_LOGW(TAG, "Einstellung %s: Antwort zu kurz (offset=%u width=%u size=%u)", desc.id.c_str(),
+                 static_cast<unsigned>(desc.offset), static_cast<unsigned>(desc.width),
+                 static_cast<unsigned>(decoded.size()));
+        continue;
+      }
+      const uint8_t *ptr = decoded.data() + desc.offset;
+      std::uint64_t raw = 0;
+      for (std::size_t i = 0; i < desc.width; ++i) {
+        raw = (raw << 8U) | static_cast<std::uint64_t>(ptr[i]);
+      }
+      float scaled = static_cast<float>(raw) * desc.scale;
+      std::string text_value;
+      switch (desc.type) {
+        case SettingValueType::Bool:
+          text_value = raw ? "on" : "off";
+          scaled = raw ? 1.0f : 0.0f;
+          break;
+        case SettingValueType::Enum:
+        case SettingValueType::U8:
+        case SettingValueType::U16:
+        case SettingValueType::U32:
+          text_value = format_numeric_text(static_cast<double>(scaled));
+          break;
+        case SettingValueType::String:
+          text_value.assign(reinterpret_cast<const char *>(ptr), desc.width);
+          if (auto zero_pos = text_value.find('\0'); zero_pos != std::string::npos) {
+            text_value.resize(zero_pos);
+          }
+          this->publish_setting_value_(desc, 0.0f, text_value);
+          continue;
+      }
+      this->publish_setting_value_(desc, scaled, text_value);
     }
-    this->publish_setting_value_(desc, scaled, text_value);
+  }
+
+  if (has_xml_settings) {
+    uint32_t previous_timestamp = this->machine_xml_timestamp_;
+    std::string xml;
+    if (this->ensure_machine_xml_(kSettingsRefreshMs, xml)) {
+      if (previous_timestamp == this->machine_xml_timestamp_) {
+        this->update_settings_from_xml_(xml);
+      }
+    }
   }
 }
 
@@ -1757,22 +2131,30 @@ void JuraComponent::poll_error_cycle_() {
   }
   this->errors_next_poll_ = now + kErrorPollIntervalMs;
   std::string command = error_source_command();
-  if (command.empty()) {
+  if (!command.empty()) {
+    std::vector<uint8_t> decoded;
+    if (!this->query_error_command_(command, decoded)) {
+      return;
+    }
+    if (decoded.empty()) {
+      return;
+    }
+    uint32_t code = 0;
+    for (uint8_t byte : decoded) {
+      code = (code << 8U) | byte;
+    }
+    if (!this->errors_entities_created_ || code != this->last_error_code_) {
+      this->publish_error_state_(code);
+    }
     return;
   }
-  std::vector<uint8_t> decoded;
-  if (!this->query_error_command_(command, decoded)) {
-    return;
-  }
-  if (decoded.empty()) {
-    return;
-  }
-  uint32_t code = 0;
-  for (uint8_t byte : decoded) {
-    code = (code << 8U) | byte;
-  }
-  if (!this->errors_entities_created_ || code != this->last_error_code_) {
-    this->publish_error_state_(code);
+
+  uint32_t previous_timestamp = this->machine_xml_timestamp_;
+  std::string xml;
+  if (this->ensure_machine_xml_(kErrorPollIntervalMs, xml)) {
+    if (previous_timestamp == this->machine_xml_timestamp_) {
+      this->update_errors_from_xml_(xml);
+    }
   }
 }
 

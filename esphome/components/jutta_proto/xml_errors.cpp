@@ -114,12 +114,14 @@ bool parse_uint32(const std::string &value, uint32_t &out) {
 
 std::vector<ErrorDesc> g_errors;
 std::string g_error_source_cmd;
+std::string g_error_source_path;
 
 }  // namespace
 
 bool load_errors_from_xml(const std::string &xml_content) {
   g_errors.clear();
   g_error_source_cmd.clear();
+  g_error_source_path.clear();
   std::string lower = to_lower_copy(xml_content);
   std::string needle = "<errors";
   auto pos = lower.find(needle);
@@ -130,6 +132,12 @@ bool load_errors_from_xml(const std::string &xml_content) {
       auto attrs = parse_attributes(tag_text);
       g_error_source_cmd = attrs.get("source_cmd");
       trim(g_error_source_cmd);
+      g_error_source_path = attrs.get("source_path");
+      trim(g_error_source_path);
+      if (g_error_source_path.empty()) {
+        g_error_source_path = attrs.get("path");
+        trim(g_error_source_path);
+      }
     }
   }
   std::string block;
@@ -169,6 +177,8 @@ const ErrorDesc *find_error(uint32_t code) {
 const std::vector<ErrorDesc> &all_errors() { return g_errors; }
 
 const std::string &error_source_command() { return g_error_source_cmd; }
+
+const std::string &error_source_path() { return g_error_source_path; }
 
 }  // namespace jutta_component
 }  // namespace esphome

@@ -268,6 +268,14 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void publish_error_state_(uint32_t code);
   bool query_setting_command_(const std::string &command, std::vector<uint8_t> &decoded);
   bool query_error_command_(const std::string &command, std::vector<uint8_t> &decoded);
+  bool request_machine_xml_(std::string &xml);
+  void handle_machine_xml_(const std::string &xml);
+  bool ensure_machine_xml_(uint32_t max_age_ms, std::string &xml_out);
+  std::string format_machine_status_summary_(const std::string &xml) const;
+  void update_settings_from_xml_(const std::string &xml);
+  void update_errors_from_xml_(const std::string &xml);
+  bool xml_get_value_(const std::string &xml, const std::string &path, std::string &out) const;
+  std::string determine_setting_path_(const SettingDesc &desc) const;
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
   std::unique_ptr<::jutta_proto::CoffeeMaker> coffee_maker_;
@@ -282,8 +290,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool custom_cancel_flag_{false};
   text_sensor::TextSensor *machine_data_sensor_{nullptr};
   uint32_t machine_data_query_next_{0};
-  bool machine_data_request_pending_{false};
-  uint32_t machine_data_request_start_{0};
+  std::string machine_xml_cache_{};
+  uint32_t machine_xml_timestamp_{0};
 
   bool enable_xml_poll_{false};
   uint32_t xml_poll_interval_ms_{30000};

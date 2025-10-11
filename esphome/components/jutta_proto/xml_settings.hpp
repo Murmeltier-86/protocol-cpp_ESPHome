@@ -21,6 +21,7 @@ struct SettingDesc {
   std::string name;
   std::string unit;
   std::string source_cmd;
+  std::string path;
   std::size_t offset{0};
   std::size_t width{0};
   float scale{1.0f};
