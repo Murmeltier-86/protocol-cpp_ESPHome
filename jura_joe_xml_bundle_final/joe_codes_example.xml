@@ -1,7 +1,0 @@
-
-<?xml version="1.0" encoding="UTF-8"?>
-<joe>
-  <command name="Kaffee - Standard" code="@BREW 03 04 10 01" mode="db"/>
-  <command name="Spülen"            code="@RINSE"            mode="db"/>
-  <command name="Status-Abfrage"    code="&STAT?"            mode="plain"/>
-</joe>
