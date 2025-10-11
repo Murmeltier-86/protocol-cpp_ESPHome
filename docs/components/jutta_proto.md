@@ -33,21 +33,18 @@ des XML-Startbefehls an oder meldet `fehlgeschlagen`, wodurch sich die Initialis
 ### Handshake-Überblick
 
 1. **Legacy-Probe** – Zu Beginn wird im Modus `DB_AUTO` `&WHO` gesendet. Bleibt die Antwort aus, folgen `@TR:37`, `@TR:32`, `@t2:8188`
-   und `@TS:00`. Die Leitung nutzt einen 2b4b-Codec mit den Symbolen `{0xFF, 0xDF, 0xFB, 0xDB}`. Der Decoder bewertet jeden
-   eingehenden Symbolstrom einzeln, probiert alle vier möglichen Startausrichtungen, beide Bitreihenfolgen (MSB- bzw. LSB-zuerst)
-   sowie optionale XOR-Schlüssel `0x00`, `0xFF` und `0xA5`. Für jeden Frame wird die Variante mit den meisten druckbaren ASCII-Zeichen
-   ausgewählt; das Log meldet die Entscheidung als `Auto-Decoder: align=…`. Blöcke mit weniger als 70 % druckbaren Zeichen werden
-   verworfen, damit Störsignale den Ablauf nicht blockieren. Eine globale Ausrichtung über mehrere Sekunden hinweg ist nicht nötig,
-   weil jeder Frame erneut analysiert wird. Der Sender startet aus Kompatibilitätsgründen mit dem bewährten LSB-zuerst-Schema; sobald
-   der Decoder eine andere Bitreihenfolge oder einen XOR-Schlüssel ermittelt, werden Folgebefehle automatisch in dasselbe Schema kodiert.
+   und `@TS:00`. Dieser Pfad nutzt weiterhin den klassischen Legacy-Codec (Plain/ESC bzw. das ursprüngliche LSB-zuerst-Mapping), damit
+   alle bestehenden Befehle unverändert funktionieren.
 2. **T1/T2/T3-Handshake** – Nach erfolgreicher Probe erfolgt der etablierte Sequenztausch `@T1` → `@t1` → `@T2` → `@t2` → `@T3` →
    `@t3`, womit der Bediencontroller freigeschaltet wird.
 3. **XML-Handshake** – Sobald die Maschine betriebsbereit ist, wird automatisch `@hr:00` (Fallback `@hr:05`) angefragt. Die Antwort
    bzw. ein Fehlerstatus landet im Textsensor `xml_handshake`. Erst danach startet – sofern konfiguriert – das zyklische XML-Polling.
 
-Sende- und Empfangspfad arbeiten mit vollständigen ASCII-Zeilen: Befehle wie `@TR:32\r\n` werden zuerst komplett aufgebaut,
-bei Bedarf mit dem ermittelten XOR-Schlüssel verknüpft und anschließend in den aktuellen 2b4b-Modus kodiert, sodass die
-Vierergruppen der Symbolfolge garantiert zusammen auf der Leitung landen.
+Der XML-Zweig verwendet dagegen die neue Implementierung `codec_db_2b4b`, welche das Vierersymbol-Mapping `{0xFF, 0xDF, 0xFB, 0xDB}`
+pro Frame automatisch detektiert. Der Decoder testet alle vier Ausrichtungen, beide Bitreihenfolgen sowie optionale XOR-Schlüssel
+(`0x00`, `0xFF`, `0xA5`) und akzeptiert nur Zeilen mit mindestens 70 % druckbaren Zeichen und abgeschlossenem `CRLF`. Nach einem
+erfolgreichen Frame merkt sich der Sender die erkannten Parameter, verknüpft bei Bedarf den XOR-Schlüssel und kodiert komplette
+ASCII-Zeilen (z. B. `@TR:32\r\n`) oder Binärblöcke (XML-Payload) in konsistenten Vierergruppen.
 
 ## Automationsaktionen
 

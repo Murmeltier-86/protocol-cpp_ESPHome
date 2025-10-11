@@ -23,6 +23,7 @@ constexpr std::array<uint8_t, 4> DEFAULT_PAIR_TO_CODEWORD = {0xDB, 0xDF, 0xFB, 0
 constexpr float PRINTABLE_THRESHOLD = 0.7f;
 constexpr int SCORE_INVALID = -1000;
 constexpr size_t MAX_FRAME_BYTES = 1024;
+constexpr std::array<uint8_t, 3> XML_XOR_KEYS = {0x00, 0xFF, 0xA5};
 
 struct FrameScore {
     int score{SCORE_INVALID};
@@ -177,6 +178,8 @@ inline void wait_for_jutta_gap() {
 
 JuttaConnection::JuttaConnection(esphome::uart::UARTComponent* parent) : serial(parent) {
     this->reset_codec_state();
+    this->xml_rx_buffer_.clear();
+    this->reset_xml_codec_state();
 }
 
 void JuttaConnection::init() {
@@ -317,6 +320,127 @@ std::vector<uint8_t> JuttaConnection::encode_stream(const std::vector<uint8_t>& 
 std::vector<uint8_t> JuttaConnection::encode_stream(const std::string& data) const {
     std::vector<uint8_t> bytes(data.begin(), data.end());
     return encode_stream(bytes);
+}
+
+void JuttaConnection::reset_xml_codec_state() const {
+    this->xml_codec_.reset();
+    this->xml_rx_buffer_.clear();
+}
+
+bool JuttaConnection::write_xml_encoded(const std::vector<uint8_t>& data) const {
+    if (data.empty()) {
+        return true;
+    }
+    ESP_LOGD(TAG, "Sende 2b4b-Block (%zu Byte): %s", data.size(), format_hex(data).c_str());
+    if (!serial.write_serial(data)) {
+        ESP_LOGE(TAG, "2b4b-Block konnte nicht über UART gesendet werden.");
+        return false;
+    }
+    serial.flush();
+    wait_for_jutta_gap();
+    return true;
+}
+
+std::shared_ptr<std::string> JuttaConnection::wait_for_xml_line(const std::chrono::milliseconds& timeout) {
+    uint32_t start = esphome::millis();
+    while (true) {
+        std::array<uint8_t, 4> chunk{};
+        size_t read = serial.read_serial(chunk);
+        if (read > 0) {
+            this->xml_rx_buffer_.insert(this->xml_rx_buffer_.end(), chunk.begin(), chunk.begin() + read);
+            DbCodec2B4B::DecodeResult result{};
+            if (DbCodec2B4B::decode_best(this->xml_rx_buffer_, result) && result.success) {
+                if (result.consumed > 0 && result.consumed <= this->xml_rx_buffer_.size()) {
+                    this->xml_rx_buffer_.erase(this->xml_rx_buffer_.begin(), this->xml_rx_buffer_.begin() + result.consumed);
+                }
+                this->xml_codec_.update_detection(result.msb_first, result.xor_key);
+                ESP_LOGD(TAG, "2b4b-Zeile dekodiert (msb_first=%s, xor=0x%02X, printable=%.2f)",
+                         result.msb_first ? "true" : "false", result.xor_key, result.printable_ratio);
+                return std::make_shared<std::string>(result.ascii);
+            }
+            if (this->xml_rx_buffer_.size() > 4096) {
+                ESP_LOGW(TAG, "Verwerfe übergroßen 2b4b-Puffer (%zu Byte).", this->xml_rx_buffer_.size());
+                this->xml_rx_buffer_.clear();
+            }
+        } else {
+            esphome::delay(5);
+        }
+
+        if (timeout.count() > 0) {
+            uint32_t now = esphome::millis();
+            if (time_reached(now, start + static_cast<uint32_t>(timeout.count()))) {
+                break;
+            }
+        }
+    }
+    return nullptr;
+}
+
+std::shared_ptr<std::string> JuttaConnection::write_xml_with_response(const std::string& data,
+                                                                      const std::chrono::milliseconds& timeout) {
+    if (data.empty()) {
+        ESP_LOGW(TAG, "Leere 2b4b-Zeile wird nicht gesendet.");
+        return nullptr;
+    }
+
+    this->flush_serial_input();
+    this->xml_rx_buffer_.clear();
+
+    struct Candidate {
+        bool msb_first;
+        uint8_t xor_key;
+    };
+
+    std::vector<Candidate> candidates;
+    if (this->xml_codec_.has_detection()) {
+        candidates.push_back({this->xml_codec_.msb_first(), this->xml_codec_.xor_key()});
+    } else {
+        for (bool msb_first : {true, false}) {
+            for (uint8_t key : XML_XOR_KEYS) {
+                candidates.push_back({msb_first, key});
+            }
+        }
+    }
+
+    for (size_t idx = 0; idx < candidates.size(); ++idx) {
+        const Candidate& candidate = candidates[idx];
+        auto encoded = DbCodec2B4B::encode(data, candidate.msb_first, candidate.xor_key);
+        ESP_LOGD(TAG, "Sende 2b4b-Zeile (msb_first=%s, xor=0x%02X)", candidate.msb_first ? "true" : "false",
+                 candidate.xor_key);
+        if (!this->write_xml_encoded(encoded)) {
+            return nullptr;
+        }
+
+        auto response = this->wait_for_xml_line(timeout);
+        if (response != nullptr) {
+            return response;
+        }
+
+        if (idx + 1 < candidates.size()) {
+            ESP_LOGW(TAG, "Keine Antwort für 2b4b-Zeile, versuche alternative Kodierung.");
+            this->flush_serial_input();
+            this->xml_rx_buffer_.clear();
+        }
+    }
+
+    return nullptr;
+}
+
+bool JuttaConnection::write_xml_payload(const std::vector<uint8_t>& data) {
+    if (data.empty()) {
+        return true;
+    }
+    if (!this->xml_codec_.has_detection()) {
+        ESP_LOGW(TAG, "2b4b-Kodierung noch nicht erkannt – Rohdaten werden nicht gesendet.");
+        return false;
+    }
+    auto encoded = DbCodec2B4B::encode(data, this->xml_codec_.msb_first(), this->xml_codec_.xor_key());
+    return this->write_xml_encoded(encoded);
+}
+
+bool JuttaConnection::write_xml_payload(const std::string& data) {
+    std::vector<uint8_t> bytes(data.begin(), data.end());
+    return this->write_xml_payload(bytes);
 }
 
 bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData) const {

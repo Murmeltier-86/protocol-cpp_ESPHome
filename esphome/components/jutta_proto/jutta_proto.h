@@ -64,6 +64,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void perform_xml_handshake_if_needed_();
   std::shared_ptr<std::string> wait_for_response_(::jutta_proto::JuttaConnection *connection,
                                                   const std::string &command, uint32_t timeout_ms);
+  std::shared_ptr<std::string> wait_for_xml_response_(::jutta_proto::JuttaConnection *connection,
+                                                      const std::string &command, uint32_t timeout_ms);
   bool ensure_transaction_ready_(const char *operation);
   void publish_machine_settings_(const std::string &payload);
 

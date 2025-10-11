@@ -204,6 +204,15 @@ std::shared_ptr<std::string> JuraComponent::wait_for_response_(::jutta_proto::Ju
   return response;
 }
 
+std::shared_ptr<std::string> JuraComponent::wait_for_xml_response_(::jutta_proto::JuttaConnection *connection,
+                                                                   const std::string &command, uint32_t timeout_ms) {
+  if (connection == nullptr) {
+    return nullptr;
+  }
+  auto timeout = std::chrono::milliseconds{timeout_ms};
+  return connection->write_xml_with_response(command, timeout);
+}
+
 bool JuraComponent::ensure_transaction_ready_(const char *operation) {
   if (!this->is_ready()) {
     ESP_LOGW(TAG, "%s nicht möglich - Handshake läuft noch.", operation != nullptr ? operation : "Aktion");
@@ -252,7 +261,7 @@ void JuraComponent::perform_xml_handshake_if_needed_() {
     trimmed_command.erase(std::remove(trimmed_command.begin(), trimmed_command.end(), '\n'), trimmed_command.end());
     this->xml_handshake_request_ = trimmed_command;
 
-    auto response = this->wait_for_response_(connection, command, 1500);
+    auto response = this->wait_for_xml_response_(connection, command, 1500);
     if (response == nullptr) {
       ESP_LOGW(TAG, "XML-Handshake: keine Antwort auf '%s'.", format_printable_string(trimmed_command).c_str());
       continue;
@@ -838,7 +847,7 @@ void JuraComponent::process_xml_poll() {
     const std::string &command = item.first;
     std::string request = std::string("@") + command + "\r\n";
     ESP_LOGV(TAG, "Requesting XML bank %s", command.c_str());
-    auto response = this->coffee_maker_->connection->write_decoded_with_response(
+    auto response = this->coffee_maker_->connection->write_xml_with_response(
         request, std::chrono::milliseconds{XML_POLL_REQUEST_TIMEOUT_MS});
     if (response == nullptr) {
       ESP_LOGW(TAG, "Keine Antwort auf %s erhalten", command.c_str());
@@ -882,13 +891,13 @@ void JuraComponent::request_machine_settings() {
     return;
   }
   auto *connection = this->coffee_maker_->connection.get();
-  auto response = this->wait_for_response_(connection, "@hr:00\r\n", 1500);
+  auto response = this->wait_for_xml_response_(connection, "@hr:00\r\n", 1500);
   std::string payload;
   if (response != nullptr) {
     payload = *response;
   }
   if (payload.size() < 32) {
-    response = this->wait_for_response_(connection, "@hr:05\r\n", 1500);
+    response = this->wait_for_xml_response_(connection, "@hr:05\r\n", 1500);
     if (response != nullptr) {
       payload = *response;
     }
@@ -919,7 +928,7 @@ void JuraComponent::write_machine_settings(const std::string &xml) {
   }
 
   auto expect_response = [&](const std::string &command, uint32_t timeout_ms, const char *label) -> bool {
-    auto reply = this->wait_for_response_(connection, command, timeout_ms);
+    auto reply = this->wait_for_xml_response_(connection, command, timeout_ms);
     if (reply == nullptr) {
       ESP_LOGW(TAG, "%s: keine Antwort auf '%s' erhalten.", label, format_printable_string(command).c_str());
       return false;
@@ -936,7 +945,7 @@ void JuraComponent::write_machine_settings(const std::string &xml) {
     ok = false;
   }
   if (ok) {
-    if (!connection->write_decoded(xml)) {
+    if (!connection->write_xml_payload(xml)) {
       ESP_LOGW(TAG, "Übertragung der XML-Daten fehlgeschlagen.");
       ok = false;
     }

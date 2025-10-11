@@ -9,6 +9,7 @@
 #include <limits>
 
 #include "serial_connection.hpp"
+#include "codec_db_2b4b.hpp"
 
 //---------------------------------------------------------------------------
 namespace jutta_proto {
@@ -100,6 +101,19 @@ class JuttaConnection {
     std::shared_ptr<std::string> write_decoded_with_response(const std::string& data,
                                                              const std::chrono::milliseconds& timeout =
                                                                  std::chrono::milliseconds{5000});
+
+    /**
+     * Schreibt eine ASCII-Zeile im 2b4b-Format und wartet auf die Antwort.
+     */
+    std::shared_ptr<std::string> write_xml_with_response(const std::string& data,
+                                                         const std::chrono::milliseconds& timeout =
+                                                             std::chrono::milliseconds{1500});
+
+    /**
+     * Überträgt Rohdaten (z. B. XML) über den 2b4b-Kanal.
+     */
+    bool write_xml_payload(const std::vector<uint8_t>& data);
+    bool write_xml_payload(const std::string& data);
 
     /**
      * Polls for the next CRLF-terminated response line.
@@ -298,6 +312,13 @@ class JuttaConnection {
                                          FrameDiagnostics& diagnostics) const;
     std::vector<uint8_t> encode_stream(const std::vector<uint8_t>& data) const;
     std::vector<uint8_t> encode_stream(const std::string& data) const;
+
+    std::shared_ptr<std::string> wait_for_xml_line(const std::chrono::milliseconds& timeout);
+    bool write_xml_encoded(const std::vector<uint8_t>& data) const;
+    void reset_xml_codec_state() const;
+
+    mutable DbCodec2B4B xml_codec_{};
+    mutable std::vector<uint8_t> xml_rx_buffer_{};
 
 };
 //---------------------------------------------------------------------------
