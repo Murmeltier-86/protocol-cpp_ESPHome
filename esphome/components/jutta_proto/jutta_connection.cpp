@@ -18,7 +18,15 @@ static const char* TAG = "jutta_connection";
 
 namespace {
 constexpr uint32_t JUTTA_SERIAL_GAP_MS = 8;
-constexpr std::array<uint8_t, 4> JUTTA_DB_CODEWORDS = {0xFF, 0xDF, 0xFB, 0xDB};
+constexpr uint8_t JUTTA_ENCODE_BASE = 0xFF;
+constexpr uint8_t JUTTA_BIT0_MASK = static_cast<uint8_t>(1u << 2);
+constexpr uint8_t JUTTA_BIT1_MASK = static_cast<uint8_t>(1u << 5);
+constexpr std::array<uint8_t, 4> JUTTA_DB_CODEWORDS = {
+    JUTTA_ENCODE_BASE,
+    static_cast<uint8_t>(JUTTA_ENCODE_BASE - JUTTA_BIT0_MASK),
+    static_cast<uint8_t>(JUTTA_ENCODE_BASE - JUTTA_BIT1_MASK),
+    static_cast<uint8_t>(JUTTA_ENCODE_BASE - JUTTA_BIT0_MASK - JUTTA_BIT1_MASK),
+};
 constexpr float PRINTABLE_THRESHOLD = 0.7f;
 std::string format_hex(const uint8_t* data, size_t length) {
     if (length == 0) {
@@ -116,25 +124,6 @@ inline bool is_possible_encoded_byte(uint8_t byte) {
         }
     }
     return false;
-}
-
-bool decode_symbol(uint8_t symbol, uint8_t& value) {
-    switch (symbol) {
-        case 0xFF:
-            value = 0b00;
-            return true;
-        case 0xDF:
-            value = 0b01;
-            return true;
-        case 0xFB:
-            value = 0b10;
-            return true;
-        case 0xDB:
-            value = 0b11;
-            return true;
-        default:
-            return false;
-    }
 }
 
 bool is_mostly_printable(const std::string& text) {
@@ -346,9 +335,16 @@ void JuttaConnection::run_encode_decode_test() {
 std::array<uint8_t, 4> JuttaConnection::encode(const uint8_t& decData) {
     std::array<uint8_t, 4> encData{};
     for (int group = 0; group < 4; ++group) {
-        int shift = (3 - group) * 2;
-        uint8_t bits = static_cast<uint8_t>((decData >> shift) & 0x03);
-        encData[group] = JUTTA_DB_CODEWORDS[bits];
+        uint8_t encoded = JUTTA_ENCODE_BASE;
+        uint8_t bit0 = static_cast<uint8_t>((decData >> (group * 2)) & 0x1);
+        uint8_t bit1 = static_cast<uint8_t>((decData >> (group * 2 + 1)) & 0x1);
+        if (bit0 == 0) {
+            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT0_MASK);
+        }
+        if (bit1 == 0) {
+            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT1_MASK);
+        }
+        encData[group] = encoded;
     }
     return encData;
 }
@@ -357,13 +353,10 @@ uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
     uint8_t decData = 0;
     for (int group = 0; group < 4; ++group) {
         uint8_t encoded = encData[group];
-        uint8_t bits = 0;
-        if (!decode_symbol(encoded, bits)) {
-            ESP_LOGW(TAG, "Ungültiges 2b4b-Symbol 0x%02X in Frame", static_cast<unsigned>(encoded));
-            continue;
-        }
-        int shift = (3 - group) * 2;
-        decData |= static_cast<uint8_t>(bits << shift);
+        uint8_t bit0 = static_cast<uint8_t>((encoded >> 2) & 0x1);
+        uint8_t bit1 = static_cast<uint8_t>((encoded >> 5) & 0x1);
+        decData |= static_cast<uint8_t>(bit0 << (group * 2));
+        decData |= static_cast<uint8_t>(bit1 << (group * 2 + 1));
     }
     return decData;
 }

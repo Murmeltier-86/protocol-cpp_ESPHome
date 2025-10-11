@@ -33,9 +33,9 @@ des XML-Startbefehls an oder meldet `fehlgeschlagen`, wodurch sich die Initialis
 ### Handshake-Überblick
 
 1. **Legacy-Probe** – Zu Beginn wird im Modus `DB_AUTO` `&WHO` gesendet. Bleibt die Antwort aus, folgen `@TR:37`, `@TR:32`, `@t2:8188`
-   und `@TS:00`. Die Leitung nutzt einen 2b4b-Codec, dessen Codewörter `{0xFF, 0xDF, 0xFB, 0xDB}` jeweils zwei Bit transportieren:
-   Das erste Symbol kodiert die Bits 7..6, das zweite 5..4, das dritte 3..2 und das vierte 1..0. Eingehende Blöcke mit weniger als 70 %
-   druckbaren ASCII-Zeichen werden verworfen, damit Störsignale den Ablauf nicht blockieren.
+   und `@TS:00`. Die Leitung nutzt einen 2b4b-Codec, dessen Codewörter `{0xFF, 0xDF, 0xFB, 0xDB}` jeweils zwei Bit transportieren.
+   Entscheidend ist die Reihenfolge: Das **erste** Symbol enthält die niederwertigen Bits 1..0, das zweite 3..2, das dritte 5..4 und das vierte 7..6.
+   Eingehende Blöcke mit weniger als 70 % druckbaren ASCII-Zeichen werden verworfen, damit Störsignale den Ablauf nicht blockieren.
 2. **T1/T2/T3-Handshake** – Nach erfolgreicher Probe erfolgt der etablierte Sequenztausch `@T1` → `@t1` → `@T2` → `@t2` → `@T3` →
    `@t3`, womit der Bediencontroller freigeschaltet wird.
 3. **XML-Handshake** – Sobald die Maschine betriebsbereit ist, wird automatisch `@hr:00` (Fallback `@hr:05`) angefragt. Die Antwort
