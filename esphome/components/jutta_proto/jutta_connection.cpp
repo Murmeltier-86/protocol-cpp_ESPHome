@@ -536,7 +536,7 @@ bool JuttaConnection::decode_buffer(std::vector<uint8_t>& data) const {
     data.clear();
 
     while (true) {
-        std::array<uint8_t, 16> chunk{};
+        std::array<uint8_t, 4> chunk{};
         size_t read = serial.read_serial(chunk);
         if (read == 0) {
             break;
