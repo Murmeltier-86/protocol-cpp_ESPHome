@@ -38,6 +38,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
 
   void set_machine_data_sensor(text_sensor::TextSensor *sensor) { this->machine_data_sensor_ = sensor; }
   void set_machine_settings_sensor(text_sensor::TextSensor *sensor) { this->machine_settings_sensor_ = sensor; }
+  void set_xml_handshake_sensor(text_sensor::TextSensor *sensor) { this->xml_handshake_sensor_ = sensor; }
   void set_xml_poll_enabled(bool enabled) { this->xml_poll_enabled_ = enabled; }
   void set_xml_poll_interval(uint32_t interval_ms) { this->xml_poll_interval_ms_ = interval_ms; }
   void register_xml_sensor(const std::string &field, const std::string &command, const std::string &key,
@@ -60,6 +61,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void publish_machine_data_(const std::string &response);
   void process_xml_poll();
   void run_legacy_probe_handshake_();
+  void perform_xml_handshake_if_needed_();
   std::shared_ptr<std::string> wait_for_response_(::jutta_proto::JuttaConnection *connection,
                                                   const std::string &command, uint32_t timeout_ms);
   bool ensure_transaction_ready_(const char *operation);
@@ -100,6 +102,11 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string last_machine_settings_xml_{};
   bool last_machine_settings_write_ok_{false};
   bool machine_settings_write_attempted_{false};
+  text_sensor::TextSensor *xml_handshake_sensor_{nullptr};
+  bool xml_handshake_attempted_{false};
+  bool xml_handshake_ok_{false};
+  std::string xml_handshake_request_{};
+  std::string xml_handshake_response_{};
 };
 
 class StartBrewAction : public esphome::Action<> {

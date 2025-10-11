@@ -21,11 +21,24 @@ jutta_proto:
     name: "JURA Status"
   machine_settings:
     name: "JURA XML-Konfiguration"
+  xml_handshake:
+    name: "JURA XML-Handshake"
 ```
 
 Die Komponente führt den Handshake automatisch beim Start durch. Sobald dieser abgeschlossen ist, stehen alle Brühfunktionen zur
 Verfügung. Optionale Textsensoren veröffentlichen sowohl die Rohantwort des Legacy-Befehls `&STAT?` (`machine_data`) als auch die
-zuletzt gelesene oder geschriebene Einstellungs-XML (`machine_settings`).
+zuletzt gelesene oder geschriebene Einstellungs-XML (`machine_settings`). Der Sensor `xml_handshake` zeigt das erste Antwortfragment
+des XML-Startbefehls an oder meldet `fehlgeschlagen`, wodurch sich die Initialisierung der XML-Schnittstelle überprüfen lässt.
+
+### Handshake-Überblick
+
+1. **Legacy-Probe** – Zu Beginn wird im Modus `DB_AUTO` `&WHO` gesendet. Bleibt die Antwort aus, folgen `@TR:37`, `@TR:32`, `@t2:8188`
+   und `@TS:00`. Die Leitung nutzt einen 2b4b-Codec, dessen Codewörter `{0xFF, 0xDF, 0xFB, 0xDB}` jeweils zwei Bit transportieren.
+   Eingehende Blöcke mit weniger als 70 % druckbaren ASCII-Zeichen werden verworfen, damit Störsignale den Ablauf nicht blockieren.
+2. **T1/T2/T3-Handshake** – Nach erfolgreicher Probe erfolgt der etablierte Sequenztausch `@T1` → `@t1` → `@T2` → `@t2` → `@T3` →
+   `@t3`, womit der Bediencontroller freigeschaltet wird.
+3. **XML-Handshake** – Sobald die Maschine betriebsbereit ist, wird automatisch `@hr:00` (Fallback `@hr:05`) angefragt. Die Antwort
+   bzw. ein Fehlerstatus landet im Textsensor `xml_handshake`. Erst danach startet – sofern konfiguriert – das zyklische XML-Polling.
 
 ## Automationsaktionen
 

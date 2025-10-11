@@ -25,6 +25,7 @@ CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
 CONF_MACHINE_SETTINGS = "machine_settings"
 CONF_XML = "xml"
+CONF_XML_HANDSHAKE = "xml_handshake"
 CONF_ENABLE_XML_POLL = "enable_xml_poll"
 CONF_XML_MAPPING_PATH = "xml_mapping_path"
 CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
@@ -212,6 +213,7 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(): cv.declare_id(JuraComponent),
             cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_MACHINE_SETTINGS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_XML_HANDSHAKE): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
             cv.Optional(CONF_XML_MAPPING_PATH): cv.file_,
             cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=DEFAULT_XML_POLL_INTERVAL): cv.positive_time_period_milliseconds,
@@ -389,6 +391,12 @@ async def to_code(config):
             config[CONF_MACHINE_SETTINGS]
         )
         cg.add(var.set_machine_settings_sensor(machine_settings_sensor))
+
+    if CONF_XML_HANDSHAKE in config:
+        xml_handshake_sensor = await text_sensor.new_text_sensor(
+            config[CONF_XML_HANDSHAKE]
+        )
+        cg.add(var.set_xml_handshake_sensor(xml_handshake_sensor))
 
     xml_sensors = config.get(CONF_XML_SENSORS, [])
 

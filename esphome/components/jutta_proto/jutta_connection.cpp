@@ -18,9 +18,8 @@ static const char* TAG = "jutta_connection";
 
 namespace {
 constexpr uint32_t JUTTA_SERIAL_GAP_MS = 8;
-constexpr uint8_t JUTTA_ENCODE_BASE = 0xFF;
-constexpr uint8_t JUTTA_BIT0_MASK = static_cast<uint8_t>(1u << 2);
-constexpr uint8_t JUTTA_BIT1_MASK = static_cast<uint8_t>(1u << 5);
+constexpr std::array<uint8_t, 4> JUTTA_DB_CODEWORDS = {0xFF, 0xDF, 0xFB, 0xDB};
+constexpr float PRINTABLE_THRESHOLD = 0.7f;
 std::string format_hex(const uint8_t* data, size_t length) {
     if (length == 0) {
         return "[]";
@@ -111,15 +110,47 @@ bool try_extract_line(std::string& buffer, std::string& line) {
 }
 
 inline bool is_possible_encoded_byte(uint8_t byte) {
-    switch (byte) {
-        case JUTTA_ENCODE_BASE:
-        case static_cast<uint8_t>(JUTTA_ENCODE_BASE - JUTTA_BIT0_MASK):
-        case static_cast<uint8_t>(JUTTA_ENCODE_BASE - JUTTA_BIT1_MASK):
-        case static_cast<uint8_t>(JUTTA_ENCODE_BASE - JUTTA_BIT0_MASK - JUTTA_BIT1_MASK):
+    for (uint8_t codeword : JUTTA_DB_CODEWORDS) {
+        if (byte == codeword) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool decode_symbol(uint8_t symbol, uint8_t& value) {
+    switch (symbol) {
+        case 0xFF:
+            value = 0b00;
+            return true;
+        case 0xDF:
+            value = 0b01;
+            return true;
+        case 0xFB:
+            value = 0b10;
+            return true;
+        case 0xDB:
+            value = 0b11;
             return true;
         default:
             return false;
     }
+}
+
+bool is_mostly_printable(const std::string& text) {
+    if (text.empty()) {
+        return true;
+    }
+
+    size_t printable = 0;
+    for (unsigned char c : text) {
+        if (std::isprint(c) != 0 || c == '\r' || c == '\n' || c == '\t') {
+            ++printable;
+        }
+    }
+
+    float ratio = static_cast<float>(printable) / static_cast<float>(text.size());
+    return ratio >= PRINTABLE_THRESHOLD;
 }
 
 inline bool frames_equivalent(const std::array<uint8_t, 4>& lhs, const std::array<uint8_t, 4>& rhs) {
@@ -315,16 +346,9 @@ void JuttaConnection::run_encode_decode_test() {
 std::array<uint8_t, 4> JuttaConnection::encode(const uint8_t& decData) {
     std::array<uint8_t, 4> encData{};
     for (int group = 0; group < 4; ++group) {
-        uint8_t encoded = JUTTA_ENCODE_BASE;
-        uint8_t bit0 = (decData >> (group * 2)) & 0x1;
-        uint8_t bit1 = (decData >> (group * 2 + 1)) & 0x1;
-        if (bit0 == 0) {
-            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT0_MASK);
-        }
-        if (bit1 == 0) {
-            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT1_MASK);
-        }
-        encData[group] = encoded;
+        int shift = 6 - (group * 2);
+        uint8_t bits = static_cast<uint8_t>((decData >> shift) & 0x03);
+        encData[group] = JUTTA_DB_CODEWORDS[bits];
     }
     return encData;
 }
@@ -333,10 +357,13 @@ uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
     uint8_t decData = 0;
     for (int group = 0; group < 4; ++group) {
         uint8_t encoded = encData[group];
-        uint8_t bit0 = (encoded >> 2) & 0x1;
-        uint8_t bit1 = (encoded >> 5) & 0x1;
-        decData |= static_cast<uint8_t>(bit0 << (group * 2));
-        decData |= static_cast<uint8_t>(bit1 << (group * 2 + 1));
+        uint8_t bits = 0;
+        if (!decode_symbol(encoded, bits)) {
+            ESP_LOGW(TAG, "Ungültiges 2b4b-Symbol 0x%02X in Frame", static_cast<unsigned>(encoded));
+            continue;
+        }
+        int shift = 6 - (group * 2);
+        decData |= static_cast<uint8_t>(bits << shift);
     }
     return decData;
 }
@@ -470,6 +497,12 @@ bool JuttaConnection::poll_response_line(std::string& line) {
     }
 
     std::string incoming = vec_to_string(buffer);
+    if (!is_mostly_printable(incoming)) {
+        ESP_LOGW(TAG,
+                 "Verwerfe Binärblock beim Zeilen-Polling (%zu Byte, <70%% druckbare Zeichen): hex %s",
+                 incoming.size(), format_hex(buffer).c_str());
+        return false;
+    }
     this->response_line_buffer_.append(incoming);
     ESP_LOGD(TAG, "Received chunk while polling for response line: '%s' (hex %s) -> buffer '%s'",
              format_printable(incoming).c_str(), format_hex(buffer).c_str(),
@@ -563,13 +596,19 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
     std::vector<uint8_t> buffer;
     if (read_decoded_unsafe(buffer) && !buffer.empty()) {
         std::string incoming = vec_to_string(buffer);
-        this->wait_string_context_.buffer.append(incoming);
-        ESP_LOGD(TAG, "Received chunk while waiting for response: '%s' (hex %s) -> buffer '%s'",
-                 format_printable(incoming).c_str(), format_hex(buffer).c_str(),
-                 format_printable(this->wait_string_context_.buffer).c_str());
+        if (!is_mostly_printable(incoming)) {
+            ESP_LOGW(TAG,
+                     "Verwerfe Binärblock während generischer Antwort (%zu Byte, <70%% druckbar): hex %s",
+                     incoming.size(), format_hex(buffer).c_str());
+        } else {
+            this->wait_string_context_.buffer.append(incoming);
+            ESP_LOGD(TAG, "Received chunk while waiting for response: '%s' (hex %s) -> buffer '%s'",
+                     format_printable(incoming).c_str(), format_hex(buffer).c_str(),
+                     format_printable(this->wait_string_context_.buffer).c_str());
 
-        if (auto ready = try_complete(); ready != nullptr) {
-            return ready;
+            if (auto ready = try_complete(); ready != nullptr) {
+                return ready;
+            }
         }
     }
 
@@ -627,18 +666,24 @@ JuttaConnection::WaitResult JuttaConnection::wait_for_response_unsafe(const std:
     std::vector<uint8_t> buffer;
     if (read_decoded_unsafe(buffer) && !buffer.empty()) {
         std::string incoming(buffer.begin(), buffer.end());
-        this->wait_context_.recent.append(incoming);
-        ESP_LOGD(TAG, "Received chunk while waiting for '%s': '%s' (hex %s) -> recent buffer '%s'",
-                 format_printable(response).c_str(), format_printable(incoming).c_str(), format_hex(buffer).c_str(),
-                 format_printable(this->wait_context_.recent).c_str());
-        if (this->wait_context_.recent.find(response) != std::string::npos) {
-            this->wait_context_.active = false;
-            this->wait_context_.recent.clear();
-            ESP_LOGD(TAG, "Response '%s' detected.", format_printable(response).c_str());
-            return WaitResult::Success;
-        }
-        if (this->wait_context_.recent.size() > response.size()) {
-            this->wait_context_.recent.erase(0, this->wait_context_.recent.size() - response.size());
+        if (!is_mostly_printable(incoming)) {
+            ESP_LOGW(TAG,
+                     "Verwerfe Binärblock beim Warten auf '%s' (%zu Byte, <70%% druckbar): hex %s",
+                     format_printable(response).c_str(), incoming.size(), format_hex(buffer).c_str());
+        } else {
+            this->wait_context_.recent.append(incoming);
+            ESP_LOGD(TAG, "Received chunk while waiting for '%s': '%s' (hex %s) -> recent buffer '%s'",
+                     format_printable(response).c_str(), format_printable(incoming).c_str(), format_hex(buffer).c_str(),
+                     format_printable(this->wait_context_.recent).c_str());
+            if (this->wait_context_.recent.find(response) != std::string::npos) {
+                this->wait_context_.active = false;
+                this->wait_context_.recent.clear();
+                ESP_LOGD(TAG, "Response '%s' detected.", format_printable(response).c_str());
+                return WaitResult::Success;
+            }
+            if (this->wait_context_.recent.size() > response.size()) {
+                this->wait_context_.recent.erase(0, this->wait_context_.recent.size() - response.size());
+            }
         }
     }
 

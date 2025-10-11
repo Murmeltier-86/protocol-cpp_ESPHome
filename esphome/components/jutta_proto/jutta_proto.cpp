@@ -227,6 +227,67 @@ void JuraComponent::publish_machine_settings_(const std::string &payload) {
   }
 }
 
+void JuraComponent::perform_xml_handshake_if_needed_() {
+  if (this->xml_handshake_attempted_) {
+    return;
+  }
+  if (!this->is_ready()) {
+    return;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return;
+  }
+
+  this->xml_handshake_attempted_ = true;
+  this->xml_handshake_ok_ = false;
+  this->xml_handshake_request_.clear();
+  this->xml_handshake_response_.clear();
+
+  auto *connection = this->coffee_maker_->connection.get();
+  const char *const COMMANDS[] = {"@hr:00\r\n", "@hr:05\r\n"};
+
+  for (const char *command : COMMANDS) {
+    std::string trimmed_command = command;
+    trimmed_command.erase(std::remove(trimmed_command.begin(), trimmed_command.end(), '\r'), trimmed_command.end());
+    trimmed_command.erase(std::remove(trimmed_command.begin(), trimmed_command.end(), '\n'), trimmed_command.end());
+    this->xml_handshake_request_ = trimmed_command;
+
+    auto response = this->wait_for_response_(connection, command, 1500);
+    if (response == nullptr) {
+      ESP_LOGW(TAG, "XML-Handshake: keine Antwort auf '%s'.", format_printable_string(trimmed_command).c_str());
+      continue;
+    }
+
+    std::string sanitized = sanitize_response(*response);
+    if (sanitized.empty()) {
+      ESP_LOGW(TAG, "XML-Handshake: leere Antwort auf '%s'.", format_printable_string(trimmed_command).c_str());
+      continue;
+    }
+
+    this->xml_handshake_response_ = sanitized;
+    this->xml_handshake_ok_ = true;
+    ESP_LOGI(TAG, "XML-Handshake erfolgreich mit '%s' (%zu Zeichen).", trimmed_command.c_str(), sanitized.size());
+    break;
+  }
+
+  if (!this->xml_handshake_ok_) {
+    ESP_LOGW(TAG, "XML-Handshake fehlgeschlagen.");
+  }
+
+  if (this->xml_handshake_sensor_ != nullptr) {
+    std::string state;
+    if (this->xml_handshake_ok_) {
+      state = this->xml_handshake_response_;
+      if (state.size() > 96) {
+        state = state.substr(0, 96) + "...";
+      }
+    } else {
+      state = "fehlgeschlagen";
+    }
+    this->xml_handshake_sensor_->publish_state(state);
+  }
+}
+
 void JuraComponent::run_legacy_probe_handshake_() {
   if (this->connection_ == nullptr) {
     return;
@@ -336,6 +397,7 @@ void JuraComponent::loop() {
     }
   }
 
+  this->perform_xml_handshake_if_needed_();
   this->process_machine_data_query();
   this->process_xml_poll();
 }
@@ -422,6 +484,19 @@ void JuraComponent::dump_config() {
     if (this->machine_settings_write_attempted_) {
       ESP_LOGCONFIG(TAG, "    Letzter Schreibversuch: %s", YESNO(this->last_machine_settings_write_ok_));
     }
+  }
+
+  if (this->xml_handshake_attempted_) {
+    ESP_LOGCONFIG(TAG, "  XML-Handshake: %s", this->xml_handshake_ok_ ? "erfolgreich" : "fehlgeschlagen");
+    if (!this->xml_handshake_request_.empty()) {
+      ESP_LOGCONFIG(TAG, "    Anfrage: %s", this->xml_handshake_request_.c_str());
+    }
+    if (!this->xml_handshake_response_.empty()) {
+      ESP_LOGCONFIG(TAG, "    Antwort (gekürzt): %s",
+                    format_buffer_preview(this->xml_handshake_response_).c_str());
+    }
+  } else {
+    ESP_LOGCONFIG(TAG, "  XML-Handshake: ausstehend");
   }
 
   if (!this->xml_sensors_.empty()) {
