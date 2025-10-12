@@ -49,11 +49,26 @@ jutta_proto:
 
 Ein Poll besteht aus dem Versand einer kompletten 2b4b-Zeile (`@TR:32\r\n`) und der Auswertung sämtlicher Antworten, die mit `@` oder `&` beginnen. Die Antworten werden nach `:` bzw. `=` getrennt und den konfigurierten Feldern zugeordnet. Bleiben drei Abfragen hintereinander erfolglos, setzt der Kanal eine Minute aus und versucht anschließend erneut einen XML-Handshake.
 
+## Legacy-Telemetrie per Text-Sensor
+
+Der klassische Kanal bleibt unverändert erhalten. Über die Option `machine_data` lässt sich weiterhin der serielle Statusstrom (`&STAT?\r\n`) als Textsensor verfügbar machen. Die Komponente fragt den Wert alle 30 s ab, wertet eingehende Zeilen aus und entfernt Steuerzeichen, bevor sie den Text veröffentlicht.
+
+```yaml
+jutta_proto:
+  id: jura
+  uart_id: jura_uart
+  machine_data:
+    name: "Jura Rohstatus"
+```
+
+Bei einem Timeout wird der nächste Versuch protokolliert und automatisch verschoben. Die Legacy-Kommandos (`FN:xx`, `@Tn`, `PR:xy` …) bleiben vollständig kompatibel.
+
 ## Aktionen
 
-- `start_brew`: Löst ein Getränk aus der jeweiligen Getränke-Seite aus.
+- `start_brew`: Löst ein Getränk aus der jeweiligen Getränke-Seite aus. Unterstützte Werte sind `espresso`, `coffee`, `cappuccino`, `milk_foam`, `hot_water`, `caffe_barista`, `lungo_barista`, `espresso_doppio`, `macchiato`, `two_espresso` und `two_coffee` (inklusive der Alias-Namen aus der YAML-Validierung).
 - `custom_brew`: Startet einen individuellen Bezug unter Angabe der Mahl- und Wasserzeit.
 - `cancel_custom_brew`: Bricht einen laufenden individuellen Bezug ab.
 - `switch_page`: Wechselt auf eine andere Getränke-Seite.
+- `run_sequence`: Führt eine frei definierte Abfolge von Legacy-Kommandos und Verzögerungen aus. Jede Stufe kann entweder einen benannten Befehl aus der Tabelle (`grinder_on`, `water_pump_off`, …) oder eine Rohzeile enthalten; optional lassen sich Pausen (`delay`/`sleep`) und eigene Beschreibungen hinterlegen. Zeitlimits pro Schritt verhindert das endlose Warten auf Bestätigungen.
 
 Weitere Details zu den Parametern finden sich direkt im Code der Komponente.

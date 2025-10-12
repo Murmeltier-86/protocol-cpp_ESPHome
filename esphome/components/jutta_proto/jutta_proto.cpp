@@ -1,5 +1,6 @@
 #include "esphome/components/jutta_proto/jutta_proto.h"
 
+#include <algorithm>
 #include <cctype>
 #include <iomanip>
 #include <sstream>
@@ -17,6 +18,9 @@ namespace {
 static const char *const TAG = "jutta_proto";
 
 constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
+constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
+constexpr uint32_t MACHINE_DATA_REQUEST_TIMEOUT_MS = 2000;
+const char *const MACHINE_DATA_COMMAND = "&STAT?\r\n";
 constexpr uint32_t XML_RETRY_DELAY_MS = 5000;
 constexpr uint32_t XML_PAUSE_AFTER_FAILURE_MS = 60000;
 
@@ -189,6 +193,7 @@ void JuraComponent::loop() {
     }
   }
 
+  this->process_machine_data_query();
   this->process_xml_channel();
 }
 
@@ -416,6 +421,73 @@ bool JuraComponent::time_reached(uint32_t now, uint32_t target) {
   return static_cast<int32_t>(now - target) >= 0;
 }
 
+void JuraComponent::process_machine_data_query() {
+  if (this->machine_data_sensor_ == nullptr) {
+    return;
+  }
+  if (!this->is_ready()) {
+    return;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return;
+  }
+  if (this->is_busy()) {
+    return;
+  }
+
+  auto *connection = this->coffee_maker_->connection.get();
+  uint32_t now = esphome::millis();
+
+  auto handle_response = [&](const std::shared_ptr<std::string> &response) {
+    if (response != nullptr) {
+      this->publish_machine_data_(*response);
+      this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
+      this->machine_data_request_pending_ = false;
+      return true;
+    }
+    return false;
+  };
+
+  if (this->machine_data_request_pending_) {
+    auto response = connection->write_decoded_with_response(
+        MACHINE_DATA_COMMAND, std::chrono::milliseconds{MACHINE_DATA_REQUEST_TIMEOUT_MS});
+    if (handle_response(response)) {
+      return;
+    }
+    if (time_reached(now, this->machine_data_request_start_ + MACHINE_DATA_REQUEST_TIMEOUT_MS)) {
+      ESP_LOGW(TAG, "Timeout while waiting for machine data response.");
+      this->machine_data_request_pending_ = false;
+      this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
+    }
+    return;
+  }
+
+  if (this->machine_data_query_next_ != 0 &&
+      !time_reached(now, this->machine_data_query_next_)) {
+    return;
+  }
+
+  this->machine_data_request_start_ = now;
+  auto response = connection->write_decoded_with_response(
+      MACHINE_DATA_COMMAND, std::chrono::milliseconds{MACHINE_DATA_REQUEST_TIMEOUT_MS});
+  if (handle_response(response)) {
+    return;
+  }
+
+  this->machine_data_request_pending_ = true;
+}
+
+void JuraComponent::publish_machine_data_(const std::string &response) {
+  std::string sanitized = response;
+  sanitized.erase(std::remove_if(sanitized.begin(), sanitized.end(),
+                                 [](unsigned char c) { return c == '\r' || c == '\n'; }),
+                  sanitized.end());
+  ESP_LOGD(TAG, "Machine data response: %s", sanitized.c_str());
+  if (this->machine_data_sensor_ != nullptr) {
+    this->machine_data_sensor_->publish_state(sanitized);
+  }
+}
+
 void JuraComponent::start_brew(::jutta_proto::CoffeeMaker::coffee_t coffee) {
   if (!this->is_ready()) {
     ESP_LOGW(TAG, "Cannot start brew - component not ready.");
@@ -453,6 +525,18 @@ void JuraComponent::switch_page(uint32_t page) {
   this->coffee_maker_->switch_page(page);
 }
 
+void JuraComponent::run_sequence(const std::vector<::jutta_proto::CoffeeMaker::SequenceStep> &steps) {
+  if (!this->is_ready()) {
+    ESP_LOGW(TAG, "Cannot run sequence - component not ready.");
+    return;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->is_locked()) {
+    ESP_LOGW(TAG, "Cannot run sequence - coffee maker busy.");
+    return;
+  }
+  this->coffee_maker_->run_sequence(steps);
+}
+
 bool JuraComponent::is_busy() const {
   if (this->coffee_maker_ == nullptr) {
     return false;
@@ -460,14 +544,29 @@ bool JuraComponent::is_busy() const {
   return this->coffee_maker_->is_locked();
 }
 
+::jutta_proto::JuttaConnection *JuraComponent::get_active_connection() const {
+  if (this->connection_ != nullptr) {
+    return this->connection_.get();
+  }
+  if (this->coffee_maker_ != nullptr && this->coffee_maker_->connection != nullptr) {
+    return this->coffee_maker_->connection.get();
+  }
+  return nullptr;
+}
+
 void JuraComponent::process_xml_channel() {
   if (!this->xml_config_.enabled) {
     return;
   }
-  if (this->connection_ == nullptr) {
+  if (this->handshake_stage_ != HandshakeStage::DONE) {
     return;
   }
-  if (this->handshake_stage_ != HandshakeStage::DONE) {
+
+  auto *connection = this->get_active_connection();
+  if (connection == nullptr) {
+    return;
+  }
+  if (this->machine_data_request_pending_) {
     return;
   }
 
@@ -487,7 +586,7 @@ void JuraComponent::process_xml_channel() {
     if (this->xml_action_deadline_ != 0 && !time_reached(now, this->xml_action_deadline_)) {
       return;
     }
-    bool ok = this->perform_xml_handshake();
+    bool ok = this->perform_xml_handshake(connection);
     if (ok) {
       this->xml_stage_ = XmlStage::Idle;
       this->xml_attempt_counter_ = 0;
@@ -509,7 +608,7 @@ void JuraComponent::process_xml_channel() {
   }
 
   if (this->xml_stage_ == XmlStage::Polling) {
-    bool ok = this->poll_xml_values();
+    bool ok = this->poll_xml_values(connection);
     if (ok) {
       this->xml_stage_ = XmlStage::Idle;
       this->xml_attempt_counter_ = 0;
@@ -521,9 +620,9 @@ void JuraComponent::process_xml_channel() {
   }
 }
 
-bool JuraComponent::perform_xml_handshake() {
+bool JuraComponent::perform_xml_handshake(::jutta_proto::JuttaConnection *connection) {
   ESP_LOGD(TAG, "XML: Starte Handshake-Versuch %u", static_cast<unsigned>(this->xml_attempt_counter_ + 1));
-  auto status = this->connection_->start_xml_handshake();
+  auto status = connection->start_xml_handshake();
   if (status.success) {
     ESP_LOGI(TAG, "XML: Handshake erfolgreich (%s)", status.summary.c_str());
     return true;
@@ -532,10 +631,10 @@ bool JuraComponent::perform_xml_handshake() {
   return false;
 }
 
-bool JuraComponent::poll_xml_values() {
+bool JuraComponent::poll_xml_values(::jutta_proto::JuttaConnection *connection) {
   ESP_LOGD(TAG, "XML: Starte Polling");
   std::vector<std::string> lines;
-  auto result = this->connection_->request_xml_lines("@TR:32\r\n", std::chrono::milliseconds{2000}, lines);
+  auto result = connection->request_xml_lines("@TR:32\r\n", std::chrono::milliseconds{2000}, lines);
   if (!result.success) {
     ESP_LOGW(TAG, "XML: Polling fehlgeschlagen: %s", result.summary.c_str());
     return false;

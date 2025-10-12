@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -29,11 +30,13 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void start_custom_brew(uint32_t grind_duration_ms, uint32_t water_duration_ms);
   void cancel_custom_brew();
   void switch_page(uint32_t page);
+  void run_sequence(const std::vector<::jutta_proto::CoffeeMaker::SequenceStep> &steps);
 
   bool is_ready() const { return this->handshake_stage_ == HandshakeStage::DONE && this->coffee_maker_ != nullptr; }
   bool is_busy() const;
   const std::string &device_type() const { return this->device_type_; }
 
+  void set_machine_data_sensor(text_sensor::TextSensor *sensor) { this->machine_data_sensor_ = sensor; }
   void set_xml_poll_enabled(bool enabled);
   void set_xml_poll_interval(uint32_t interval_ms);
   void set_xml_mapping_path(const std::string &path);
@@ -49,13 +52,16 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void restart_handshake(const char *reason);
   bool read_handshake_bytes();
   static bool time_reached(uint32_t now, uint32_t target);
+  void process_machine_data_query();
+  void publish_machine_data_(const std::string &response);
   void process_xml_channel();
-  bool perform_xml_handshake();
-  bool poll_xml_values();
+  bool perform_xml_handshake(::jutta_proto::JuttaConnection *connection);
+  bool poll_xml_values(::jutta_proto::JuttaConnection *connection);
   void handle_xml_failure(bool severe);
   void publish_xml_status(const std::string &state);
   void update_xml_sensors(const std::vector<std::string> &lines);
   static bool parse_key_value_line(const std::string &line, std::string &key, std::string &value);
+  ::jutta_proto::JuttaConnection *get_active_connection() const;
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
   std::unique_ptr<::jutta_proto::CoffeeMaker> coffee_maker_;
@@ -67,6 +73,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string handshake_t3_response_;
   uint32_t handshake_deadline_{0};
   bool custom_cancel_flag_{false};
+  text_sensor::TextSensor *machine_data_sensor_{nullptr};
+  uint32_t machine_data_query_next_{0};
+  bool machine_data_request_pending_{false};
+  uint32_t machine_data_request_start_{0};
 
   struct XmlSensorEntry {
     std::string field;
@@ -132,6 +142,33 @@ class SwitchPageAction : public esphome::Action<> {
  protected:
   JuraComponent *parent_;
   uint32_t page_{0};
+};
+
+class RunSequenceAction : public esphome::Action<> {
+ public:
+  explicit RunSequenceAction(JuraComponent *parent) : parent_(parent) {}
+  void add_command_step(const std::string &command, uint32_t delay_ms, uint32_t timeout_ms,
+                        const std::string &description) {
+    ::jutta_proto::CoffeeMaker::SequenceStep step;
+    step.type = ::jutta_proto::CoffeeMaker::SequenceStep::Type::Command;
+    step.command = command;
+    step.delay_ms = delay_ms;
+    step.timeout = std::chrono::milliseconds{timeout_ms};
+    step.description = description;
+    steps_.push_back(step);
+  }
+  void add_delay_step(uint32_t delay_ms, const std::string &description) {
+    ::jutta_proto::CoffeeMaker::SequenceStep step;
+    step.type = ::jutta_proto::CoffeeMaker::SequenceStep::Type::Delay;
+    step.delay_ms = delay_ms;
+    step.description = description;
+    steps_.push_back(step);
+  }
+  void play() override { this->parent_->run_sequence(steps_); }
+
+ protected:
+  JuraComponent *parent_;
+  std::vector<::jutta_proto::CoffeeMaker::SequenceStep> steps_{};
 };
 
 }  // namespace jutta_component
