@@ -486,7 +486,6 @@ void JuttaConnection::flush_serial_input() const {
     ESP_LOGD(TAG, "Flushing serial input (discarding %zu buffered encoded bytes).",
              this->encoded_rx_buffer_.size());
     this->encoded_rx_buffer_.clear();
-    this->xml_pending_symbols_.clear();
     std::array<uint8_t, 4> discard{};
     while (true) {
         size_t read = serial.read_serial(discard);
