@@ -298,22 +298,16 @@ void JuttaConnection::run_encode_decode_test() {
 std::array<uint8_t, 4> JuttaConnection::encode(const uint8_t& decData) {
     std::array<uint8_t, 4> encData{};
     for (int group = 0; group < 4; ++group) {
-        int shift = 6 - group * 2;
-        uint8_t pair = static_cast<uint8_t>((decData >> shift) & 0x03);
-        switch (pair) {
-            case 0x00:
-                encData[group] = 0xFF;
-                break;
-            case 0x01:
-                encData[group] = 0xDF;
-                break;
-            case 0x02:
-                encData[group] = 0xFB;
-                break;
-            default:
-                encData[group] = 0xDB;
-                break;
+        uint8_t encoded = JUTTA_ENCODE_BASE;
+        uint8_t bit0 = static_cast<uint8_t>((decData >> (group * 2)) & 0x1);
+        uint8_t bit1 = static_cast<uint8_t>((decData >> (group * 2 + 1)) & 0x1);
+        if (bit0 == 0) {
+            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT0_MASK);
         }
+        if (bit1 == 0) {
+            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT1_MASK);
+        }
+        encData[group] = encoded;
     }
     return encData;
 }
@@ -322,28 +316,10 @@ uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
     uint8_t decData = 0;
     for (int group = 0; group < 4; ++group) {
         uint8_t encoded = encData[group];
-        uint8_t pair = 0;
-        switch (encoded) {
-            case 0xFF:
-                pair = 0x00;
-                break;
-            case 0xDF:
-                pair = 0x01;
-                break;
-            case 0xFB:
-                pair = 0x02;
-                break;
-            case 0xDB:
-                pair = 0x03;
-                break;
-            default:
-                ESP_LOGW(TAG, "Ungültiges 2b4b-Symbol 0x%02X beim Dekodieren eines Legacy-Frames.",
-                         static_cast<unsigned>(encoded));
-                pair = 0x00;
-                break;
-        }
-        int shift = 6 - group * 2;
-        decData |= static_cast<uint8_t>(pair << shift);
+        uint8_t bit0 = static_cast<uint8_t>((encoded >> 2) & 0x1);
+        uint8_t bit1 = static_cast<uint8_t>((encoded >> 5) & 0x1);
+        decData |= static_cast<uint8_t>(bit0 << (group * 2));
+        decData |= static_cast<uint8_t>(bit1 << (group * 2 + 1));
     }
     return decData;
 }
@@ -351,26 +327,17 @@ uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
 bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData) const {
     ESP_LOGVV(TAG, "Writing encoded frame: %s", format_hex(encData).c_str());
 
-    bool result = true;
-    size_t index = 0;
-    for (uint8_t byte : encData) {
-        ESP_LOGVV(TAG, " -> Writing encoded byte %zu/%zu: 0x%02X", index + 1, encData.size(), byte);
-        if (!serial.write_serial_byte(byte)) {
-            ESP_LOGE(TAG, "Failed to write encoded byte %zu (0x%02X) to UART.", index, byte);
-            result = false;
-            break;
-        }
-        ESP_LOGVV(TAG, " -> Flushing UART TX buffer after encoded byte %zu", index + 1);
-        serial.flush();
-        ESP_LOGVV(TAG, " -> Waiting %u ms for inter-byte gap", JUTTA_SERIAL_GAP_MS);
-        wait_for_jutta_gap();
-        ++index;
+    if (!serial.write_serial(encData)) {
+        ESP_LOGE(TAG, "Failed to write encoded frame to UART.");
+        return false;
     }
 
-    if (result) {
-        ESP_LOGVV(TAG, "Encoded frame transmitted successfully.");
-    }
-    return result;
+    ESP_LOGVV(TAG, " -> Flushing UART TX buffer after encoded frame");
+    serial.flush();
+    ESP_LOGVV(TAG, " -> Waiting %u ms for inter-frame gap", JUTTA_SERIAL_GAP_MS);
+    wait_for_jutta_gap();
+    ESP_LOGVV(TAG, "Encoded frame transmitted successfully.");
+    return true;
 }
 
 bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const {
