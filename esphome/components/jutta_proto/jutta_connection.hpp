@@ -100,6 +100,25 @@ class JuttaConnection {
                                                              const std::chrono::milliseconds& timeout =
                                                                  std::chrono::milliseconds{5000});
 
+    struct XmlOperationResult {
+        bool success{false};
+        std::string summary{};
+    };
+
+    struct XmlDecodeSummary {
+        bool success{false};
+        bool msb_first{true};
+        uint8_t xor_key{0x00};
+        int align{0};
+        int score{-1};
+        std::string line;
+        size_t symbols_consumed{0};
+    };
+
+    XmlOperationResult start_xml_handshake();
+    XmlOperationResult request_xml_lines(const std::string& command, const std::chrono::milliseconds& timeout,
+                                         std::vector<std::string>& lines);
+
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
      * [Thread Safe]
@@ -202,6 +221,21 @@ class JuttaConnection {
 
     [[nodiscard]] bool align_encoded_rx_buffer() const;
     void flush_serial_input() const;
+
+    struct XmlCodecState {
+        bool valid{false};
+        bool msb_first{true};
+        uint8_t xor_key{0x00};
+        int align{0};
+    };
+
+    mutable XmlCodecState xml_codec_state_{};
+    mutable std::vector<uint8_t> xml_pending_symbols_{};
+    XmlDecodeSummary wait_for_xml_line(const std::chrono::milliseconds& timeout) const;
+    bool write_xml_line(const std::string& ascii, bool msb_first, uint8_t xor_key) const;
+    XmlDecodeSummary decode_symbols(const std::vector<uint8_t>& symbols) const;
+    void log_xml_attempt_failure(const char* context, const std::string& summary) const;
+    std::vector<std::pair<bool, uint8_t>> build_codec_candidates() const;
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.

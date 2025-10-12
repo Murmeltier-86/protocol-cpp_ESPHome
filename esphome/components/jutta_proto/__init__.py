@@ -3,6 +3,7 @@ import esphome.config_validation as cv
 from esphome import automation
 from esphome.components import uart
 from esphome.const import CONF_ID
+from esphome.components import sensor, text_sensor
 
 DEPENDENCIES = ["uart"]
 AUTO_LOAD = ["uart"]
@@ -41,11 +42,33 @@ COFFEE_TYPES = {
 DEFAULT_GRIND_DURATION = cv.TimePeriod(milliseconds=3600)
 DEFAULT_WATER_DURATION = cv.TimePeriod(milliseconds=40000)
 
+CONF_ENABLE_XML_POLL = "enable_xml_poll"
+CONF_XML_MAPPING_PATH = "xml_mapping_path"
+CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
+CONF_XML_SENSORS = "xml_sensors"
+CONF_XML_FIELD = "field"
+CONF_XML_STATUS = "xml_status"
+
+DEFAULT_XML_POLL_INTERVAL_MS = 60000
+
 JURA_COMPONENT_IDS = []
 
 
+XML_SENSOR_SCHEMA = sensor.sensor_schema().extend({cv.Required(CONF_XML_FIELD): cv.string})
+
 CONFIG_SCHEMA = (
-    cv.Schema({cv.GenerateID(): cv.declare_id(JuraComponent)})
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(JuraComponent),
+            cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
+            cv.Optional(CONF_XML_MAPPING_PATH): cv.string,
+            cv.Optional(
+                CONF_XML_POLL_INTERVAL_MS, default=DEFAULT_XML_POLL_INTERVAL_MS
+            ): cv.positive_int,
+            cv.Optional(CONF_XML_SENSORS): cv.ensure_list(XML_SENSOR_SCHEMA),
+            cv.Optional(CONF_XML_STATUS): text_sensor.text_sensor_schema(),
+        }
+    )
     .extend(uart.UART_DEVICE_SCHEMA)
     .extend(cv.COMPONENT_SCHEMA)
 )
@@ -98,6 +121,23 @@ async def to_code(config):
     JURA_COMPONENT_IDS.append(config[CONF_ID])
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
+
+    if config.get(CONF_ENABLE_XML_POLL):
+        cg.add(var.set_xml_poll_enabled(True))
+        cg.add(var.set_xml_poll_interval(config[CONF_XML_POLL_INTERVAL_MS]))
+        if CONF_XML_MAPPING_PATH in config:
+            cg.add(var.set_xml_mapping_path(config[CONF_XML_MAPPING_PATH]))
+        for sensor_conf in config.get(CONF_XML_SENSORS, []):
+            field = sensor_conf[CONF_XML_FIELD]
+            sensor_cfg = dict(sensor_conf)
+            sensor_cfg.pop(CONF_XML_FIELD, None)
+            sens = await sensor.new_sensor(sensor_cfg)
+            cg.add(var.add_xml_sensor(field, sens))
+        if CONF_XML_STATUS in config:
+            status = await text_sensor.new_text_sensor(config[CONF_XML_STATUS])
+            cg.add(var.set_xml_status_sensor(status))
+    else:
+        cg.add(var.set_xml_poll_enabled(False))
 
 
 async def _get_parent(config):

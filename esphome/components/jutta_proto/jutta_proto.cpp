@@ -4,6 +4,8 @@
 #include <iomanip>
 #include <sstream>
 #include <utility>
+#include <map>
+#include <cstdlib>
 
 #include "esphome/core/time.h"
 
@@ -15,6 +17,8 @@ namespace {
 static const char *const TAG = "jutta_proto";
 
 constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
+constexpr uint32_t XML_RETRY_DELAY_MS = 5000;
+constexpr uint32_t XML_PAUSE_AFTER_FAILURE_MS = 60000;
 
 std::string format_printable_char(uint8_t byte) {
   switch (byte) {
@@ -107,6 +111,39 @@ const char *JuraComponent::handshake_stage_name(JuraComponent::HandshakeStage st
   return "unknown";
 }
 
+void JuraComponent::set_xml_poll_enabled(bool enabled) {
+  this->xml_config_.enabled = enabled;
+  if (!enabled) {
+    this->xml_stage_ = XmlStage::Disabled;
+    this->xml_attempt_counter_ = 0;
+    this->xml_action_deadline_ = 0;
+  } else if (this->xml_stage_ == XmlStage::Disabled) {
+    this->xml_stage_ = XmlStage::AwaitHandshake;
+  }
+}
+
+void JuraComponent::set_xml_poll_interval(uint32_t interval_ms) {
+  this->xml_config_.poll_interval_ms = interval_ms;
+}
+
+void JuraComponent::set_xml_mapping_path(const std::string &path) {
+  this->xml_config_.mapping_path = path;
+}
+
+void JuraComponent::add_xml_sensor(const std::string &field, esphome::sensor::Sensor *sensor) {
+  if (sensor == nullptr) {
+    return;
+  }
+  XmlSensorEntry entry;
+  entry.field = field;
+  entry.sensor = sensor;
+  this->xml_config_.sensors.push_back(entry);
+}
+
+void JuraComponent::set_xml_status_sensor(esphome::text_sensor::TextSensor *sensor) {
+  this->xml_config_.status_sensor = sensor;
+}
+
 void JuraComponent::setup() {
   if (this->parent_ == nullptr) {
     ESP_LOGE(TAG, "UART parent not configured for JUTTA Proto component.");
@@ -119,6 +156,15 @@ void JuraComponent::setup() {
 
   this->handshake_stage_ = HandshakeStage::HELLO;
   ESP_LOGI(TAG, "Starting handshake with coffee maker...");
+
+  if (this->xml_config_.enabled) {
+    this->xml_stage_ = XmlStage::AwaitHandshake;
+    this->xml_attempt_counter_ = 0;
+    this->xml_action_deadline_ = 0;
+    this->publish_xml_status("XML-Handshakes ausstehend");
+  } else {
+    this->xml_stage_ = XmlStage::Disabled;
+  }
 }
 
 void JuraComponent::loop() {
@@ -142,6 +188,8 @@ void JuraComponent::loop() {
       this->custom_cancel_flag_ = false;
     }
   }
+
+  this->process_xml_channel();
 }
 
 void JuraComponent::dump_config() {
@@ -195,6 +243,16 @@ void JuraComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  Coffee maker ready: %s", YESNO(true));
   } else {
     ESP_LOGCONFIG(TAG, "  Coffee maker ready: %s", YESNO(false));
+  }
+
+  if (this->xml_config_.enabled) {
+    ESP_LOGCONFIG(TAG, "  XML-Polling: aktiviert (%u ms Intervall)", this->xml_config_.poll_interval_ms);
+    if (!this->xml_config_.mapping_path.empty()) {
+      ESP_LOGCONFIG(TAG, "  XML-Referenzdatei: %s", this->xml_config_.mapping_path.c_str());
+    }
+    ESP_LOGCONFIG(TAG, "  XML-Sensoren: %u", static_cast<unsigned>(this->xml_config_.sensors.size()));
+  } else {
+    ESP_LOGCONFIG(TAG, "  XML-Polling: deaktiviert");
   }
 }
 
@@ -400,6 +458,180 @@ bool JuraComponent::is_busy() const {
     return false;
   }
   return this->coffee_maker_->is_locked();
+}
+
+void JuraComponent::process_xml_channel() {
+  if (!this->xml_config_.enabled) {
+    return;
+  }
+  if (this->connection_ == nullptr) {
+    return;
+  }
+  if (this->handshake_stage_ != HandshakeStage::DONE) {
+    return;
+  }
+
+  uint32_t now = esphome::millis();
+  if (this->xml_stage_ == XmlStage::Disabled) {
+    return;
+  }
+  if (this->xml_stage_ == XmlStage::Paused) {
+    if (this->xml_action_deadline_ != 0 && !time_reached(now, this->xml_action_deadline_)) {
+      return;
+    }
+    this->xml_stage_ = XmlStage::AwaitHandshake;
+    this->xml_attempt_counter_ = 0;
+  }
+
+  if (this->xml_stage_ == XmlStage::AwaitHandshake) {
+    if (this->xml_action_deadline_ != 0 && !time_reached(now, this->xml_action_deadline_)) {
+      return;
+    }
+    bool ok = this->perform_xml_handshake();
+    if (ok) {
+      this->xml_stage_ = XmlStage::Idle;
+      this->xml_attempt_counter_ = 0;
+      this->xml_next_poll_ = now;
+      this->xml_action_deadline_ = 0;
+      this->publish_xml_status("XML-Kanal bereit");
+    } else {
+      this->handle_xml_failure(false);
+    }
+    return;
+  }
+
+  if (this->xml_stage_ == XmlStage::Idle) {
+    if (time_reached(now, this->xml_next_poll_)) {
+      this->xml_stage_ = XmlStage::Polling;
+    } else {
+      return;
+    }
+  }
+
+  if (this->xml_stage_ == XmlStage::Polling) {
+    bool ok = this->poll_xml_values();
+    if (ok) {
+      this->xml_stage_ = XmlStage::Idle;
+      this->xml_attempt_counter_ = 0;
+      this->xml_next_poll_ = esphome::millis() + this->xml_config_.poll_interval_ms;
+      this->xml_action_deadline_ = 0;
+      return;
+    }
+    this->handle_xml_failure(true);
+  }
+}
+
+bool JuraComponent::perform_xml_handshake() {
+  ESP_LOGD(TAG, "XML: Starte Handshake-Versuch %u", static_cast<unsigned>(this->xml_attempt_counter_ + 1));
+  auto status = this->connection_->start_xml_handshake();
+  if (status.success) {
+    ESP_LOGI(TAG, "XML: Handshake erfolgreich (%s)", status.summary.c_str());
+    return true;
+  }
+  ESP_LOGW(TAG, "XML: Handshake fehlgeschlagen: %s", status.summary.c_str());
+  return false;
+}
+
+bool JuraComponent::poll_xml_values() {
+  ESP_LOGD(TAG, "XML: Starte Polling");
+  std::vector<std::string> lines;
+  auto result = this->connection_->request_xml_lines("@TR:32\r\n", std::chrono::milliseconds{2000}, lines);
+  if (!result.success) {
+    ESP_LOGW(TAG, "XML: Polling fehlgeschlagen: %s", result.summary.c_str());
+    return false;
+  }
+  if (lines.empty()) {
+    ESP_LOGW(TAG, "XML: Keine Daten empfangen");
+    return false;
+  }
+  this->publish_xml_status("XML-Daten empfangen");
+  this->update_xml_sensors(lines);
+  return true;
+}
+
+void JuraComponent::handle_xml_failure(bool severe) {
+  ++this->xml_attempt_counter_;
+  if (this->xml_attempt_counter_ >= 3) {
+    this->xml_stage_ = XmlStage::Paused;
+    this->xml_action_deadline_ = esphome::millis() + XML_PAUSE_AFTER_FAILURE_MS;
+    this->publish_xml_status("XML: pausiert nach Fehlern");
+    ESP_LOGW(TAG, "XML: %u Fehlversuche, pausiere bis in %u ms", static_cast<unsigned>(this->xml_attempt_counter_),
+             XML_PAUSE_AFTER_FAILURE_MS);
+  } else {
+    this->xml_stage_ = XmlStage::AwaitHandshake;
+    this->xml_action_deadline_ = esphome::millis() + XML_RETRY_DELAY_MS;
+    if (severe) {
+      this->publish_xml_status("XML: erneuter Handshake erforderlich");
+    }
+    ESP_LOGW(TAG, "XML: Fehler, erneuter Versuch in %u ms (Versuch %u von 3)", XML_RETRY_DELAY_MS,
+             static_cast<unsigned>(this->xml_attempt_counter_ + 1));
+  }
+}
+
+void JuraComponent::publish_xml_status(const std::string &state) {
+  if (this->xml_config_.status_sensor != nullptr) {
+    this->xml_config_.status_sensor->publish_state(state);
+  }
+}
+
+void JuraComponent::update_xml_sensors(const std::vector<std::string> &lines) {
+  if (this->xml_config_.sensors.empty()) {
+    return;
+  }
+
+  std::map<std::string, std::string> values;
+  for (const std::string &line : lines) {
+    std::string key;
+    std::string value;
+    if (JuraComponent::parse_key_value_line(line, key, value)) {
+      values[key] = value;
+    }
+  }
+
+  for (auto &entry : this->xml_config_.sensors) {
+    if (entry.sensor == nullptr) {
+      continue;
+    }
+    auto it = values.find(entry.field);
+    if (it == values.end()) {
+      continue;
+    }
+    const std::string &raw = it->second;
+    char *end_ptr = nullptr;
+    const char *c_str = raw.c_str();
+    float value = std::strtof(c_str, &end_ptr);
+    if (end_ptr == c_str) {
+      ESP_LOGW(TAG, "XML: Wert für Feld '%s' konnte nicht interpretiert werden: '%s'", entry.field.c_str(), raw.c_str());
+      continue;
+    }
+    entry.sensor->publish_state(value);
+  }
+}
+
+bool JuraComponent::parse_key_value_line(const std::string &line, std::string &key, std::string &value) {
+  if (line.empty()) {
+    return false;
+  }
+  size_t start = (line[0] == '@' || line[0] == '&') ? 1 : 0;
+  size_t sep = line.find_first_of(":=", start);
+  if (sep == std::string::npos) {
+    return false;
+  }
+  key = line.substr(start, sep - start);
+  size_t value_start = sep + 1;
+  while (value_start < line.size() && std::isspace(static_cast<unsigned char>(line[value_start])) != 0) {
+    ++value_start;
+  }
+  size_t value_end = line.size();
+  while (value_end > value_start && (line[value_end - 1] == '\r' || line[value_end - 1] == '\n' ||
+                                     std::isspace(static_cast<unsigned char>(line[value_end - 1])) != 0)) {
+    --value_end;
+  }
+  if (value_end <= value_start) {
+    return false;
+  }
+  value = line.substr(value_start, value_end - value_start);
+  return true;
 }
 
 }  // namespace jutta_component
