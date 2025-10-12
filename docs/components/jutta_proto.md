@@ -36,6 +36,23 @@ jutta_proto:
 
 Die Legacy-Kommandos (`FN:xx`, `@Tn`, `PR:xy` …) laufen weiterhin unverändert über den klassischen Encoder. Der DB-Kanal wird nur für den oben beschriebenen Statusabruf genutzt.
 
+## XML-Sensoren vorbereiten
+
+Für bestehende Installationen, die bereits XML-Felder konfiguriert haben, akzeptiert die Komponente wieder die entsprechenden YAML-Optionen:
+
+```yaml
+jutta_proto:
+  enable_xml_poll: true
+  xml_mapping_path: "/config/esphome/e6.xml"
+  xml_poll_interval_ms: 60000
+  xml_sensors:
+    - field: "tgc0_37"
+      name: "Reinigung"
+      unit_of_measurement: "%"
+```
+
+Die Sensoren werden angelegt und bleiben vorerst auf `unknown`, solange kein dedizierter XML-Datentransport implementiert wurde. Damit lassen sich bestehende Dashboards weiterverwenden, während eine zukünftige Implementierung der eigentlichen XML-Abfragen vorbereitet wird. Im Log erscheint einmalig ein Hinweis, dass aktuell keine XML-Daten übertragen werden.
+
 ## Aktionen
 
 - `start_brew`: Löst ein Getränk aus der jeweiligen Getränke-Seite aus. Unterstützte Werte sind `espresso`, `coffee`, `cappuccino`, `milk_foam`, `hot_water`, `caffe_barista`, `lungo_barista`, `espresso_doppio`, `macchiato`, `two_espresso` und `two_coffee` (inklusive der Alias-Namen aus der YAML-Validierung).

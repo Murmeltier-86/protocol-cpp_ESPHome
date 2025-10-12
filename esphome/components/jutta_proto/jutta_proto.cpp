@@ -150,6 +150,7 @@ void JuraComponent::loop() {
   }
 
   this->process_machine_data_query();
+  this->process_xml_polling();
 }
 
 void JuraComponent::dump_config() {
@@ -432,6 +433,43 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
   if (this->machine_data_sensor_ != nullptr) {
     this->machine_data_sensor_->publish_state(sanitized);
   }
+}
+
+void JuraComponent::add_xml_sensor(const std::string &field, sensor::Sensor *sensor) {
+  if (sensor == nullptr) {
+    return;
+  }
+  XmlSensorEntry entry;
+  entry.field = field;
+  entry.sensor = sensor;
+  this->xml_sensors_.push_back(entry);
+}
+
+void JuraComponent::process_xml_polling() {
+  if (!this->enable_xml_poll_) {
+    return;
+  }
+  if (this->xml_sensors_.empty()) {
+    return;
+  }
+  if (!this->is_ready()) {
+    return;
+  }
+
+  uint32_t now = esphome::millis();
+  if (this->xml_next_poll_ != 0 && !time_reached(now, this->xml_next_poll_)) {
+    return;
+  }
+
+  if (!this->xml_poll_warning_logged_) {
+    ESP_LOGW(TAG,
+             "XML-Polling ist derzeit nicht aktiv: Bitte implementiere die Abfrage entsprechend der Zielmaschine. "
+             "Konfiguriertes Mapping: %s", this->xml_mapping_path_.empty() ? "(keins)"
+                                                                    : this->xml_mapping_path_.c_str());
+    this->xml_poll_warning_logged_ = true;
+  }
+
+  this->xml_next_poll_ = now + this->xml_poll_interval_ms_;
 }
 
 void JuraComponent::start_brew(::jutta_proto::CoffeeMaker::coffee_t coffee) {

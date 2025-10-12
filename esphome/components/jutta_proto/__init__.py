@@ -1,6 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
+from esphome.components import sensor
 from esphome.components import uart
 from esphome.components import text_sensor
 from esphome.const import CONF_ID
@@ -20,6 +21,11 @@ CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
+CONF_ENABLE_XML_POLL = "enable_xml_poll"
+CONF_XML_MAPPING_PATH = "xml_mapping_path"
+CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
+CONF_XML_SENSORS = "xml_sensors"
+CONF_FIELD = "field"
 
 DEFAULT_GRIND_DURATION = cv.TimePeriod(milliseconds=3600)
 DEFAULT_WATER_DURATION = cv.TimePeriod(milliseconds=40000)
@@ -93,6 +99,12 @@ CONFIG_SCHEMA = (
         {
             cv.GenerateID(): cv.declare_id(JuraComponent),
             cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
+            cv.Optional(CONF_XML_MAPPING_PATH): cv.string,
+            cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=60000): cv.positive_int,
+            cv.Optional(CONF_XML_SENSORS, default=[]): cv.ensure_list(
+                sensor.sensor_schema().extend({cv.Required(CONF_FIELD): cv.string})
+            ),
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
@@ -238,6 +250,19 @@ async def to_code(config):
     if CONF_MACHINE_DATA in config:
         machine_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
         cg.add(var.set_machine_data_sensor(machine_sensor))
+
+    if config.get(CONF_ENABLE_XML_POLL):
+        cg.add(var.set_enable_xml_poll(True))
+
+    if CONF_XML_MAPPING_PATH in config:
+        cg.add(var.set_xml_mapping_path(config[CONF_XML_MAPPING_PATH]))
+
+    if CONF_XML_POLL_INTERVAL_MS in config:
+        cg.add(var.set_xml_poll_interval_ms(config[CONF_XML_POLL_INTERVAL_MS]))
+
+    for sensor_conf in config.get(CONF_XML_SENSORS, []):
+        xml_sensor = await sensor.new_sensor(sensor_conf)
+        cg.add(var.add_xml_sensor(sensor_conf[CONF_FIELD], xml_sensor))
 
 
 async def _get_parent(config):
