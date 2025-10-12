@@ -6,10 +6,8 @@
 #include <string>
 #include <vector>
 #include <deque>
-#include <limits>
 
 #include "serial_connection.hpp"
-#include "codec_db_2b4b.hpp"
 
 //---------------------------------------------------------------------------
 namespace jutta_proto {
@@ -103,31 +101,6 @@ class JuttaConnection {
                                                                  std::chrono::milliseconds{5000});
 
     /**
-     * Schreibt eine ASCII-Zeile im 2b4b-Format und wartet auf die Antwort.
-     */
-    std::shared_ptr<std::string> write_xml_with_response(const std::string& data,
-                                                         const std::chrono::milliseconds& timeout =
-                                                             std::chrono::milliseconds{1500});
-
-    /**
-     * Überträgt Rohdaten (z. B. XML) über den 2b4b-Kanal.
-     */
-    bool write_xml_payload(const std::vector<uint8_t>& data);
-    bool write_xml_payload(const std::string& data);
-
-    /**
-     * Polls for the next CRLF-terminated response line.
-     * Returns true if a complete line became available and stores it in "line" without the trailing CRLF.
-     * Returns false when no complete line has been received yet.
-     */
-    bool poll_response_line(std::string& line);
-
-    /**
-     * Clears buffered fragments collected while polling for response lines.
-     */
-    void reset_response_line_buffer();
-
-    /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
      * [Thread Safe]
      **/
@@ -167,6 +140,12 @@ class JuttaConnection {
      **/
     static void print_bytes(const std::vector<uint8_t>& data);
 
+    /**
+     * Runs the encode and decode test.
+     * Ensures encoding and decoding is reversable.
+     * Should be run at least once per session to ensure proper functionality.
+     **/
+    static void run_encode_decode_test();
 
     /**
      * Converts the given binary vector to a string and returns it.
@@ -189,11 +168,23 @@ class JuttaConnection {
      * A full documentation of the process can be found here:
      * https://github.com/Jutta-Proto/protocol-cpp#deobfuscating
      **/
+    static uint8_t decode(const std::array<uint8_t, 4>& encData);
     /**
      * Writes four bytes of encoded data to the coffee maker and then waits 8ms.
      **/
     [[nodiscard]] bool write_encoded_unsafe(const std::array<uint8_t, 4>& encData) const;
-    [[nodiscard]] bool write_encoded_unsafe(const std::vector<uint8_t>& encData) const;
+    /**
+     * Reads four bytes of encoded data which represent one byte of actual data.
+     * Returns true on success.
+     * Not thread safe!
+     **/
+    [[nodiscard]] bool read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const;
+    /**
+     * Reads multiples of four bytes. Every four bytes represent one actual byte.
+     * Returns the number of 4 byte tuples read.
+     * Not thread safe!
+     **/
+    [[nodiscard]] size_t read_encoded_unsafe(std::vector<std::array<uint8_t, 4>>& data) const;
     /**
      * Tries to read a single decoded byte.
      * This requires reading 4 JUTTA bytes and converting them to a single actual data byte.
@@ -209,6 +200,7 @@ class JuttaConnection {
      **/
     [[nodiscard]] bool read_decoded_unsafe(std::vector<uint8_t>& data) const;
 
+    [[nodiscard]] bool align_encoded_rx_buffer() const;
     void flush_serial_input() const;
 
     /**
@@ -273,68 +265,14 @@ class JuttaConnection {
     StringWaitContext wait_string_context_{};
 
 
-    struct CodecRuntimeState {
-        bool have_detection{false};
-        bool msb_first{true};
-        uint8_t xor_key{0x00};
-    };
-
-    struct FrameDiagnostics {
-        int align{0};
-        bool msb_first{true};
-        uint8_t xor_key{0x00};
-        float printable_ratio{0.0f};
-        size_t decoded_length{0};
-        int score{std::numeric_limits<int>::min()};
-    };
-
-    enum class FrameOutcome { Success, NeedMoreData, Failure };
-
-    // Buffer of partially received encoded bytes that haven't formed a full decoded data byte yet.
+    // Buffer of partially received encoded bytes that haven't formed a full
+    // decoded data byte yet.
     mutable std::vector<uint8_t> encoded_rx_buffer_{};
 
     // Buffer for decoded bytes that were read ahead of the consumer.
     mutable std::deque<uint8_t> decoded_rx_buffer_{};
 
-    // Buffer for decoded bytes collected while looking for complete CRLF-terminated lines.
-    mutable std::string response_line_buffer_{};
-
-    mutable CodecRuntimeState codec_state_{};
-    mutable int last_logged_align_{-1};
-    mutable bool last_logged_msb_first_{true};
-    mutable uint8_t last_logged_xor_{0x00};
-
     void reinject_decoded_front(const std::string& data) const;
-
-    void reset_codec_state() const;
-    bool decode_buffer(std::vector<uint8_t>& data) const;
-    FrameOutcome decode_best_ascii_frame(std::vector<uint8_t>& ascii, size_t& consumed_symbols,
-                                         FrameDiagnostics& diagnostics) const;
-    std::vector<uint8_t> encode_stream(const std::vector<uint8_t>& data) const;
-    std::vector<uint8_t> encode_stream(const std::string& data) const;
-
-    std::shared_ptr<std::string> wait_for_xml_line(const std::chrono::milliseconds& timeout);
-    bool write_xml_encoded(const std::vector<uint8_t>& data) const;
-    void reset_xml_codec_state() const;
-
-    mutable DbCodec2B4B xml_codec_{};
-    mutable std::vector<uint8_t> xml_rx_buffer_{};
-    mutable bool xml_transaction_active_{false};
-
-    class XmlTransactionGuard {
-     public:
-      explicit XmlTransactionGuard(const JuttaConnection &connection) : connection_(connection) {
-        connection_.xml_transaction_active_ = true;
-      }
-
-      ~XmlTransactionGuard() { connection_.xml_transaction_active_ = false; }
-
-      XmlTransactionGuard(const XmlTransactionGuard &) = delete;
-      XmlTransactionGuard &operator=(const XmlTransactionGuard &) = delete;
-
-     private:
-      const JuttaConnection &connection_;
-    };
 
 };
 //---------------------------------------------------------------------------
