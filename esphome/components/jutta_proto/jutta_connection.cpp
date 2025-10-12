@@ -62,13 +62,13 @@ std::string format_printable(const uint8_t* data, size_t length) {
     for (size_t i = 0; i < length; ++i) {
         const unsigned char c = data[i];
         switch (c) {
-            case '\\r':
+            case '\r':
                 stream << "\\r";
                 break;
-            case '\\n':
+            case '\n':
                 stream << "\\n";
                 break;
-            case '\\t':
+            case '\t':
                 stream << "\\t";
                 break;
             default:
