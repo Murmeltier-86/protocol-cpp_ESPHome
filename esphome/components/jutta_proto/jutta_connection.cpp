@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include "esphome/core/time.h"
 
@@ -911,6 +912,8 @@ JuttaConnection::XmlDecodeSummary JuttaConnection::wait_for_xml_line(const std::
             buffer.insert(buffer.end(), chunk.begin(), chunk.begin() + read);
             continue;
         }
+
+        esphome::delay(1);
 
         if (timeout.count() == 0) {
             break;
