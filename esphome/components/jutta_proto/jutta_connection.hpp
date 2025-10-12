@@ -100,24 +100,9 @@ class JuttaConnection {
                                                              const std::chrono::milliseconds& timeout =
                                                                  std::chrono::milliseconds{5000});
 
-    struct XmlOperationResult {
-        bool success{false};
-        std::string summary{};
-    };
-
-    struct XmlDecodeSummary {
-        bool success{false};
-        bool msb_first{true};
-        uint8_t xor_key{0x00};
-        int align{0};
-        int score{-1};
-        std::string line;
-        size_t symbols_consumed{0};
-    };
-
-    XmlOperationResult start_xml_handshake();
-    XmlOperationResult request_xml_lines(const std::string& command, const std::chrono::milliseconds& timeout,
-                                         std::vector<std::string>& lines);
+    std::shared_ptr<std::string> write_db_with_response(const std::string& data,
+                                                        const std::chrono::milliseconds& timeout =
+                                                            std::chrono::milliseconds{2000});
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
@@ -222,20 +207,12 @@ class JuttaConnection {
     [[nodiscard]] bool align_encoded_rx_buffer() const;
     void flush_serial_input() const;
 
-    struct XmlCodecState {
-        bool valid{false};
-        bool msb_first{true};
-        uint8_t xor_key{0x00};
-        int align{0};
-    };
+    enum class DbMode { Auto, Esc, FourToOne, None };
 
-    mutable XmlCodecState xml_codec_state_{};
-    mutable std::vector<uint8_t> xml_pending_symbols_{};
-    XmlDecodeSummary wait_for_xml_line(const std::chrono::milliseconds& timeout) const;
-    bool write_xml_line(const std::string& ascii, bool msb_first, uint8_t xor_key) const;
-    XmlDecodeSummary decode_symbols(const std::vector<uint8_t>& symbols) const;
-    void log_xml_attempt_failure(const char* context, const std::string& summary) const;
-    std::vector<std::pair<bool, uint8_t>> build_codec_candidates() const;
+    std::shared_ptr<std::string> wait_for_db_line(const std::chrono::milliseconds& timeout) const;
+    bool write_db_ascii(const std::string& ascii) const;
+    static size_t db_decode(DbMode& mode, const std::vector<uint8_t>& input, std::vector<uint8_t>& output);
+    static size_t db_encode(DbMode mode, const std::vector<uint8_t>& input, std::vector<uint8_t>& output);
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
@@ -305,6 +282,8 @@ class JuttaConnection {
 
     // Buffer for decoded bytes that were read ahead of the consumer.
     mutable std::deque<uint8_t> decoded_rx_buffer_{};
+
+    mutable DbMode db_mode_{DbMode::Auto};
 
     void reinject_decoded_front(const std::string& data) const;
 

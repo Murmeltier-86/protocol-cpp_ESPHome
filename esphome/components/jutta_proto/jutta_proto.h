@@ -9,7 +9,6 @@
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
-#include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/uart/uart.h"
 
@@ -37,11 +36,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const std::string &device_type() const { return this->device_type_; }
 
   void set_machine_data_sensor(text_sensor::TextSensor *sensor) { this->machine_data_sensor_ = sensor; }
-  void set_xml_poll_enabled(bool enabled);
-  void set_xml_poll_interval(uint32_t interval_ms);
-  void set_xml_mapping_path(const std::string &path);
-  void add_xml_sensor(const std::string &field, esphome::sensor::Sensor *sensor);
-  void set_xml_status_sensor(esphome::text_sensor::TextSensor *sensor);
 
  protected:
   enum class HandshakeStage { IDLE, HELLO, SEND_T1, WAIT_T2, SEND_T2, WAIT_T3, SEND_T3, DONE, FAILED };
@@ -54,13 +48,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   static bool time_reached(uint32_t now, uint32_t target);
   void process_machine_data_query();
   void publish_machine_data_(const std::string &response);
-  void process_xml_channel();
-  bool perform_xml_handshake(::jutta_proto::JuttaConnection *connection);
-  bool poll_xml_values(::jutta_proto::JuttaConnection *connection);
-  void handle_xml_failure(bool severe);
-  void publish_xml_status(const std::string &state);
-  void update_xml_sensors(const std::vector<std::string> &lines);
-  static bool parse_key_value_line(const std::string &line, std::string &key, std::string &value);
   ::jutta_proto::JuttaConnection *get_active_connection() const;
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
@@ -78,26 +65,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool machine_data_request_pending_{false};
   uint32_t machine_data_request_start_{0};
 
-  struct XmlSensorEntry {
-    std::string field;
-    esphome::sensor::Sensor *sensor{nullptr};
-  };
-
-  enum class XmlStage { Disabled, AwaitHandshake, Idle, Polling, Paused };
-
-  struct XmlRuntimeConfig {
-    bool enabled{false};
-    uint32_t poll_interval_ms{60000};
-    std::string mapping_path;
-    std::vector<XmlSensorEntry> sensors;
-    esphome::text_sensor::TextSensor *status_sensor{nullptr};
-  };
-
-  XmlRuntimeConfig xml_config_{};
-  XmlStage xml_stage_{XmlStage::Disabled};
-  uint32_t xml_next_poll_{0};
-  uint32_t xml_action_deadline_{0};
-  uint8_t xml_attempt_counter_{0};
 };
 
 class StartBrewAction : public esphome::Action<> {

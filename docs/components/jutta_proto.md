@@ -1,6 +1,6 @@
 # Jutta-Proto-Komponente
 
-Die Jutta-Proto-Komponente verbindet ESPHome mit dem proprietären UART-Protokoll der JURA-Maschinen. Sie führt den klassischen Handshake aus, stellt die vorhandenen Automationsaktionen bereit und arbeitet mit den Funktionen aus `coffee_maker.*` zusammen. Zusätzlich steht ein separater 2b4b-Kanal für XML-basierte Status- und Einstellungsabfragen zur Verfügung, der unabhängig vom Legacy-Protokoll betrieben wird.
+Die Jutta-Proto-Komponente verbindet ESPHome mit dem proprietären UART-Protokoll der JURA-Maschinen. Sie führt ausschließlich den klassischen Handshake aus, nutzt die bewährten Legacy-Kommandos und stellt sämtliche Automationsaktionen aus `coffee_maker.*` bereit. Zusätzlich kann sie Statuszeilen über den 2b4b-Codec aus `codec_db.c` abrufen, ohne dass ein separater XML-Handshake erforderlich ist.
 
 ## Grundkonfiguration
 
@@ -18,40 +18,9 @@ jutta_proto:
   uart_id: jura_uart
 ```
 
-## XML-Abfragen über den 2b4b-Kanal
+## Statusabruf über den DB-Codec
 
-Optional kann die Komponente den neuen 2b4b-Kanal verwenden, um strukturierte Diagnosedaten abzurufen. Die Kodierung orientiert sich an den in `codec_db.c` beschriebenen Symbolpaaren; der Decoder ermittelt Bitreihenfolge, Ausrichtung und ggf. XOR-Schlüssel automatisch pro Frame. Nach drei erfolglosen Versuchen pausiert die Abfrage zunächst und protokolliert den Grund im Log.
-
-```yaml
-jutta_proto:
-  id: jura
-  uart_id: jura_uart
-  enable_xml_poll: true
-  xml_poll_interval_ms: 60000
-  xml_mapping_path: "/config/esphome/1.0.xml"
-  xml_status:
-    name: "Jura XML-Status"
-  xml_sensors:
-    - field: "tgc0_37"
-      name: "Reinigung"
-      unit_of_measurement: "%"
-      accuracy_decimals: 1
-      entity_category: diagnostic
-    - field: "tr32_total_products"
-      name: "Gesamte Bezüge"
-```
-
-- `enable_xml_poll`: Aktiviert den XML-Kanal. Legacy-Kommandos laufen weiterhin über den bisherigen Encoder.
-- `xml_poll_interval_ms`: Abstand zwischen zwei Lesezyklen in Millisekunden.
-- `xml_mapping_path`: Pfad zu einer Referenz-XML (z. B. die im Repo enthaltene `1.0.xml`), die für eigene Auswertungen genutzt werden kann. Die Komponente liest die Datei nicht automatisch ein, der Pfad wird lediglich im Log angegeben.
-- `xml_status`: Optionaler Text-Sensor, der den aktuellen Zustand des XML-Kanals meldet (z. B. "bereit", "pausiert nach Fehlern").
-- `xml_sensors`: Liste numerischer Sensoren. Für jedes Feld wird der erste Schlüssel-Wert-Eintrag der empfangenen XML-/Statuszeilen ausgewertet. Die Werte werden als Fließkommazahlen interpretiert; nicht numerische Werte werden protokolliert.
-
-Ein Poll besteht aus dem Versand einer kompletten 2b4b-Zeile (`@TR:32\r\n`) und der Auswertung sämtlicher Antworten, die mit `@` oder `&` beginnen. Die Antworten werden nach `:` bzw. `=` getrennt und den konfigurierten Feldern zugeordnet. Bleiben drei Abfragen hintereinander erfolglos, setzt der Kanal eine Minute aus und versucht anschließend erneut einen XML-Handshake.
-
-## Legacy-Telemetrie per Text-Sensor
-
-Der klassische Kanal bleibt unverändert erhalten. Über die Option `machine_data` lässt sich weiterhin der serielle Statusstrom (`&STAT?\r\n`) als Textsensor verfügbar machen. Die Komponente fragt den Wert alle 30 s ab, wertet eingehende Zeilen aus und entfernt Steuerzeichen, bevor sie den Text veröffentlicht.
+Der optionale Textsensor `machine_data` veranlasst die Komponente, zyklisch eine Diagnosezeile anzufordern. Dabei wird die ASCII-Sequenz `@TR:32\r\n` mit dem in `codec_db.c` beschriebenen 2b4b-Verfahren übertragen. Die Antwort wird mit demselben Codec dekodiert; Bitreihenfolge und eventuelle Escape-Sequenzen erkennt der Decoder automatisch. Sobald ein vollständiges Zeilenende (`\r\n`) vorliegt, veröffentlicht der Sensor den Inhalt ohne Steuerzeichen.
 
 ```yaml
 jutta_proto:
@@ -61,7 +30,11 @@ jutta_proto:
     name: "Jura Rohstatus"
 ```
 
-Bei einem Timeout wird der nächste Versuch protokolliert und automatisch verschoben. Die Legacy-Kommandos (`FN:xx`, `@Tn`, `PR:xy` …) bleiben vollständig kompatibel.
+* Abfrageintervall: 30 s (kann durch Automationen angepasst werden).
+* Timeout je Versuch: 2 s; bei Überschreitung wird im Log gewarnt und der nächste Versuch verschoben.
+* Kodierung: 2b4b-Symbole `{0xFF, 0xDF, 0xFB, 0xDB}`, Zuordnung gemäß `codec_db.c`.
+
+Die Legacy-Kommandos (`FN:xx`, `@Tn`, `PR:xy` …) laufen weiterhin unverändert über den klassischen Encoder. Der DB-Kanal wird nur für den oben beschriebenen Statusabruf genutzt.
 
 ## Aktionen
 
@@ -69,6 +42,6 @@ Bei einem Timeout wird der nächste Versuch protokolliert und automatisch versch
 - `custom_brew`: Startet einen individuellen Bezug unter Angabe der Mahl- und Wasserzeit.
 - `cancel_custom_brew`: Bricht einen laufenden individuellen Bezug ab.
 - `switch_page`: Wechselt auf eine andere Getränke-Seite.
-- `run_sequence`: Führt eine frei definierte Abfolge von Legacy-Kommandos und Verzögerungen aus. Jede Stufe kann entweder einen benannten Befehl aus der Tabelle (`grinder_on`, `water_pump_off`, …) oder eine Rohzeile enthalten; optional lassen sich Pausen (`delay`/`sleep`) und eigene Beschreibungen hinterlegen. Zeitlimits pro Schritt verhindert das endlose Warten auf Bestätigungen.
+- `run_sequence`: Führt eine frei definierte Abfolge von Legacy-Kommandos und Verzögerungen aus. Jede Stufe kann entweder einen benannten Befehl aus der Tabelle (`grinder_on`, `water_pump_off`, …) oder eine Rohzeile enthalten; optional lassen sich Pausen (`delay`/`sleep`) und eigene Beschreibungen hinterlegen. Zeitlimits pro Schritt verhindern das endlose Warten auf Bestätigungen.
 
 Weitere Details zu den Parametern finden sich direkt im Code der Komponente.

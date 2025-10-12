@@ -708,215 +708,78 @@ std::string JuttaConnection::vec_to_string(const std::vector<uint8_t>& data) {
     return sstream.str();
 }
 
-std::vector<std::pair<bool, uint8_t>> JuttaConnection::build_codec_candidates() const {
-    std::vector<std::pair<bool, uint8_t>> candidates;
-    if (this->xml_codec_state_.valid) {
-        candidates.emplace_back(this->xml_codec_state_.msb_first, this->xml_codec_state_.xor_key);
+
+std::shared_ptr<std::string> JuttaConnection::write_db_with_response(
+    const std::string& data, const std::chrono::milliseconds& timeout) {
+    this->flush_serial_input();
+    this->encoded_rx_buffer_.clear();
+    this->decoded_rx_buffer_.clear();
+
+    if (!this->write_db_ascii(data)) {
+        ESP_LOGW(TAG, "DB: Schreiben der ASCII-Zeile fehlgeschlagen.");
+        return nullptr;
     }
-    std::array<uint8_t, 3> keys{0x00, 0xFF, 0xA5};
-    for (bool msb_first : {true, false}) {
-        for (uint8_t key : keys) {
-            if (this->xml_codec_state_.valid && msb_first == this->xml_codec_state_.msb_first &&
-                key == this->xml_codec_state_.xor_key) {
-                continue;
-            }
-            candidates.emplace_back(msb_first, key);
-        }
+
+    auto line = this->wait_for_db_line(timeout);
+    if (line == nullptr) {
+        ESP_LOGW(TAG, "DB: Keine Antwort innerhalb des Zeitlimits erhalten.");
     }
-    return candidates;
+    return line;
 }
 
-void JuttaConnection::log_xml_attempt_failure(const char* context, const std::string& summary) const {
-    ESP_LOGW(TAG, "%s: %s", context, summary.c_str());
-}
-
-bool JuttaConnection::write_xml_line(const std::string& ascii, bool msb_first, uint8_t xor_key) const {
+bool JuttaConnection::write_db_ascii(const std::string& ascii) const {
     if (ascii.empty()) {
         return false;
     }
+    std::vector<uint8_t> payload(ascii.begin(), ascii.end());
     std::vector<uint8_t> encoded;
-    encoded.reserve(ascii.size() * 4);
-    for (unsigned char ch : ascii) {
-        uint8_t value = static_cast<uint8_t>(ch) ^ xor_key;
-        uint8_t groups[4];
-        if (msb_first) {
-            groups[0] = static_cast<uint8_t>((value >> 6) & 0x03);
-            groups[1] = static_cast<uint8_t>((value >> 4) & 0x03);
-            groups[2] = static_cast<uint8_t>((value >> 2) & 0x03);
-            groups[3] = static_cast<uint8_t>(value & 0x03);
-        } else {
-            groups[3] = static_cast<uint8_t>((value >> 6) & 0x03);
-            groups[2] = static_cast<uint8_t>((value >> 4) & 0x03);
-            groups[1] = static_cast<uint8_t>((value >> 2) & 0x03);
-            groups[0] = static_cast<uint8_t>(value & 0x03);
-        }
-        for (uint8_t group : groups) {
-            encoded.push_back(DB_SYMBOLS[group & 0x03]);
-        }
+    auto mode = this->db_mode_;
+    if (mode == DbMode::Auto || mode == DbMode::None) {
+        mode = DbMode::FourToOne;
     }
+    db_encode(mode, payload, encoded);
     bool ok = serial.write_serial(encoded);
     serial.flush();
     return ok;
 }
 
-JuttaConnection::XmlDecodeSummary JuttaConnection::decode_symbols(const std::vector<uint8_t>& symbols) const {
-    XmlDecodeSummary best;
-    if (symbols.size() < 4) {
-        return best;
-    }
+std::shared_ptr<std::string> JuttaConnection::wait_for_db_line(const std::chrono::milliseconds& timeout) const {
+    std::vector<uint8_t> raw_buffer;
+    std::vector<uint8_t> decoded;
+    raw_buffer.reserve(256);
+    decoded.reserve(256);
 
-    auto sym2bits = [](uint8_t symbol) -> int {
-        for (size_t i = 0; i < 4; ++i) {
-            if (symbol == DB_SYMBOLS[i]) {
-                return static_cast<int>(i);
-            }
-        }
-        return -1;
-    };
-
-    auto decode_try = [&](bool msb_first, int align, std::vector<uint8_t>& out, size_t& consumed) -> bool {
-        out.clear();
-        consumed = align;
-        if (align >= static_cast<int>(symbols.size())) {
-            return false;
-        }
-        size_t index = static_cast<size_t>(align);
-        while (index + 3 < symbols.size()) {
-            int q0 = sym2bits(symbols[index + 0]);
-            int q1 = sym2bits(symbols[index + 1]);
-            int q2 = sym2bits(symbols[index + 2]);
-            int q3 = sym2bits(symbols[index + 3]);
-            if ((q0 | q1 | q2 | q3) < 0) {
-                return false;
-            }
-            uint8_t value = msb_first ? static_cast<uint8_t>((q0 << 6) | (q1 << 4) | (q2 << 2) | q3)
-                                      : static_cast<uint8_t>((q3 << 6) | (q2 << 4) | (q1 << 2) | q0);
-            out.push_back(value);
-            index += 4;
-            if (out.size() >= 2 && out[out.size() - 2] == 0x0D && out[out.size() - 1] == 0x0A) {
-                consumed = index;
-                return true;
-            }
-        }
-        consumed = index;
-        return false;
-    };
-
-    auto score_bytes = [](const std::vector<uint8_t>& bytes) -> int {
-        if (bytes.empty()) {
-            return -1;
-        }
-        int printable = 0;
-        int crlf_bonus = 0;
-        int head_bonus = 0;
-        for (size_t i = 0; i < bytes.size(); ++i) {
-            uint8_t c = bytes[i];
-            if (c >= 0x20 && c <= 0x7E) {
-                ++printable;
-            }
-            if (c == '\r' && i + 1 < bytes.size() && bytes[i + 1] == '\n') {
-                crlf_bonus = 5;
-            }
-        }
-        if (!bytes.empty() && (bytes[0] == '@' || bytes[0] == '&')) {
-            head_bonus = 5;
-        }
-        return printable + crlf_bonus + head_bonus;
-    };
-
-    std::array<uint8_t, 3> keys{0x00, 0xFF, 0xA5};
-    for (bool msb_first : {true, false}) {
-        for (int align = 0; align < 4; ++align) {
-            std::vector<uint8_t> decoded;
-            size_t consumed = 0;
-            if (!decode_try(msb_first, align, decoded, consumed)) {
-                continue;
-            }
-            for (uint8_t key : keys) {
-                std::vector<uint8_t> candidate(decoded.size());
-                for (size_t i = 0; i < decoded.size(); ++i) {
-                    candidate[i] = decoded[i] ^ key;
-                }
-                int score = score_bytes(candidate);
-                if (score > best.score) {
-                    best.score = score;
-                    best.msb_first = msb_first;
-                    best.xor_key = key;
-                    best.align = align;
-                    best.symbols_consumed = consumed;
-                    best.line.assign(candidate.begin(), candidate.end());
-                }
-            }
-        }
-    }
-
-    if (best.line.empty()) {
-        best.symbols_consumed = 0;
-        return best;
-    }
-    bool has_crlf = best.line.size() >= 2 && best.line[best.line.size() - 2] == '\r' && best.line.back() == '\n';
-    if (!has_crlf) {
-        best.line.clear();
-        best.symbols_consumed = 0;
-        return best;
-    }
-    int printable = 0;
-    for (unsigned char c : best.line) {
-        if (c >= 0x20 && c <= 0x7E) {
-            ++printable;
-        }
-    }
-    float ratio = static_cast<float>(printable) / static_cast<float>(best.line.size());
-    if (ratio < 0.7f) {
-        best.line.clear();
-        best.symbols_consumed = 0;
-        return best;
-    }
-    if (best.line.front() != '@' && best.line.front() != '&') {
-        best.line.clear();
-        best.symbols_consumed = 0;
-        return best;
-    }
-    if (best.line.size() >= 2) {
-        best.line.erase(best.line.size() - 2);
-    }
-    best.success = true;
-    return best;
-}
-
-JuttaConnection::XmlDecodeSummary JuttaConnection::wait_for_xml_line(const std::chrono::milliseconds& timeout) const {
-    XmlDecodeSummary summary;
-    std::vector<uint8_t> buffer;
-    if (!this->xml_pending_symbols_.empty()) {
-        buffer = this->xml_pending_symbols_;
-        this->xml_pending_symbols_.clear();
-    }
+    auto mode = this->db_mode_;
     uint32_t start = esphome::millis();
-    while (true) {
-        if (!buffer.empty()) {
-            auto decoded = this->decode_symbols(buffer);
-            if (decoded.success) {
-                if (decoded.symbols_consumed < buffer.size()) {
-                    this->xml_pending_symbols_.assign(buffer.begin() + decoded.symbols_consumed, buffer.end());
-                }
-                return decoded;
-            }
-        }
 
+    while (true) {
         std::array<uint8_t, 4> chunk{};
         size_t read = serial.read_serial(chunk);
         if (read > chunk.size()) {
             read = chunk.size();
         }
         if (read > 0) {
-            buffer.insert(buffer.end(), chunk.begin(), chunk.begin() + read);
-            continue;
+            raw_buffer.insert(raw_buffer.end(), chunk.begin(), chunk.begin() + read);
+        } else {
+            esphome::delay(1);
         }
 
-        esphome::delay(1);
+        if (!raw_buffer.empty()) {
+            auto temp_mode = mode;
+            size_t decoded_len = db_decode(temp_mode, raw_buffer, decoded);
+            if (decoded_len > 0) {
+                for (size_t i = 1; i < decoded.size(); ++i) {
+                    if (decoded[i - 1] == '\r' && decoded[i] == '\n') {
+                        std::string line(decoded.begin(), decoded.begin() + i + 1);
+                        this->db_mode_ = temp_mode;
+                        return std::make_shared<std::string>(std::move(line));
+                    }
+                }
+            }
+        }
 
         if (timeout.count() == 0) {
-            break;
+            continue;
         }
         uint32_t now = esphome::millis();
         if (static_cast<int32_t>(now - start) >= static_cast<int32_t>(timeout.count())) {
@@ -924,91 +787,153 @@ JuttaConnection::XmlDecodeSummary JuttaConnection::wait_for_xml_line(const std::
         }
     }
 
-    if (!buffer.empty()) {
-        this->xml_pending_symbols_.insert(this->xml_pending_symbols_.end(), buffer.begin(), buffer.end());
-    }
-    return summary;
+    return nullptr;
 }
 
-JuttaConnection::XmlOperationResult JuttaConnection::request_xml_lines(const std::string& command,
-                                                                       const std::chrono::milliseconds& timeout,
-                                                                       std::vector<std::string>& lines) {
-    XmlOperationResult result;
-    lines.clear();
-    if (command.empty()) {
-        result.summary = "Leerer Befehl";
-        return result;
+size_t JuttaConnection::db_encode(DbMode mode, const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
+    output.clear();
+
+    auto encode_none = [&]() {
+        output.insert(output.end(), input.begin(), input.end());
+        return output.size();
+    };
+
+    auto encode_esc = [&]() {
+        for (uint8_t byte : input) {
+            if (byte == 0xDB) {
+                output.push_back(0xDB);
+                output.push_back(0xDC);
+            } else if (byte == 0x00) {
+                output.push_back(0xDB);
+                output.push_back(0xDD);
+            } else {
+                output.push_back(byte);
+            }
+        }
+        return output.size();
+    };
+
+    auto encode_pack4 = [&]() {
+        output.push_back(0xDB);
+        for (uint8_t value : input) {
+            uint8_t q0 = static_cast<uint8_t>((value >> 6) & 0x03);
+            uint8_t q1 = static_cast<uint8_t>((value >> 4) & 0x03);
+            uint8_t q2 = static_cast<uint8_t>((value >> 2) & 0x03);
+            uint8_t q3 = static_cast<uint8_t>(value & 0x03);
+            output.push_back(DB_SYMBOLS[q0]);
+            output.push_back(DB_SYMBOLS[q1]);
+            output.push_back(DB_SYMBOLS[q2]);
+            output.push_back(DB_SYMBOLS[q3]);
+        }
+        return output.size();
+    };
+
+    switch (mode) {
+        case DbMode::Esc:
+            return encode_esc();
+        case DbMode::FourToOne:
+        case DbMode::Auto:
+            return encode_pack4();
+        case DbMode::None:
+        default:
+            return encode_none();
+    }
+}
+
+size_t JuttaConnection::db_decode(DbMode& mode, const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
+    output.clear();
+    if (input.empty()) {
+        return 0;
     }
 
-    this->flush_serial_input();
-
-    auto candidates = this->build_codec_candidates();
-    if (candidates.empty()) {
-        candidates.emplace_back(true, static_cast<uint8_t>(0x00));
-    }
-
-    for (auto [msb_first, xor_key] : candidates) {
-        ESP_LOGD(TAG, "Sende 2b4b-Zeile (msb_first=%s, xor=0x%02X)", msb_first ? "true" : "false",
-                 static_cast<unsigned>(xor_key));
-        if (!this->write_xml_line(command, msb_first, xor_key)) {
-            this->log_xml_attempt_failure("XML", "Senden der 2b4b-Zeile fehlgeschlagen");
-            continue;
+    auto guess_mode = [](const std::vector<uint8_t>& data) {
+        if (data.size() >= 2 && data.front() == 0xDB) {
+            size_t small = 0;
+            for (size_t i = 1; i < data.size(); ++i) {
+                if ((data[i] & 0xFC) == 0) {
+                    ++small;
+                }
+            }
+            if (small > data.size() / 2) {
+                return DbMode::FourToOne;
+            }
+            return DbMode::Esc;
         }
-        auto response = this->wait_for_xml_line(timeout);
-        if (!response.success) {
-            this->log_xml_attempt_failure("XML", "Keine Antwort für 2b4b-Zeile, versuche alternative Kodierung.");
-            continue;
+        return DbMode::None;
+    };
+
+    auto decode_esc = [&](const std::vector<uint8_t>& data) {
+        for (size_t i = 0; i < data.size(); ++i) {
+            uint8_t byte = data[i];
+            if (byte == 0xDB && i + 1 < data.size()) {
+                uint8_t esc = data[++i];
+                if (esc == 0xDC) {
+                    output.push_back(0xDB);
+                } else if (esc == 0xDD) {
+                    output.push_back(0x00);
+                } else {
+                    output.push_back(esc);
+                }
+            } else {
+                output.push_back(byte);
+            }
         }
+        return output.size();
+    };
 
-        this->xml_codec_state_.valid = true;
-        this->xml_codec_state_.msb_first = response.msb_first;
-        this->xml_codec_state_.xor_key = response.xor_key;
-        this->xml_codec_state_.align = response.align;
+    auto symbol_to_bits = [](uint8_t symbol) -> int {
+        for (int idx = 0; idx < 4; ++idx) {
+            if (symbol == DB_SYMBOLS[idx]) {
+                return idx;
+            }
+        }
+        return -1;
+    };
 
-        lines.push_back(response.line);
-        while (true) {
-            auto next = this->wait_for_xml_line(std::chrono::milliseconds{150});
-            if (!next.success) {
+    auto decode_pack4 = [&](const std::vector<uint8_t>& data) {
+        if (data.size() < 2 || data.front() != 0xDB) {
+            return static_cast<size_t>(0);
+        }
+        size_t index = 1;
+        while (index + 3 < data.size()) {
+            int a = symbol_to_bits(data[index + 0]);
+            int b = symbol_to_bits(data[index + 1]);
+            int c = symbol_to_bits(data[index + 2]);
+            int d = symbol_to_bits(data[index + 3]);
+            if ((a | b | c | d) < 0) {
                 break;
             }
-            lines.push_back(next.line);
+            uint8_t value = static_cast<uint8_t>((a << 6) | (b << 4) | (c << 2) | d);
+            output.push_back(value);
+            index += 4;
         }
+        return output.size();
+    };
 
-        std::ostringstream info;
-        info << "msb_first=" << (response.msb_first ? "true" : "false") << ", xor=0x" << std::uppercase
-             << std::setfill('0') << std::setw(2) << std::hex << static_cast<int>(response.xor_key);
-        result.success = true;
-        result.summary = info.str();
-        return result;
+    DbMode effective = mode;
+    if (effective == DbMode::Auto) {
+        effective = guess_mode(input);
     }
 
-    result.success = false;
-    result.summary = "Keine Antwort für 2b4b-Zeile";
-    return result;
-}
-
-JuttaConnection::XmlOperationResult JuttaConnection::start_xml_handshake() {
-    static const std::array<const char*, 5> PROBES = {"&WHO\r\n", "@TR:37\r\n", "@TR:32\r\n", "@t2:8188\r\n", "@TS:00\r\n"};
-    XmlOperationResult result;
-    this->flush_serial_input();
-    for (const char* probe : PROBES) {
-        std::vector<std::string> responses;
-        auto op = this->request_xml_lines(probe, std::chrono::milliseconds{800}, responses);
-        if (op.success) {
-            result.success = true;
-            if (!responses.empty()) {
-                result.summary = std::string(probe, strlen(probe) - 2) + " -> " + responses.front();
-            } else {
-                result.summary = std::string(probe, strlen(probe) - 2) + " -> ok";
-            }
-            return result;
-        }
+    size_t produced = 0;
+    switch (effective) {
+        case DbMode::Esc:
+            produced = decode_esc(input);
+            break;
+        case DbMode::FourToOne:
+            produced = decode_pack4(input);
+            break;
+        case DbMode::None:
+        case DbMode::Auto:
+        default:
+            output.insert(output.end(), input.begin(), input.end());
+            produced = output.size();
+            break;
     }
-    result.success = false;
-    result.summary = "Keine Antwort auf Handshake-Kommandos";
-    return result;
+
+    mode = effective;
+    return produced;
 }
 
-//---------------------------------------------------------------------------
 }  // namespace jutta_proto
 //---------------------------------------------------------------------------

@@ -2,7 +2,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
 from esphome.components import uart
-from esphome.components import sensor as sensor_component, text_sensor
+from esphome.components import text_sensor
 from esphome.const import CONF_ID
 
 DEPENDENCIES = ["uart"]
@@ -21,17 +21,9 @@ CONF_TIMEOUT = "timeout"
 CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
 
-CONF_ENABLE_XML_POLL = "enable_xml_poll"
-CONF_XML_MAPPING_PATH = "xml_mapping_path"
-CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
-CONF_XML_SENSORS = "xml_sensors"
-CONF_XML_FIELD = "field"
-CONF_XML_STATUS = "xml_status"
-
 DEFAULT_GRIND_DURATION = cv.TimePeriod(milliseconds=3600)
 DEFAULT_WATER_DURATION = cv.TimePeriod(milliseconds=40000)
 DEFAULT_COMMAND_TIMEOUT = cv.TimePeriod(milliseconds=5000)
-DEFAULT_XML_POLL_INTERVAL_MS = 60000
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -93,8 +85,6 @@ SEQUENCE_COMMAND_EXPRESSIONS = {
     "water_pump_off": cg.RawExpression("::jutta_proto::JUTTA_COFFEE_WATER_PUMP_OFF"),
 }
 
-XML_SENSOR_SCHEMA = sensor_component.sensor_schema().extend({cv.Required(CONF_XML_FIELD): cv.string})
-
 JURA_COMPONENT_IDS = []
 
 
@@ -103,13 +93,6 @@ CONFIG_SCHEMA = (
         {
             cv.GenerateID(): cv.declare_id(JuraComponent),
             cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(),
-            cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
-            cv.Optional(CONF_XML_MAPPING_PATH): cv.string,
-            cv.Optional(
-                CONF_XML_POLL_INTERVAL_MS, default=DEFAULT_XML_POLL_INTERVAL_MS
-            ): cv.positive_int,
-            cv.Optional(CONF_XML_SENSORS): cv.ensure_list(XML_SENSOR_SCHEMA),
-            cv.Optional(CONF_XML_STATUS): text_sensor.text_sensor_schema(),
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
@@ -255,23 +238,6 @@ async def to_code(config):
     if CONF_MACHINE_DATA in config:
         machine_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
         cg.add(var.set_machine_data_sensor(machine_sensor))
-
-    if config.get(CONF_ENABLE_XML_POLL):
-        cg.add(var.set_xml_poll_enabled(True))
-        cg.add(var.set_xml_poll_interval(config[CONF_XML_POLL_INTERVAL_MS]))
-        if CONF_XML_MAPPING_PATH in config:
-            cg.add(var.set_xml_mapping_path(config[CONF_XML_MAPPING_PATH]))
-        for sensor_conf in config.get(CONF_XML_SENSORS, []):
-            field = sensor_conf[CONF_XML_FIELD]
-            sensor_cfg = dict(sensor_conf)
-            sensor_cfg.pop(CONF_XML_FIELD, None)
-            xml_sensor = await sensor_component.new_sensor(sensor_cfg)
-            cg.add(var.add_xml_sensor(field, xml_sensor))
-        if CONF_XML_STATUS in config:
-            status_sensor = await text_sensor.new_text_sensor(config[CONF_XML_STATUS])
-            cg.add(var.set_xml_status_sensor(status_sensor))
-    else:
-        cg.add(var.set_xml_poll_enabled(False))
 
 
 async def _get_parent(config):
