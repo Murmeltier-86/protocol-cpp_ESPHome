@@ -536,6 +536,7 @@ JuttaConnection::WaitResult JuttaConnection::wait_for_ok(const std::chrono::mill
 std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const std::vector<uint8_t>& data,
                                                                          const std::chrono::milliseconds& timeout) {
     if (!this->wait_string_context_.active) {
+        flush_serial_input();
         if (!write_decoded_unsafe(data)) {
             return nullptr;
         }
@@ -548,6 +549,7 @@ std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const 
 std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const std::string& data,
                                                                          const std::chrono::milliseconds& timeout) {
     if (!this->wait_string_context_.active) {
+        flush_serial_input();
         if (!write_decoded_unsafe(data)) {
             return nullptr;
         }
@@ -683,6 +685,7 @@ JuttaConnection::WaitResult JuttaConnection::write_decoded_wait_for(const std::v
                                                                     const std::string& response,
                                                                     const std::chrono::milliseconds& timeout) {
     if (!this->wait_context_.active || this->wait_context_.expected != response) {
+        flush_serial_input();
         if (!write_decoded_unsafe(data)) {
             return WaitResult::Error;
         }
@@ -693,6 +696,7 @@ JuttaConnection::WaitResult JuttaConnection::write_decoded_wait_for(const std::v
 JuttaConnection::WaitResult JuttaConnection::write_decoded_wait_for(const std::string& data, const std::string& response,
                                                                     const std::chrono::milliseconds& timeout) {
     if (!this->wait_context_.active || this->wait_context_.expected != response) {
+        flush_serial_input();
         if (!write_decoded_unsafe(data)) {
             return WaitResult::Error;
         }
