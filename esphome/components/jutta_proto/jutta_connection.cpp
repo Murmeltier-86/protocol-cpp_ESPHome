@@ -384,6 +384,8 @@ std::shared_ptr<std::string> JuttaConnection::write_xml_with_response(const std:
         return nullptr;
     }
 
+    XmlTransactionGuard guard(*this);
+
     this->flush_serial_input();
     this->xml_rx_buffer_.clear();
 
@@ -431,6 +433,7 @@ bool JuttaConnection::write_xml_payload(const std::vector<uint8_t>& data) {
     if (data.empty()) {
         return true;
     }
+    XmlTransactionGuard guard(*this);
     if (!this->xml_codec_.has_detection()) {
         ESP_LOGW(TAG, "2b4b-Kodierung noch nicht erkannt – Rohdaten werden nicht gesendet.");
         return false;
@@ -658,6 +661,9 @@ JuttaConnection::FrameOutcome JuttaConnection::decode_best_ascii_frame(std::vect
 }
 
 bool JuttaConnection::decode_buffer(std::vector<uint8_t>& data) const {
+    if (this->xml_transaction_active_) {
+        return false;
+    }
     data.clear();
 
     while (true) {

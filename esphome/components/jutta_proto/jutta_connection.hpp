@@ -319,6 +319,22 @@ class JuttaConnection {
 
     mutable DbCodec2B4B xml_codec_{};
     mutable std::vector<uint8_t> xml_rx_buffer_{};
+    mutable bool xml_transaction_active_{false};
+
+    class XmlTransactionGuard {
+     public:
+      explicit XmlTransactionGuard(const JuttaConnection &connection) : connection_(connection) {
+        connection_.xml_transaction_active_ = true;
+      }
+
+      ~XmlTransactionGuard() { connection_.xml_transaction_active_ = false; }
+
+      XmlTransactionGuard(const XmlTransactionGuard &) = delete;
+      XmlTransactionGuard &operator=(const XmlTransactionGuard &) = delete;
+
+     private:
+      const JuttaConnection &connection_;
+    };
 
 };
 //---------------------------------------------------------------------------
