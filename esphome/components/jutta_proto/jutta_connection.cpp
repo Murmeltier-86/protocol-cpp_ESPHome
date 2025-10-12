@@ -298,16 +298,22 @@ void JuttaConnection::run_encode_decode_test() {
 std::array<uint8_t, 4> JuttaConnection::encode(const uint8_t& decData) {
     std::array<uint8_t, 4> encData{};
     for (int group = 0; group < 4; ++group) {
-        uint8_t encoded = JUTTA_ENCODE_BASE;
-        uint8_t bit0 = (decData >> (group * 2)) & 0x1;
-        uint8_t bit1 = (decData >> (group * 2 + 1)) & 0x1;
-        if (bit0 == 0) {
-            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT0_MASK);
+        int shift = 6 - group * 2;
+        uint8_t pair = static_cast<uint8_t>((decData >> shift) & 0x03);
+        switch (pair) {
+            case 0x00:
+                encData[group] = 0xFF;
+                break;
+            case 0x01:
+                encData[group] = 0xDF;
+                break;
+            case 0x02:
+                encData[group] = 0xFB;
+                break;
+            default:
+                encData[group] = 0xDB;
+                break;
         }
-        if (bit1 == 0) {
-            encoded = static_cast<uint8_t>(encoded - JUTTA_BIT1_MASK);
-        }
-        encData[group] = encoded;
     }
     return encData;
 }
@@ -316,10 +322,28 @@ uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
     uint8_t decData = 0;
     for (int group = 0; group < 4; ++group) {
         uint8_t encoded = encData[group];
-        uint8_t bit0 = (encoded >> 2) & 0x1;
-        uint8_t bit1 = (encoded >> 5) & 0x1;
-        decData |= static_cast<uint8_t>(bit0 << (group * 2));
-        decData |= static_cast<uint8_t>(bit1 << (group * 2 + 1));
+        uint8_t pair = 0;
+        switch (encoded) {
+            case 0xFF:
+                pair = 0x00;
+                break;
+            case 0xDF:
+                pair = 0x01;
+                break;
+            case 0xFB:
+                pair = 0x02;
+                break;
+            case 0xDB:
+                pair = 0x03;
+                break;
+            default:
+                ESP_LOGW(TAG, "Ungültiges 2b4b-Symbol 0x%02X beim Dekodieren eines Legacy-Frames.",
+                         static_cast<unsigned>(encoded));
+                pair = 0x00;
+                break;
+        }
+        int shift = 6 - group * 2;
+        decData |= static_cast<uint8_t>(pair << shift);
     }
     return decData;
 }
