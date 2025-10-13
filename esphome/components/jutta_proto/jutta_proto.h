@@ -9,6 +9,7 @@
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
+#include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/uart/uart.h"
 
@@ -36,6 +37,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const std::string &device_type() const { return this->device_type_; }
 
   void set_machine_data_sensor(text_sensor::TextSensor *sensor) { this->machine_data_sensor_ = sensor; }
+  void set_enable_xml_poll(bool enabled) { this->enable_xml_poll_ = enabled; }
+  void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
+  void set_xml_poll_interval_ms(uint32_t interval) { this->xml_poll_interval_ms_ = interval; }
+  void add_xml_sensor(const std::string &field, sensor::Sensor *sensor);
 
  protected:
   enum class HandshakeStage { IDLE, HELLO, SEND_T1, WAIT_T2, SEND_T2, WAIT_T3, SEND_T3, DONE, FAILED };
@@ -48,6 +53,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   static bool time_reached(uint32_t now, uint32_t target);
   void process_machine_data_query();
   void publish_machine_data_(const std::string &response);
+  void process_xml_polling();
+  ::jutta_proto::JuttaConnection *get_active_connection() const;
 
   std::unique_ptr<::jutta_proto::JuttaConnection> connection_;
   std::unique_ptr<::jutta_proto::CoffeeMaker> coffee_maker_;
@@ -58,12 +65,23 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string handshake_t2_response_;
   std::string handshake_t3_response_;
   uint32_t handshake_deadline_{0};
-  bool handshake_hello_request_sent_{false};
   bool custom_cancel_flag_{false};
   text_sensor::TextSensor *machine_data_sensor_{nullptr};
   uint32_t machine_data_query_next_{0};
   bool machine_data_request_pending_{false};
   uint32_t machine_data_request_start_{0};
+
+  bool enable_xml_poll_{false};
+  std::string xml_mapping_path_{};
+  uint32_t xml_poll_interval_ms_{60000};
+  struct XmlSensorEntry {
+    std::string field;
+    sensor::Sensor *sensor{nullptr};
+  };
+  std::vector<XmlSensorEntry> xml_sensors_{};
+  uint32_t xml_next_poll_{0};
+  bool xml_poll_warning_logged_{false};
+
 };
 
 class StartBrewAction : public esphome::Action<> {

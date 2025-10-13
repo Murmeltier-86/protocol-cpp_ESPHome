@@ -1,7 +1,9 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
-from esphome.components import text_sensor, uart
+from esphome.components import sensor
+from esphome.components import uart
+from esphome.components import text_sensor
 from esphome.const import CONF_ID
 
 DEPENDENCIES = ["uart"]
@@ -19,6 +21,15 @@ CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
+CONF_ENABLE_XML_POLL = "enable_xml_poll"
+CONF_XML_MAPPING_PATH = "xml_mapping_path"
+CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
+CONF_XML_SENSORS = "xml_sensors"
+CONF_FIELD = "field"
+
+DEFAULT_GRIND_DURATION = cv.TimePeriod(milliseconds=3600)
+DEFAULT_WATER_DURATION = cv.TimePeriod(milliseconds=40000)
+DEFAULT_COMMAND_TIMEOUT = cv.TimePeriod(milliseconds=5000)
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -44,6 +55,7 @@ COFFEE_TYPES = {
     "hot_water": CoffeeType.HOT_WATER,
     "hotwater": CoffeeType.HOT_WATER,
     "caffe_barista": CoffeeType.CAFFE_BARISTA,
+    "cafe_barista": CoffeeType.CAFFE_BARISTA,
     "lungo_barista": CoffeeType.LUNGO_BARISTA,
     "espresso_doppio": CoffeeType.ESPRESSO_DOPPIO,
     "macchiato": CoffeeType.MACCHIATO,
@@ -52,10 +64,6 @@ COFFEE_TYPES = {
     "two_coffee": CoffeeType.TWO_COFFEE,
     "two_coffees": CoffeeType.TWO_COFFEE,
 }
-
-DEFAULT_GRIND_DURATION = cv.TimePeriod(milliseconds=3600)
-DEFAULT_WATER_DURATION = cv.TimePeriod(milliseconds=40000)
-DEFAULT_COMMAND_TIMEOUT = cv.TimePeriod(milliseconds=5000)
 
 SEQUENCE_COMMAND_KEYS = {
     "grinder_on": "grinder_on",
@@ -91,6 +99,12 @@ CONFIG_SCHEMA = (
         {
             cv.GenerateID(): cv.declare_id(JuraComponent),
             cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
+            cv.Optional(CONF_XML_MAPPING_PATH): cv.string,
+            cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=60000): cv.positive_int,
+            cv.Optional(CONF_XML_SENSORS, default=[]): cv.ensure_list(
+                sensor.sensor_schema().extend({cv.Required(CONF_FIELD): cv.string})
+            ),
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
@@ -234,8 +248,21 @@ async def to_code(config):
     await uart.register_uart_device(var, config)
 
     if CONF_MACHINE_DATA in config:
-        sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
-        cg.add(var.set_machine_data_sensor(sensor))
+        machine_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
+        cg.add(var.set_machine_data_sensor(machine_sensor))
+
+    if config.get(CONF_ENABLE_XML_POLL):
+        cg.add(var.set_enable_xml_poll(True))
+
+    if CONF_XML_MAPPING_PATH in config:
+        cg.add(var.set_xml_mapping_path(config[CONF_XML_MAPPING_PATH]))
+
+    if CONF_XML_POLL_INTERVAL_MS in config:
+        cg.add(var.set_xml_poll_interval_ms(config[CONF_XML_POLL_INTERVAL_MS]))
+
+    for sensor_conf in config.get(CONF_XML_SENSORS, []):
+        xml_sensor = await sensor.new_sensor(sensor_conf)
+        cg.add(var.add_xml_sensor(sensor_conf[CONF_FIELD], xml_sensor))
 
 
 async def _get_parent(config):
@@ -310,4 +337,3 @@ async def run_sequence_action_to_code(config, action_id, template_args, args):
             cg.add(var.add_delay_step(delay_ms, description))
 
     return var
-

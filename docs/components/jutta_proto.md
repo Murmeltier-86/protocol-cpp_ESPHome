@@ -1,9 +1,8 @@
-# Jutta Proto Component
+# Jutta-Proto-Komponente
 
-The Jutta Proto component integrates the custom JURA protocol implementation with ESPHome. It establishes the UART handshake
-with a JURA coffee maker and exposes convenient automation actions for brewing drinks via YAML.
+Die Jutta-Proto-Komponente verbindet ESPHome mit dem proprietären UART-Protokoll der JURA-Maschinen. Sie führt ausschließlich den klassischen Handshake aus, nutzt die bewährten Legacy-Kommandos und stellt sämtliche Automationsaktionen aus `coffee_maker.*` bereit. Zusätzlich kann sie Statuszeilen über den 2b4b-Codec aus `codec_db.c` abrufen, ohne dass ein separater XML-Handshake erforderlich ist.
 
-## Configuration
+## Grundkonfiguration
 
 ```yaml
 uart:
@@ -19,100 +18,47 @@ jutta_proto:
   uart_id: jura_uart
 ```
 
-The component takes care of the handshake during startup. Once the handshake finishes, all brewing actions become available.
+## Statusabruf über den DB-Codec
 
-## Automation Actions
-
-Use the registered actions inside automations or button handlers. When only one `jutta_proto` component is configured, the
-`id` argument can be omitted.
-
-### Start a predefined recipe
+Der optionale Textsensor `machine_data` veranlasst die Komponente, zyklisch eine Diagnosezeile anzufordern. Dabei wird die ASCII-Sequenz `@TR:32\r\n` mit dem in `codec_db.c` beschriebenen 2b4b-Verfahren übertragen. Die Antwort wird mit demselben Codec dekodiert; Bitreihenfolge und eventuelle Escape-Sequenzen erkennt der Decoder automatisch. Sobald ein vollständiges Zeilenende (`\r\n`) vorliegt, veröffentlicht der Sensor den Inhalt ohne Steuerzeichen.
 
 ```yaml
-button:
-  - platform: template
-    name: "Brew Espresso"
-    on_press:
-      - jutta_proto.start_brew:
-          coffee: espresso
+jutta_proto:
+  id: jura
+  uart_id: jura_uart
+  machine_data:
+    name: "Jura Rohstatus"
 ```
 
-Available options for `coffee` are `espresso`, `coffee`, `cappuccino`, `milk_foam`, `hot_water`, `caffe_barista`, `lungo_barista`,
-`espresso_doppio`, `macchiato`, `two_espresso` (alias `two_espressi`), and `two_coffee` (alias `two_coffees`).
+* Abfrageintervall: 30 s (kann durch Automationen angepasst werden).
+* Timeout je Versuch: 2 s; bei Überschreitung wird im Log gewarnt und der nächste Versuch verschoben.
+* Kodierung: 2b4b-Symbole `{0xFF, 0xDF, 0xFB, 0xDB}`, Zuordnung gemäß `codec_db.c`.
 
-### Brew with custom timing
+Die Legacy-Kommandos (`FN:xx`, `@Tn`, `PR:xy` …) laufen weiterhin unverändert über den klassischen Encoder. Der DB-Kanal wird nur für den oben beschriebenen Statusabruf genutzt.
+
+## XML-Sensoren vorbereiten
+
+Für bestehende Installationen, die bereits XML-Felder konfiguriert haben, akzeptiert die Komponente wieder die entsprechenden YAML-Optionen:
 
 ```yaml
-script:
-  - id: brew_lungo
-    mode: restart
-    then:
-      - jutta_proto.custom_brew:
-          id: jura
-          grind_duration: 4s
-          water_duration: 45s
+jutta_proto:
+  enable_xml_poll: true
+  xml_mapping_path: "/config/esphome/e6.xml"
+  xml_poll_interval_ms: 60000
+  xml_sensors:
+    - field: "tgc0_37"
+      name: "Reinigung"
+      unit_of_measurement: "%"
 ```
 
-### Cancel an ongoing custom brew
+Die Sensoren werden angelegt und bleiben vorerst auf `unknown`, solange kein dedizierter XML-Datentransport implementiert wurde. Damit lassen sich bestehende Dashboards weiterverwenden, während eine zukünftige Implementierung der eigentlichen XML-Abfragen vorbereitet wird. Im Log erscheint einmalig ein Hinweis, dass aktuell keine XML-Daten übertragen werden.
 
-```yaml
-switch:
-  - platform: template
-    name: "Cancel Brew"
-    turn_on_action:
-      - jutta_proto.cancel_custom_brew: jura
-```
+## Aktionen
 
-### Switch between front panel pages
+- `start_brew`: Löst ein Getränk aus der jeweiligen Getränke-Seite aus. Unterstützte Werte sind `espresso`, `coffee`, `cappuccino`, `milk_foam`, `hot_water`, `caffe_barista`, `lungo_barista`, `espresso_doppio`, `macchiato`, `two_espresso` und `two_coffee` (inklusive der Alias-Namen aus der YAML-Validierung).
+- `custom_brew`: Startet einen individuellen Bezug unter Angabe der Mahl- und Wasserzeit.
+- `cancel_custom_brew`: Bricht einen laufenden individuellen Bezug ab.
+- `switch_page`: Wechselt auf eine andere Getränke-Seite.
+- `run_sequence`: Führt eine frei definierte Abfolge von Legacy-Kommandos und Verzögerungen aus. Jede Stufe kann entweder einen benannten Befehl aus der Tabelle (`grinder_on`, `water_pump_off`, …) oder eine Rohzeile enthalten; optional lassen sich Pausen (`delay`/`sleep`) und eigene Beschreibungen hinterlegen. Zeitlimits pro Schritt verhindern das endlose Warten auf Bestätigungen.
 
-```yaml
-script:
-  - id: jura_next_page
-    then:
-      - jutta_proto.switch_page:
-          id: jura
-          page: 1
-```
-
-### Run a manual command sequence
-
-```yaml
-script:
-  - id: brew_manual_recipe
-    mode: restart
-    then:
-      - jutta_proto.run_sequence:
-          id: jura
-          sequence:
-            - command: grinder_on
-              description: "Grind on"
-            - delay: 3s
-              description: "Let the grinder run"
-            - command: grinder_off
-            - command: brew_group_to_brewing_position
-            - command: coffee_press_on
-            - delay: 500ms
-              description: "Compress the coffee"
-            - command: coffee_press_off
-            - command: water_heater_on
-            - command: water_pump_on
-            - delay: 2s
-              description: "Pre-brew"
-            - command: water_pump_off
-            - command: water_heater_off
-            - delay: 2s
-            - command: water_heater_on
-            - command: water_pump_on
-            - delay: 40s
-              description: "Dispense water"
-            - command: water_pump_off
-            - command: water_heater_off
-            - command: brew_group_reset
-```
-
-Use `raw` instead of `command` when you need to send a custom UART command string. Raw commands automatically append `\r\n` if it is missing.
-
-## Diagnostics
-
-The component logs handshake progress during startup. The `dump_config()` output lists the detected machine type as well as the
-latest key exchange messages, which can help troubleshoot UART or wiring issues.
+Weitere Details zu den Parametern finden sich direkt im Code der Komponente.

@@ -100,17 +100,9 @@ class JuttaConnection {
                                                              const std::chrono::milliseconds& timeout =
                                                                  std::chrono::milliseconds{5000});
 
-    /**
-     * Polls for the next CRLF-terminated response line.
-     * Returns true if a complete line became available and stores it in "line" without the trailing CRLF.
-     * Returns false when no complete line has been received yet.
-     */
-    bool poll_response_line(std::string& line);
-
-    /**
-     * Clears buffered fragments collected while polling for response lines.
-     */
-    void reset_response_line_buffer();
+    std::shared_ptr<std::string> write_db_with_response(const std::string& data,
+                                                        const std::chrono::milliseconds& timeout =
+                                                            std::chrono::milliseconds{2000});
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
@@ -212,7 +204,15 @@ class JuttaConnection {
      **/
     [[nodiscard]] bool read_decoded_unsafe(std::vector<uint8_t>& data) const;
 
+    [[nodiscard]] bool align_encoded_rx_buffer() const;
     void flush_serial_input() const;
+
+    enum class DbMode { Auto, Esc, FourToOne, None };
+
+    std::shared_ptr<std::string> wait_for_db_line(const std::chrono::milliseconds& timeout) const;
+    bool write_db_ascii(const std::string& ascii) const;
+    static size_t db_decode(DbMode& mode, const std::vector<uint8_t>& input, std::vector<uint8_t>& output);
+    static size_t db_encode(DbMode mode, const std::vector<uint8_t>& input, std::vector<uint8_t>& output);
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
@@ -283,8 +283,7 @@ class JuttaConnection {
     // Buffer for decoded bytes that were read ahead of the consumer.
     mutable std::deque<uint8_t> decoded_rx_buffer_{};
 
-    // Buffer for decoded bytes collected while looking for complete CRLF-terminated lines.
-    mutable std::string response_line_buffer_{};
+    mutable DbMode db_mode_{DbMode::Auto};
 
     void reinject_decoded_front(const std::string& data) const;
 
