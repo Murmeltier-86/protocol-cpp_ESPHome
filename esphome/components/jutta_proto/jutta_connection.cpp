@@ -749,7 +749,7 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_db_line(const std::chrono
     decoded.reserve(256);
 
     auto mode = this->db_mode_;
-    uint32_t start = esphome::millis();
+    uint32_t last_activity = esphome::millis();
 
     while (true) {
         std::array<uint8_t, 4> chunk{};
@@ -759,6 +759,7 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_db_line(const std::chrono
         }
         if (read > 0) {
             raw_buffer.insert(raw_buffer.end(), chunk.begin(), chunk.begin() + read);
+            last_activity = esphome::millis();
         } else {
             esphome::delay(1);
         }
@@ -780,9 +781,24 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_db_line(const std::chrono
         if (timeout.count() == 0) {
             continue;
         }
+
         uint32_t now = esphome::millis();
-        if (static_cast<int32_t>(now - start) >= static_cast<int32_t>(timeout.count())) {
+        if (static_cast<int32_t>(now - last_activity) >= static_cast<int32_t>(timeout.count())) {
             break;
+        }
+    }
+
+    if (!raw_buffer.empty()) {
+        auto temp_mode = mode;
+        size_t decoded_len = db_decode(temp_mode, raw_buffer, decoded);
+        if (decoded_len > 0) {
+            for (size_t i = 1; i < decoded.size(); ++i) {
+                if (decoded[i - 1] == '\r' && decoded[i] == '\n') {
+                    std::string line(decoded.begin(), decoded.begin() + i + 1);
+                    this->db_mode_ = temp_mode;
+                    return std::make_shared<std::string>(std::move(line));
+                }
+            }
         }
     }
 
