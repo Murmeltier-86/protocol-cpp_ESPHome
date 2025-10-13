@@ -813,7 +813,6 @@ size_t JuttaConnection::db_encode(DbMode mode, const std::vector<uint8_t>& input
     };
 
     auto encode_pack4 = [&]() {
-        output.push_back(0xDB);
         for (uint8_t value : input) {
             uint8_t q0 = static_cast<uint8_t>((value >> 6) & 0x03);
             uint8_t q1 = static_cast<uint8_t>((value >> 4) & 0x03);
@@ -845,17 +844,39 @@ size_t JuttaConnection::db_decode(DbMode& mode, const std::vector<uint8_t>& inpu
         return 0;
     }
 
-    auto guess_mode = [](const std::vector<uint8_t>& data) {
-        if (data.size() >= 2 && data.front() == 0xDB) {
-            size_t small = 0;
-            for (size_t i = 1; i < data.size(); ++i) {
-                if ((data[i] & 0xFC) == 0) {
-                    ++small;
+    auto is_db_symbol = [](uint8_t value) {
+        for (uint8_t symbol : DB_SYMBOLS) {
+            if (value == symbol) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto guess_mode = [&](const std::vector<uint8_t>& data) {
+        if (data.empty()) {
+            return DbMode::None;
+        }
+
+        size_t symbol_like = 0;
+        size_t esc_sequences = 0;
+        for (size_t i = 0; i < data.size(); ++i) {
+            uint8_t byte = data[i];
+            if (is_db_symbol(byte)) {
+                ++symbol_like;
+                if (byte == 0xDB && i + 1 < data.size()) {
+                    uint8_t next = data[i + 1];
+                    if (next == 0xDC || next == 0xDD) {
+                        ++esc_sequences;
+                    }
                 }
             }
-            if (small > data.size() / 2) {
-                return DbMode::FourToOne;
-            }
+        }
+
+        if (symbol_like >= data.size() - 1) {
+            return DbMode::FourToOne;
+        }
+        if (esc_sequences > 0) {
             return DbMode::Esc;
         }
         return DbMode::None;
@@ -890,10 +911,7 @@ size_t JuttaConnection::db_decode(DbMode& mode, const std::vector<uint8_t>& inpu
     };
 
     auto decode_pack4 = [&](const std::vector<uint8_t>& data) {
-        if (data.size() < 2 || data.front() != 0xDB) {
-            return static_cast<size_t>(0);
-        }
-        size_t index = 1;
+        size_t index = 0;
         while (index + 3 < data.size()) {
             int a = symbol_to_bits(data[index + 0]);
             int b = symbol_to_bits(data[index + 1]);
