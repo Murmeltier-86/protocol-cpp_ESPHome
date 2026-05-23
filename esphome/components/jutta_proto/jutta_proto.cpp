@@ -30,7 +30,7 @@ constexpr std::size_t MACHINE_XML_MIN_LENGTH = 32;
 const char *const MACHINE_XML_PRIMARY_COMMAND = "@hr:00\r\n";
 const char *const MACHINE_XML_FALLBACK_COMMAND = "@hr:05\r\n";
 constexpr uint32_t kXmlRxTimeoutMs = 1000;
-constexpr uint32_t kInterCmdGapMs = 120;
+constexpr uint32_t kInterCmdGapMs = 250;
 constexpr uint32_t kXmlQuietMs = 120;
 constexpr uint32_t kCycleSleepMs = 2000;
 constexpr uint32_t kSettingsRefreshMs = 600000;
@@ -761,7 +761,13 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
                   sanitized.end());
   ESP_LOGD(TAG, "Machine data response: %s", sanitized.c_str());
   if (this->machine_data_sensor_ != nullptr) {
-    this->machine_data_sensor_->publish_state(sanitize_text_for_api(sanitized));
+    std::string safe = sanitize_text_for_api(sanitized);
+    bool likely_binary = safe.find("\\x") != std::string::npos;
+    if (likely_binary) {
+      ESP_LOGV(TAG, "Machine data publish skipped (likely binary payload)");
+    } else {
+      this->machine_data_sensor_->publish_state(safe);
+    }
   }
 }
 
