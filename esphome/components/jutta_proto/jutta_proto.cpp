@@ -1476,7 +1476,6 @@ void JuraComponent::apply_sensor_metadata_(const std::string &name, sensor::Sens
                                        ? sensor::StateClass::STATE_CLASS_TOTAL_INCREASING
                                        : sensor::StateClass::STATE_CLASS_MEASUREMENT;
   sensor->set_state_class(state_class);
-  sensor->set_force_update(true);
   set_sensor_entity_category_if_supported(sensor, EntityCategory::ENTITY_CATEGORY_DIAGNOSTIC);
   if (meta.has_unit) {
     set_sensor_unit_if_supported(sensor, meta.unit_of_measurement.c_str());
