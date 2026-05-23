@@ -73,6 +73,63 @@ auto set_sensor_icon_if_supported(T *sensor, const char *icon)
 
 inline void set_sensor_icon_if_supported(...) {}
 
+
+std::string sanitize_utf8_for_api(const std::string &input) {
+  std::string out;
+  out.reserve(input.size());
+  const unsigned char *data = reinterpret_cast<const unsigned char *>(input.data());
+  size_t i = 0;
+  while (i < input.size()) {
+    unsigned char c = data[i];
+    if (c < 0x80) {
+      if (c >= 0x20 || c == '	') {
+        out.push_back(static_cast<char>(c));
+      }
+      ++i;
+      continue;
+    }
+
+    size_t need = 0;
+    if ((c & 0xE0) == 0xC0) need = 2;
+    else if ((c & 0xF0) == 0xE0) need = 3;
+    else if ((c & 0xF8) == 0xF0) need = 4;
+
+    if (need == 0 || i + need > input.size()) {
+      out.push_back('?');
+      ++i;
+      continue;
+    }
+
+    bool valid = true;
+    for (size_t j = 1; j < need; ++j) {
+      if ((data[i + j] & 0xC0) != 0x80) {
+        valid = false;
+        break;
+      }
+    }
+    if (!valid) {
+      out.push_back('?');
+      ++i;
+      continue;
+    }
+
+    if ((need == 2 && c < 0xC2) ||
+        (need == 3 && c == 0xE0 && data[i + 1] < 0xA0) ||
+        (need == 3 && c == 0xED && data[i + 1] >= 0xA0) ||
+        (need == 4 && c == 0xF0 && data[i + 1] < 0x90) ||
+        (need == 4 && c > 0xF4) ||
+        (need == 4 && c == 0xF4 && data[i + 1] >= 0x90)) {
+      out.push_back('?');
+      ++i;
+      continue;
+    }
+
+    out.append(input, i, need);
+    i += need;
+  }
+  return out;
+}
+
 int determine_accuracy(XmlSensorKind kind, double scale) {
   if (kind == XmlSensorKind::Counter) {
     return 0;
@@ -739,7 +796,7 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
                   sanitized.end());
   ESP_LOGD(TAG, "Machine data response: %s", sanitized.c_str());
   if (this->machine_data_sensor_ != nullptr) {
-    this->machine_data_sensor_->publish_state(sanitized);
+    this->machine_data_sensor_->publish_state(sanitize_utf8_for_api(sanitized));
   }
 }
 
@@ -1994,7 +2051,7 @@ void JuraComponent::publish_setting_value_(const SettingDesc &desc, float value,
   }
   auto text_it = this->setting_text_sensors_.find(desc.id);
   if (text_it != this->setting_text_sensors_.end() && text_it->second != nullptr) {
-    text_it->second->publish_state(raw_text);
+    text_it->second->publish_state(sanitize_utf8_for_api(raw_text));
   }
 }
 
