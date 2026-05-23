@@ -48,6 +48,31 @@ constexpr std::size_t kTR32MinFrameLength = 21;
 constexpr std::size_t kTG43MinFrameLength = 13;
 constexpr std::size_t kTGC0MinFrameLength = 13;
 
+
+template<typename T>
+auto set_sensor_entity_category_if_supported(T *sensor, EntityCategory category)
+    -> decltype(sensor->set_entity_category(category), void()) {
+  sensor->set_entity_category(category);
+}
+
+inline void set_sensor_entity_category_if_supported(...) {}
+
+template<typename T>
+auto set_sensor_unit_if_supported(T *sensor, const char *unit)
+    -> decltype(sensor->set_unit_of_measurement(unit), void()) {
+  sensor->set_unit_of_measurement(unit);
+}
+
+inline void set_sensor_unit_if_supported(...) {}
+
+template<typename T>
+auto set_sensor_icon_if_supported(T *sensor, const char *icon)
+    -> decltype(sensor->set_icon(icon), void()) {
+  sensor->set_icon(icon);
+}
+
+inline void set_sensor_icon_if_supported(...) {}
+
 int determine_accuracy(XmlSensorKind kind, double scale) {
   if (kind == XmlSensorKind::Counter) {
     return 0;
@@ -1430,12 +1455,12 @@ void JuraComponent::apply_sensor_metadata_(const std::string &name, sensor::Sens
                                        : sensor::StateClass::STATE_CLASS_MEASUREMENT;
   sensor->set_state_class(state_class);
   sensor->set_force_update(true);
-  sensor->set_entity_category(EntityCategory::ENTITY_CATEGORY_DIAGNOSTIC);
+  set_sensor_entity_category_if_supported(sensor, EntityCategory::ENTITY_CATEGORY_DIAGNOSTIC);
   if (meta.has_unit) {
-    sensor->set_unit_of_measurement(meta.unit_of_measurement.c_str());
+    set_sensor_unit_if_supported(sensor, meta.unit_of_measurement.c_str());
   }
   if (meta.has_icon) {
-    sensor->set_icon(meta.icon.c_str());
+    set_sensor_icon_if_supported(sensor, meta.icon.c_str());
   }
 }
 
