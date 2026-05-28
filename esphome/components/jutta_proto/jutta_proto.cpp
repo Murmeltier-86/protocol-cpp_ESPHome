@@ -30,7 +30,7 @@ constexpr std::size_t MACHINE_XML_MIN_LENGTH = 32;
 const char *const MACHINE_XML_PRIMARY_COMMAND = "@hr:00\r\n";
 const char *const MACHINE_XML_FALLBACK_COMMAND = "@hr:05\r\n";
 constexpr uint32_t kXmlRxTimeoutMs = 1000;
-constexpr uint32_t kInterCmdGapMs = 120;
+constexpr uint32_t kInterCmdGapMs = 250;
 constexpr uint32_t kXmlQuietMs = 120;
 constexpr uint32_t kCycleSleepMs = 2000;
 constexpr uint32_t kSettingsRefreshMs = 600000;
@@ -47,6 +47,53 @@ constexpr bool TGC0_TRY_LITTLE_ENDIAN_FIRST = true;
 constexpr std::size_t kTR32MinFrameLength = 21;
 constexpr std::size_t kTG43MinFrameLength = 13;
 constexpr std::size_t kTGC0MinFrameLength = 13;
+
+
+template<typename T>
+auto set_sensor_entity_category_if_supported(T *sensor, EntityCategory category)
+    -> decltype(sensor->set_entity_category(category), void()) {
+  sensor->set_entity_category(category);
+}
+
+inline void set_sensor_entity_category_if_supported(...) {}
+
+template<typename T>
+auto set_sensor_unit_if_supported(T *sensor, const char *unit)
+    -> decltype(sensor->set_unit_of_measurement(unit), void()) {
+  sensor->set_unit_of_measurement(unit);
+}
+
+inline void set_sensor_unit_if_supported(...) {}
+
+template<typename T>
+auto set_sensor_icon_if_supported(T *sensor, const char *icon)
+    -> decltype(sensor->set_icon(icon), void()) {
+  sensor->set_icon(icon);
+}
+
+inline void set_sensor_icon_if_supported(...) {}
+
+
+std::string sanitize_text_for_api(const std::string &input) {
+  std::string out;
+  out.reserve(input.size());
+  constexpr char kHex[] = "0123456789ABCDEF";
+  for (unsigned char c : input) {
+    if (c >= 0x20 && c <= 0x7E) {
+      out.push_back(static_cast<char>(c));
+      continue;
+    }
+    if (c == '	') {
+      out.push_back('	');
+      continue;
+    }
+    out.push_back('\\');
+    out.push_back('x');
+    out.push_back(kHex[(c >> 4) & 0x0F]);
+    out.push_back(kHex[c & 0x0F]);
+  }
+  return out;
+}
 
 int determine_accuracy(XmlSensorKind kind, double scale) {
   if (kind == XmlSensorKind::Counter) {
@@ -714,7 +761,13 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
                   sanitized.end());
   ESP_LOGD(TAG, "Machine data response: %s", sanitized.c_str());
   if (this->machine_data_sensor_ != nullptr) {
-    this->machine_data_sensor_->publish_state(sanitized);
+    std::string safe = sanitize_text_for_api(sanitized);
+    bool likely_binary = safe.find("\\x") != std::string::npos;
+    if (likely_binary) {
+      ESP_LOGV(TAG, "Machine data publish skipped (likely binary payload)");
+    } else {
+      this->machine_data_sensor_->publish_state(safe);
+    }
   }
 }
 
@@ -1429,13 +1482,12 @@ void JuraComponent::apply_sensor_metadata_(const std::string &name, sensor::Sens
                                        ? sensor::StateClass::STATE_CLASS_TOTAL_INCREASING
                                        : sensor::StateClass::STATE_CLASS_MEASUREMENT;
   sensor->set_state_class(state_class);
-  sensor->set_force_update(true);
-  sensor->set_entity_category(EntityCategory::ENTITY_CATEGORY_DIAGNOSTIC);
+  set_sensor_entity_category_if_supported(sensor, EntityCategory::ENTITY_CATEGORY_DIAGNOSTIC);
   if (meta.has_unit) {
-    sensor->set_unit_of_measurement(meta.unit_of_measurement.c_str());
+    set_sensor_unit_if_supported(sensor, meta.unit_of_measurement.c_str());
   }
   if (meta.has_icon) {
-    sensor->set_icon(meta.icon.c_str());
+    set_sensor_icon_if_supported(sensor, meta.icon.c_str());
   }
 }
 
@@ -1969,7 +2021,7 @@ void JuraComponent::publish_setting_value_(const SettingDesc &desc, float value,
   }
   auto text_it = this->setting_text_sensors_.find(desc.id);
   if (text_it != this->setting_text_sensors_.end() && text_it->second != nullptr) {
-    text_it->second->publish_state(raw_text);
+    text_it->second->publish_state(sanitize_text_for_api(raw_text));
   }
 }
 

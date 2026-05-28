@@ -327,7 +327,7 @@ async def _get_parent(config):
     return await cg.get_variable(JURA_COMPONENT_IDS[0])
 
 
-@automation.register_action("jutta_proto.start_brew", StartBrewAction, _normalize_start_brew)
+@automation.register_action("jutta_proto.start_brew", StartBrewAction, _normalize_start_brew, synchronous=False)
 async def start_brew_action_to_code(config, action_id, template_args, args):
     _ = args
     parent = await _get_parent(config)
@@ -336,7 +336,7 @@ async def start_brew_action_to_code(config, action_id, template_args, args):
     return var
 
 
-@automation.register_action("jutta_proto.custom_brew", CustomBrewAction, _normalize_custom_brew)
+@automation.register_action("jutta_proto.custom_brew", CustomBrewAction, _normalize_custom_brew, synchronous=False)
 async def custom_brew_action_to_code(config, action_id, template_args, args):
     _ = args
     parent = await _get_parent(config)
@@ -348,7 +348,7 @@ async def custom_brew_action_to_code(config, action_id, template_args, args):
     return var
 
 
-@automation.register_action("jutta_proto.cancel_custom_brew", CancelCustomBrewAction, _normalize_cancel)
+@automation.register_action("jutta_proto.cancel_custom_brew", CancelCustomBrewAction, _normalize_cancel, synchronous=False)
 async def cancel_brew_action_to_code(config, action_id, template_args, args):
     _ = args
     parent = await _get_parent(config)
@@ -356,7 +356,7 @@ async def cancel_brew_action_to_code(config, action_id, template_args, args):
     return var
 
 
-@automation.register_action("jutta_proto.switch_page", SwitchPageAction, _normalize_switch_page)
+@automation.register_action("jutta_proto.switch_page", SwitchPageAction, _normalize_switch_page, synchronous=False)
 async def switch_page_action_to_code(config, action_id, template_args, args):
     _ = args
     parent = await _get_parent(config)
@@ -365,7 +365,7 @@ async def switch_page_action_to_code(config, action_id, template_args, args):
     return var
 
 
-@automation.register_action("jutta_proto.run_sequence", RunSequenceAction, _normalize_sequence)
+@automation.register_action("jutta_proto.run_sequence", RunSequenceAction, _normalize_sequence, synchronous=False)
 async def run_sequence_action_to_code(config, action_id, template_args, args):
     _ = args
     parent = await _get_parent(config)
