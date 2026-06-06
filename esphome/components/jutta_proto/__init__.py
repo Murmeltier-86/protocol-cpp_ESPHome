@@ -3,14 +3,14 @@ import os
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
-from esphome.components import sensor, text_sensor, uart
+from esphome.components import binary_sensor, sensor, text_sensor, uart
 from esphome.const import CONF_ID
 from esphome.core import CORE
 
 COMPONENT_DIR = os.path.dirname(__file__)
 
 DEPENDENCIES = ["uart"]
-AUTO_LOAD = ["uart"]
+AUTO_LOAD = ["uart", "sensor", "text_sensor", "binary_sensor"]
 
 CONF_COFFEE = "coffee"
 CONF_GRIND_DURATION = "grind_duration"
@@ -24,11 +24,19 @@ CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
+CONF_RAW_RX = "raw_rx"
+CONF_LAST_COMMAND_RESULT = "last_command_result"
+CONF_MACHINE_TYPE = "machine_type"
+CONF_MACHINE_STATUS = "machine_status"
+CONF_MACHINE_ONLINE = "machine_online"
+CONF_MACHINE_READY = "machine_ready"
 CONF_ENABLE_XML_POLL = "enable_xml_poll"
 CONF_XML_MAPPING_PATH = "xml_mapping_path"
 CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
 CONF_XML_SENSORS = "xml_sensors"
 CONF_FIELD = "field"
+CONF_LOG_DECODED_TX = "log_decoded_tx"
+CONF_LOG_ENCODED_UART = "log_encoded_uart"
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -104,12 +112,20 @@ CONFIG_SCHEMA = (
         {
             cv.GenerateID(): cv.declare_id(JuraComponent),
             cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_RAW_RX): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_LAST_COMMAND_RESULT): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_TYPE): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_STATUS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_ONLINE): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_MACHINE_READY): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
             cv.Optional(CONF_XML_MAPPING_PATH, default="embedded"): cv.string,
             cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=30000): cv.All(
                 cv.positive_int, cv.Range(min=25000)
             ),
             cv.Optional(CONF_XML_SENSORS, default=[]): cv.ensure_list(XML_SENSOR_SCHEMA),
+            cv.Optional(CONF_LOG_DECODED_TX, default=True): cv.boolean,
+            cv.Optional(CONF_LOG_ENCODED_UART, default=False): cv.boolean,
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
@@ -259,6 +275,8 @@ async def to_code(config):
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
 
+    cg.add(var.set_log_decoded_tx(config[CONF_LOG_DECODED_TX]))
+    cg.add(var.set_log_encoded_uart(config[CONF_LOG_ENCODED_UART]))
     cg.add(var.set_enable_xml_poll(config[CONF_ENABLE_XML_POLL]))
     mapping_path = config[CONF_XML_MAPPING_PATH]
     if mapping_path == "embedded":
@@ -309,6 +327,30 @@ async def to_code(config):
     if CONF_MACHINE_DATA in config:
         machine_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
         cg.add(var.set_machine_data_sensor(machine_sensor))
+
+    if CONF_RAW_RX in config:
+        raw_rx_sensor = await text_sensor.new_text_sensor(config[CONF_RAW_RX])
+        cg.add(var.set_raw_rx_sensor(raw_rx_sensor))
+
+    if CONF_LAST_COMMAND_RESULT in config:
+        result_sensor = await text_sensor.new_text_sensor(config[CONF_LAST_COMMAND_RESULT])
+        cg.add(var.set_last_command_result_sensor(result_sensor))
+
+    if CONF_MACHINE_TYPE in config:
+        machine_type_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_TYPE])
+        cg.add(var.set_machine_type_sensor(machine_type_sensor))
+
+    if CONF_MACHINE_STATUS in config:
+        machine_status_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_STATUS])
+        cg.add(var.set_machine_status_sensor(machine_status_sensor))
+
+    if CONF_MACHINE_ONLINE in config:
+        machine_online_sensor = await binary_sensor.new_binary_sensor(config[CONF_MACHINE_ONLINE])
+        cg.add(var.set_machine_online_sensor(machine_online_sensor))
+
+    if CONF_MACHINE_READY in config:
+        machine_ready_sensor = await binary_sensor.new_binary_sensor(config[CONF_MACHINE_READY])
+        cg.add(var.set_machine_ready_sensor(machine_ready_sensor))
 
     for xml_sensor in config.get(CONF_XML_SENSORS, []):
         sensor_conf = xml_sensor.copy()
@@ -389,4 +431,3 @@ async def run_sequence_action_to_code(config, action_id, template_args, args):
             cg.add(var.add_delay_step(delay_ms, description))
 
     return var
-

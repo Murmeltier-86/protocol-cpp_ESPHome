@@ -388,7 +388,14 @@ void JuraComponent::setup() {
   }
 
   this->connection_ = std::make_unique<::jutta_proto::JuttaConnection>(this->parent_);
+  this->connection_->set_log_decoded_tx(this->log_decoded_tx_);
+  this->connection_->set_log_encoded_uart(this->log_encoded_uart_);
+  this->connection_->set_response_callback([this](const std::string &response, const char *parser_branch) {
+    this->handle_decoded_response_(response, parser_branch);
+  });
   this->connection_->init();
+  this->publish_machine_online_(false);
+  this->publish_machine_ready_(false);
 
   this->handshake_stage_ = HandshakeStage::HELLO;
   ESP_LOGI(TAG, "Starting handshake with coffee maker...");
@@ -558,6 +565,8 @@ void JuraComponent::process_handshake() {
               this->device_type_ = line;
               ESP_LOGI(TAG, "Detected coffee maker response: %s", this->device_type_.c_str());
             }
+            this->publish_machine_type_();
+            this->publish_last_command_result_("machine_type");
             this->handshake_buffer_.clear();
             this->handshake_deadline_ = 0;
             this->handshake_stage_ = HandshakeStage::SEND_T1;
@@ -665,6 +674,10 @@ void JuraComponent::process_handshake() {
         if (this->enable_xml_poll_) {
           this->ensure_xml_mapping_loaded_();
         }
+        this->publish_last_command_result_("handshake_done");
+        this->publish_machine_status_("ready");
+        this->publish_machine_online_(true);
+        this->publish_machine_ready_(true);
       } else {
         this->restart_handshake("failed to send @t3");
       }
@@ -679,6 +692,12 @@ void JuraComponent::process_handshake() {
       this->coffee_maker_ == nullptr) {
     auto connection = std::move(this->connection_);
     this->coffee_maker_ = std::make_unique<::jutta_proto::CoffeeMaker>(std::move(connection));
+    this->coffee_maker_->connection->set_log_decoded_tx(this->log_decoded_tx_);
+    this->coffee_maker_->connection->set_log_encoded_uart(this->log_encoded_uart_);
+    this->coffee_maker_->connection->set_response_callback([this](const std::string &response,
+                                                                  const char *parser_branch) {
+      this->handle_decoded_response_(response, parser_branch);
+    });
     ESP_LOGI(TAG, "Coffee maker controller initialized.");
     this->reset_xml_poll_state_();
   }
@@ -687,6 +706,10 @@ void JuraComponent::process_handshake() {
 void JuraComponent::restart_handshake(const char *reason) {
   if (reason != nullptr) {
     ESP_LOGW(TAG, "Restarting handshake: %s", reason);
+    this->publish_last_command_result_(std::string("handshake_restart: ") + reason);
+    this->publish_machine_status_(std::string("not_ready: ") + reason);
+    this->publish_machine_online_(false);
+    this->publish_machine_ready_(false);
   }
   this->handshake_buffer_.clear();
   this->handshake_deadline_ = 0;
@@ -725,8 +748,100 @@ bool JuraComponent::time_reached(uint32_t now, uint32_t target) {
   return static_cast<int32_t>(now - target) >= 0;
 }
 
+void JuraComponent::handle_decoded_response_(const std::string &response, const char *parser_branch) {
+  this->publish_raw_rx_(response, parser_branch);
+  this->publish_machine_online_(true);
+
+  std::string lowered = response;
+  std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (lowered.rfind("ty:", 0) == 0) {
+    if (response.size() > 3) {
+      this->device_type_ = response;
+    } else if (this->device_type_.empty()) {
+      this->device_type_ = "TY:unknown";
+    }
+    this->publish_machine_type_();
+    this->publish_last_command_result_("machine_type");
+    return;
+  }
+
+  if (lowered == "ok:") {
+    this->publish_last_command_result_("ok");
+    return;
+  }
+
+  if (lowered == "@t1") {
+    this->publish_last_command_result_("@t1");
+    return;
+  }
+
+  if (lowered.rfind("@h", 0) == 0 && lowered.find(":error") != std::string::npos) {
+    this->publish_machine_status_(response);
+    this->publish_last_command_result_(response);
+    return;
+  }
+
+  if (response.rfind("@T2", 0) == 0 || response.rfind("@T3", 0) == 0) {
+    this->publish_last_command_result_(response);
+    return;
+  }
+
+  if (parser_branch != nullptr && std::string(parser_branch) == "db_frame") {
+    std::string safe = sanitize_text_for_api(response);
+    if (safe.find("\\x") == std::string::npos && !safe.empty()) {
+      this->publish_machine_status_(safe);
+    }
+  }
+}
+
+void JuraComponent::publish_raw_rx_(const std::string &response, const char *parser_branch) {
+  std::string safe = sanitize_text_for_api(response);
+  ESP_LOGD(TAG, "RX decoded branch=%s value='%s'", parser_branch != nullptr ? parser_branch : "unknown",
+           safe.c_str());
+  if (this->raw_rx_sensor_ != nullptr) {
+    this->raw_rx_sensor_->publish_state(safe);
+  }
+}
+
+void JuraComponent::publish_last_command_result_(const std::string &result) {
+  std::string safe = sanitize_text_for_api(result);
+  ESP_LOGD(TAG, "Command result: %s", safe.c_str());
+  if (this->last_command_result_sensor_ != nullptr) {
+    this->last_command_result_sensor_->publish_state(safe);
+  }
+}
+
+void JuraComponent::publish_machine_type_() {
+  if (this->machine_type_sensor_ != nullptr && !this->device_type_.empty()) {
+    this->machine_type_sensor_->publish_state(sanitize_text_for_api(this->device_type_));
+  }
+}
+
+void JuraComponent::publish_machine_status_(const std::string &status) {
+  std::string safe = sanitize_text_for_api(status);
+  ESP_LOGD(TAG, "Machine status: %s", safe.c_str());
+  if (this->machine_status_sensor_ != nullptr) {
+    this->machine_status_sensor_->publish_state(safe);
+  }
+}
+
+void JuraComponent::publish_machine_online_(bool online) {
+  ESP_LOGD(TAG, "Machine online: %s", YESNO(online));
+  if (this->machine_online_sensor_ != nullptr) {
+    this->machine_online_sensor_->publish_state(online);
+  }
+}
+
+void JuraComponent::publish_machine_ready_(bool ready) {
+  ESP_LOGD(TAG, "Machine ready: %s", YESNO(ready));
+  if (this->machine_ready_sensor_ != nullptr) {
+    this->machine_ready_sensor_->publish_state(ready);
+  }
+}
+
 void JuraComponent::process_machine_data_query() {
-  if (this->machine_data_sensor_ == nullptr) {
+  if (this->machine_data_sensor_ == nullptr && this->machine_status_sensor_ == nullptr) {
     return;
   }
   if (!this->is_ready()) {
@@ -837,6 +952,7 @@ void JuraComponent::handle_machine_xml_(const std::string &xml) {
   this->machine_xml_timestamp_ = now;
 
   std::string summary = this->format_machine_status_summary_(normalized);
+  this->publish_machine_status_(summary);
   this->publish_machine_data_(summary);
   this->update_settings_from_xml_(normalized);
   this->update_errors_from_xml_(normalized);
@@ -1980,6 +2096,7 @@ bool JuraComponent::query_setting_command_(const std::string &command, std::vect
       cmd, std::chrono::milliseconds{kCommandTimeoutMs});
   if (response == nullptr) {
     ESP_LOGW(TAG, "Einstellungspoll: keine Antwort für %s", command.c_str());
+    this->publish_last_command_result_(std::string("timeout: ") + command);
     return false;
   }
   std::string payload = *response;
@@ -2005,6 +2122,7 @@ bool JuraComponent::query_setting_command_(const std::string &command, std::vect
   if (decoded.empty() && !filtered.empty()) {
     decoded.assign(filtered.begin(), filtered.end());
   }
+  this->publish_last_command_result_(std::string("response: ") + command);
   return !decoded.empty();
 }
 
@@ -2166,6 +2284,7 @@ void JuraComponent::publish_error_state_(uint32_t code) {
       this->error_severity_sensor_->publish_state(has_error ? "unknown" : "none");
     }
   }
+  this->publish_last_command_result_(has_error ? "error_active" : "no_error");
   this->last_error_code_ = code;
   this->errors_entities_created_ = true;
 }
@@ -2268,4 +2387,3 @@ bool JuraComponent::is_busy() const {
 
 }  // namespace jutta_component
 }  // namespace esphome
-

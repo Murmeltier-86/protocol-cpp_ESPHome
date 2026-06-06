@@ -81,6 +81,9 @@ class Sensor {
   virtual void set_unit_of_measurement(const char *) {}
   virtual void set_icon(const std::string &) {}
   virtual void set_icon(const char *) {}
+  virtual void set_device_class(const std::string &) {}
+  virtual void set_device_class(const char *) {}
+  virtual void set_disabled_by_default(bool) {}
 };
 
 }  // namespace sensor
@@ -107,6 +110,15 @@ class TextSensor {
  public:
   virtual ~TextSensor() = default;
   virtual void publish_state(const std::string &) {}
+  virtual void set_name(const std::string &) {}
+  virtual void set_name(const char *) {}
+  virtual void set_internal(bool) {}
+  virtual void set_unique_id(const std::string &) {}
+  virtual void set_unique_id(const char *) {}
+  virtual void set_entity_category(esphome::EntityCategory) {}
+  virtual void set_icon(const std::string &) {}
+  virtual void set_icon(const char *) {}
+  virtual void set_disabled_by_default(bool) {}
 };
 
 }  // namespace text_sensor
@@ -132,6 +144,17 @@ class BinarySensor {
  public:
   virtual ~BinarySensor() = default;
   virtual void publish_state(bool) {}
+  virtual void set_name(const std::string &) {}
+  virtual void set_name(const char *) {}
+  virtual void set_internal(bool) {}
+  virtual void set_unique_id(const std::string &) {}
+  virtual void set_unique_id(const char *) {}
+  virtual void set_entity_category(esphome::EntityCategory) {}
+  virtual void set_device_class(const std::string &) {}
+  virtual void set_device_class(const char *) {}
+  virtual void set_icon(const std::string &) {}
+  virtual void set_icon(const char *) {}
+  virtual void set_disabled_by_default(bool) {}
 };
 
 }  // namespace binary_sensor
@@ -189,6 +212,14 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const std::string &device_type() const { return this->device_type_; }
 
   void set_machine_data_sensor(text_sensor::TextSensor *sensor) { this->machine_data_sensor_ = sensor; }
+  void set_raw_rx_sensor(text_sensor::TextSensor *sensor) { this->raw_rx_sensor_ = sensor; }
+  void set_last_command_result_sensor(text_sensor::TextSensor *sensor) { this->last_command_result_sensor_ = sensor; }
+  void set_machine_type_sensor(text_sensor::TextSensor *sensor) { this->machine_type_sensor_ = sensor; }
+  void set_machine_status_sensor(text_sensor::TextSensor *sensor) { this->machine_status_sensor_ = sensor; }
+  void set_machine_online_sensor(binary_sensor::BinarySensor *sensor) { this->machine_online_sensor_ = sensor; }
+  void set_machine_ready_sensor(binary_sensor::BinarySensor *sensor) { this->machine_ready_sensor_ = sensor; }
+  void set_log_decoded_tx(bool enabled) { this->log_decoded_tx_ = enabled; }
+  void set_log_encoded_uart(bool enabled) { this->log_encoded_uart_ = enabled; }
   void set_enable_xml_poll(bool enabled) { this->enable_xml_poll_ = enabled; }
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
   void set_xml_mapping_source(const char *data, size_t length) {
@@ -213,6 +244,13 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void restart_handshake(const char *reason);
   bool read_handshake_bytes();
   static bool time_reached(uint32_t now, uint32_t target);
+  void handle_decoded_response_(const std::string &response, const char *parser_branch);
+  void publish_raw_rx_(const std::string &response, const char *parser_branch);
+  void publish_last_command_result_(const std::string &result);
+  void publish_machine_type_();
+  void publish_machine_status_(const std::string &status);
+  void publish_machine_online_(bool online);
+  void publish_machine_ready_(bool ready);
   void process_machine_data_query();
   void publish_machine_data_(const std::string &response);
   void process_xml_polling();
@@ -289,6 +327,14 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool handshake_hello_request_sent_{false};
   bool custom_cancel_flag_{false};
   text_sensor::TextSensor *machine_data_sensor_{nullptr};
+  text_sensor::TextSensor *raw_rx_sensor_{nullptr};
+  text_sensor::TextSensor *last_command_result_sensor_{nullptr};
+  text_sensor::TextSensor *machine_type_sensor_{nullptr};
+  text_sensor::TextSensor *machine_status_sensor_{nullptr};
+  binary_sensor::BinarySensor *machine_online_sensor_{nullptr};
+  binary_sensor::BinarySensor *machine_ready_sensor_{nullptr};
+  bool log_decoded_tx_{true};
+  bool log_encoded_uart_{false};
   uint32_t machine_data_query_next_{0};
   std::string machine_xml_cache_{};
   uint32_t machine_xml_timestamp_{0};
@@ -415,4 +461,3 @@ class RunSequenceAction : public esphome::Action<> {
 
 }  // namespace jutta_component
 }  // namespace esphome
-

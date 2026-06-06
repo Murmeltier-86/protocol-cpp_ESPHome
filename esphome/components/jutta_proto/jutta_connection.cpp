@@ -163,6 +163,12 @@ void JuttaConnection::init() {
     serial.init();
 }
 
+void JuttaConnection::emit_response_(const std::string& response, const char* parser_branch) const {
+    if (this->response_callback_) {
+        this->response_callback_(response, parser_branch != nullptr ? parser_branch : "unknown");
+    }
+}
+
 bool JuttaConnection::read_decoded(std::vector<uint8_t>& data) {
     return read_decoded_unsafe(data);
 }
@@ -234,10 +240,15 @@ bool JuttaConnection::read_decoded_unsafe(std::vector<uint8_t>& data) const {
 }
 
 bool JuttaConnection::write_decoded_unsafe(const uint8_t& byte) const {
-    ESP_LOGD(TAG, "Queueing single decoded byte for transmission: '%s' (%s)",
-             format_printable(byte).c_str(), format_hex(byte).c_str());
+    if (this->log_decoded_tx_) {
+        ESP_LOGD(TAG, "TX decoded byte: '%s' (%s)", format_printable(byte).c_str(), format_hex(byte).c_str());
+    }
     auto encoded = encode(byte);
-    ESP_LOGVV(TAG, "Encoded representation: %s", format_hex(encoded).c_str());
+    if (this->log_encoded_uart_) {
+        ESP_LOGD(TAG, "TX encoded UART frame: %s", format_hex(encoded).c_str());
+    } else {
+        ESP_LOGVV(TAG, "Encoded representation: %s", format_hex(encoded).c_str());
+    }
     bool result = write_encoded_unsafe(encoded);
     ESP_LOGVV(TAG, "Transmission of decoded byte %s", result ? "succeeded" : "failed");
     return result;
@@ -248,8 +259,10 @@ bool JuttaConnection::write_decoded_unsafe(const std::vector<uint8_t>& data) con
     // return std::ranges::all_of(data.begin(), data.end(), [this](uint8_t byte) { return write_decoded_unsafe(byte); });
     // So we use this until it gets better:
     if (!data.empty()) {
-        ESP_LOGD(TAG, "Queueing %zu decoded byte%s for transmission: '%s' (hex %s)", data.size(),
-                 data.size() == 1 ? "" : "s", format_printable(data).c_str(), format_hex(data).c_str());
+        if (this->log_decoded_tx_) {
+            ESP_LOGD(TAG, "Queueing %zu decoded byte%s for transmission: '%s' (hex %s)", data.size(),
+                     data.size() == 1 ? "" : "s", format_printable(data).c_str(), format_hex(data).c_str());
+        }
     } else {
         ESP_LOGVV(TAG, "Requested to write an empty decoded payload.");
     }
@@ -514,6 +527,7 @@ void JuttaConnection::reinject_decoded_front(const std::string& data) const {
 bool JuttaConnection::read_line_until(std::string& line) {
     if (try_extract_line(this->response_line_buffer_, line)) {
         ESP_LOGD(TAG, "Polled buffered response line: '%s'", format_printable(line).c_str());
+        this->emit_response_(line, "line_buffer");
         return true;
     }
 
@@ -530,6 +544,7 @@ bool JuttaConnection::read_line_until(std::string& line) {
 
     if (try_extract_line(this->response_line_buffer_, line)) {
         ESP_LOGD(TAG, "Polled response line: '%s'", format_printable(line).c_str());
+        this->emit_response_(line, "line");
         return true;
     }
 
@@ -639,6 +654,9 @@ bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t time
         }
 
         ESP_LOGD(TAG, "RX_DB decoded_len=%u reason=%s", static_cast<unsigned>(decoded.size()), reason);
+        if (!decoded.empty()) {
+            this->emit_response_(vec_to_string(decoded), "db_frame");
+        }
 
         frame_decoded_len = decoded.size();
 
@@ -877,6 +895,7 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
         this->wait_string_context_.active = false;
         auto shared_response = std::make_shared<std::string>(response);
         ESP_LOGD(TAG, "Received response line: '%s'", format_printable(*shared_response).c_str());
+        this->emit_response_(*shared_response, "string_wait");
         return shared_response;
     };
 
@@ -959,6 +978,11 @@ JuttaConnection::WaitResult JuttaConnection::wait_for_response_unsafe(const std:
             this->wait_context_.active = false;
             this->wait_context_.recent.clear();
             ESP_LOGD(TAG, "Response '%s' detected.", format_printable(response).c_str());
+            std::string detected = response;
+            if (detected.size() >= 2 && detected[detected.size() - 2] == '\r' && detected.back() == '\n') {
+                detected.resize(detected.size() - 2);
+            }
+            this->emit_response_(detected, "wait_for_response");
             return WaitResult::Success;
         }
         if (this->wait_context_.recent.size() > response.size()) {

@@ -2,9 +2,11 @@
 
 #include <array>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 #include <deque>
 
@@ -33,6 +35,12 @@ class JuttaConnection {
      * [Thread Safe]
      **/
     void init();
+
+    void set_response_callback(std::function<void(const std::string&, const char*)> callback) {
+        this->response_callback_ = std::move(callback);
+    }
+    void set_log_decoded_tx(bool enabled) { this->log_decoded_tx_ = enabled; }
+    void set_log_encoded_uart(bool enabled) { this->log_encoded_uart_ = enabled; }
 
     /**
      * Tries to read a single decoded byte.
@@ -180,6 +188,8 @@ class JuttaConnection {
     static std::string vec_to_string(const std::vector<uint8_t>& data);
 
  private:
+    void emit_response_(const std::string& response, const char* parser_branch) const;
+
     /**
      * Encodes the given byte into four bytes that the coffee maker understands.
      * Based on: http://protocoljura.wiki-site.com/index.php/Protocol_to_coffeemaker
@@ -317,6 +327,9 @@ class JuttaConnection {
     size_t last_tx_echo_progress_{0};
     uint32_t last_tx_deadline_{0};
     bool last_tx_echo_active_{false};
+    std::function<void(const std::string&, const char*)> response_callback_{};
+    bool log_decoded_tx_{true};
+    bool log_encoded_uart_{false};
 };
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto
