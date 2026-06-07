@@ -229,6 +229,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     this->xml_mapping_length_ = length;
   }
   void set_xml_poll_interval(uint32_t interval_ms) { this->xml_poll_interval_ms_ = interval_ms; }
+  void set_xml_startup_delay(uint32_t delay_ms) { this->xml_startup_delay_ms_ = delay_ms; }
   void add_configured_xml_sensor(const std::string &field, sensor::Sensor *sensor);
   void register_setting_sensor(const std::string &id, sensor::Sensor *sensor);
   void register_setting_text_sensor(const std::string &id, text_sensor::TextSensor *sensor);
@@ -289,10 +290,14 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   };
   enum class DbTransactionOwner { NONE, XML_POLL, MACHINE_XML };
   size_t xml_command_index_(XmlPollState state) const;
+  const char *db_transaction_owner_name_(DbTransactionOwner owner) const;
+  bool begin_xml_transaction_(const char *command, uint32_t now);
+  void end_xml_transaction_(const char *reason);
   void clear_db_transaction_(DbTransactionOwner owner);
+  void flush_xml_rx_(bool flush_serial);
   bool validate_xml_frame_(XmlPollState state, const std::vector<uint8_t> &decoded, bool had_crlf,
                            size_t decoded_len, std::vector<uint8_t> &payload, size_t &expected_min_len,
-                           uint8_t &head0) const;
+                           uint8_t &head0, std::string &reason) const;
   bool validate_counter_frame_(XmlPollState state, const XmlCommandMapping &mapping, const std::vector<uint8_t> &frame,
                                const char *command_label, std::string &reason) const;
   bool counter_frame_is_stable_(XmlPollState state, const std::vector<uint8_t> &frame, const char *command_label,
@@ -301,7 +306,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
                             const char *command_label);
   bool process_valid_tgc0_frame_(const std::vector<uint8_t> &frame, bool stage_values);
   bool should_retry_current_(XmlPollState wait_state, uint32_t now);
-  void handle_xml_failure_(XmlPollState wait_state, bool is_timeout, size_t decoded_len, uint32_t now);
+  void handle_xml_failure_(XmlPollState wait_state, bool is_timeout, size_t decoded_len, uint32_t now,
+                           const char *reason = nullptr);
   void complete_command_success_(XmlPollState wait_state);
   bool xml_state_has_mapping_(XmlPollState state) const;
   const char *xml_state_command_(XmlPollState state) const;
@@ -347,6 +353,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool log_decoded_tx_{true};
   bool log_encoded_uart_{false};
   uint32_t machine_data_query_next_{0};
+  uint32_t machine_xml_busy_backoff_until_{0};
   std::string machine_xml_cache_{};
   uint32_t machine_xml_timestamp_{0};
 
@@ -354,6 +361,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_publish_unstable_{false};
   uint32_t xml_counter_max_{20000};
   uint32_t xml_poll_interval_ms_{30000};
+  uint32_t xml_startup_delay_ms_{10000};
   std::string xml_mapping_path_{"embedded"};
   const char *xml_mapping_data_{nullptr};
   size_t xml_mapping_length_{0};
@@ -363,6 +371,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t xml_next_action_ms_{0};
   bool xml_inflight_{false};
   DbTransactionOwner db_transaction_owner_{DbTransactionOwner::NONE};
+  std::string xml_transaction_cmd_{};
   std::string xml_last_command_{};
   std::vector<uint8_t> xml_rx_buffer_{};
   bool xml_mapping_logged_{false};

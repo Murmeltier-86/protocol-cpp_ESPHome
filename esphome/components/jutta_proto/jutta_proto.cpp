@@ -26,6 +26,7 @@ static const char *const TAG = "jutta_proto";
 constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
 constexpr uint32_t MACHINE_XML_TIMEOUT_MS = 1500;
+constexpr uint32_t MACHINE_XML_BUSY_BACKOFF_MS = 5000;
 constexpr std::size_t MACHINE_XML_MIN_LENGTH = 32;
 const char *const MACHINE_XML_PRIMARY_COMMAND = "@hr:00\r\n";
 const char *const MACHINE_XML_FALLBACK_COMMAND = "@hr:05\r\n";
@@ -520,7 +521,6 @@ void JuraComponent::setup() {
   ESP_LOGI(TAG, "Starting handshake with coffee maker...");
 
   this->reset_xml_poll_state_();
-  this->xml_next_poll_ = esphome::millis();
   if (this->enable_xml_poll_) {
     this->ensure_xml_mapping_loaded_();
     this->ensure_xml_sensors_created_();
@@ -618,6 +618,7 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML polling: %s", this->enable_xml_poll_ ? "enabled" : "disabled");
   ESP_LOGCONFIG(TAG, "  XML mapping Quelle: %s", this->xml_mapping_path_.c_str());
   ESP_LOGCONFIG(TAG, "  XML poll interval: %u ms", static_cast<unsigned>(this->xml_poll_interval_ms_));
+  ESP_LOGCONFIG(TAG, "  XML startup delay: %u ms", static_cast<unsigned>(this->xml_startup_delay_ms_));
   ESP_LOGCONFIG(TAG, "  XML publish unstable counters: %s", YESNO(this->xml_publish_unstable_));
   ESP_LOGCONFIG(TAG, "  XML counter max: %u", static_cast<unsigned>(this->xml_counter_max_));
   if (this->enable_xml_poll_) {
@@ -1139,6 +1140,7 @@ void JuraComponent::publish_machine_ready_(bool ready) {
 }
 
 void JuraComponent::process_machine_data_query() {
+  uint32_t now = esphome::millis();
   if (this->machine_data_sensor_ == nullptr && this->machine_status_sensor_ == nullptr) {
     return;
   }
@@ -1155,11 +1157,15 @@ void JuraComponent::process_machine_data_query() {
                          (this->enable_xml_poll_ && this->xml_state_ != XmlPollState::IDLE &&
                           this->xml_state_ != XmlPollState::SLEEP);
   if (xml_poll_active) {
+    if (this->machine_xml_busy_backoff_until_ != 0 && !time_reached(now, this->machine_xml_busy_backoff_until_)) {
+      return;
+    }
     ESP_LOGD(TAG, "Machine-XML query skipped while XML DB polling is active");
+    this->machine_xml_busy_backoff_until_ = now + MACHINE_XML_BUSY_BACKOFF_MS;
+    this->machine_data_query_next_ = this->machine_xml_busy_backoff_until_;
     return;
   }
 
-  uint32_t now = esphome::millis();
   if (this->machine_data_query_next_ != 0 && !time_reached(now, this->machine_data_query_next_)) {
     return;
   }
@@ -1199,6 +1205,8 @@ bool JuraComponent::request_machine_xml_(std::string &xml) {
                          (this->enable_xml_poll_ && this->xml_state_ != XmlPollState::IDLE &&
                           this->xml_state_ != XmlPollState::SLEEP);
   if (xml_poll_active) {
+    uint32_t now = esphome::millis();
+    this->machine_xml_busy_backoff_until_ = now + MACHINE_XML_BUSY_BACKOFF_MS;
     ESP_LOGD(TAG, "Machine-XML query skipped while XML DB polling is active");
     return false;
   }
@@ -1210,6 +1218,8 @@ bool JuraComponent::request_machine_xml_(std::string &xml) {
       return false;
     }
     if (this->db_transaction_owner_ != DbTransactionOwner::NONE) {
+      uint32_t now = esphome::millis();
+      this->machine_xml_busy_backoff_until_ = now + MACHINE_XML_BUSY_BACKOFF_MS;
       ESP_LOGD(TAG, "Machine-XML command %s skipped; DB transaction already active", command);
       return false;
     }
@@ -1502,7 +1512,6 @@ bool JuraComponent::decode_field_value_(const std::vector<uint8_t> &decoded, con
 
 void JuraComponent::start_new_xml_cycle_(uint32_t now) {
   (void) now;
-  this->db_transaction_owner_ = DbTransactionOwner::XML_POLL;
   this->xml_stats_.clear();
   this->xml_rx_buffer_.clear();
   this->xml_inflight_ = false;
@@ -1532,22 +1541,91 @@ size_t JuraComponent::xml_command_index_(XmlPollState state) const {
   return 0;
 }
 
+const char *JuraComponent::db_transaction_owner_name_(DbTransactionOwner owner) const {
+  switch (owner) {
+    case DbTransactionOwner::NONE:
+      return "none";
+    case DbTransactionOwner::XML_POLL:
+      return "xml_poll";
+    case DbTransactionOwner::MACHINE_XML:
+      return "machine_xml";
+  }
+  return "unknown";
+}
+
+bool JuraComponent::begin_xml_transaction_(const char *command, uint32_t now) {
+  (void) now;
+  const char *cmd = command != nullptr ? command : "";
+  if (this->db_transaction_owner_ == DbTransactionOwner::XML_POLL && !this->xml_inflight_) {
+    ESP_LOGD(TAG, "xml_tx_end cmd=%s reason=stale_before_tx",
+             this->xml_transaction_cmd_.empty() ? this->xml_last_command_.c_str() : this->xml_transaction_cmd_.c_str());
+    this->db_transaction_owner_ = DbTransactionOwner::NONE;
+    this->xml_transaction_cmd_.clear();
+  }
+  if (this->db_transaction_owner_ != DbTransactionOwner::NONE) {
+    ESP_LOGD(TAG, "xml_tx_skip cmd=%s reason=busy busy_owner=%s", cmd,
+             this->db_transaction_owner_name_(this->db_transaction_owner_));
+    return false;
+  }
+  if (this->xml_inflight_) {
+    ESP_LOGD(TAG, "xml_tx_skip cmd=%s reason=inflight busy_owner=%s", cmd,
+             this->db_transaction_owner_name_(this->db_transaction_owner_));
+    return false;
+  }
+  this->db_transaction_owner_ = DbTransactionOwner::XML_POLL;
+  this->xml_transaction_cmd_ = cmd;
+  ESP_LOGD(TAG, "xml_tx_begin cmd=%s", cmd);
+  return true;
+}
+
+void JuraComponent::end_xml_transaction_(const char *reason) {
+  const char *end_reason = reason != nullptr && reason[0] != '\0' ? reason : "done";
+  if (this->db_transaction_owner_ == DbTransactionOwner::XML_POLL || !this->xml_transaction_cmd_.empty()) {
+    const char *cmd = !this->xml_transaction_cmd_.empty() ? this->xml_transaction_cmd_.c_str()
+                                                           : this->xml_last_command_.c_str();
+    ESP_LOGD(TAG, "xml_tx_end cmd=%s reason=%s", cmd, end_reason);
+  }
+  if (this->db_transaction_owner_ == DbTransactionOwner::XML_POLL) {
+    this->db_transaction_owner_ = DbTransactionOwner::NONE;
+  }
+  if (!this->xml_transaction_cmd_.empty() && this->xml_last_command_ == this->xml_transaction_cmd_) {
+    this->xml_last_command_.clear();
+  }
+  this->xml_transaction_cmd_.clear();
+}
+
 void JuraComponent::clear_db_transaction_(DbTransactionOwner owner) {
   if (owner == DbTransactionOwner::NONE || this->db_transaction_owner_ == owner) {
     this->db_transaction_owner_ = DbTransactionOwner::NONE;
+    if (owner == DbTransactionOwner::NONE || owner == DbTransactionOwner::XML_POLL) {
+      this->xml_transaction_cmd_.clear();
+    }
+  }
+}
+
+void JuraComponent::flush_xml_rx_(bool flush_serial) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return;
+  }
+  this->coffee_maker_->connection->reset_db_rx_buffer();
+  if (flush_serial) {
+    this->coffee_maker_->connection->drain_serial_input_nonblocking();
   }
 }
 
 bool JuraComponent::validate_xml_frame_(XmlPollState state, const std::vector<uint8_t> &decoded, bool had_crlf,
                                         size_t decoded_len, std::vector<uint8_t> &payload,
-                                        size_t &expected_min_len, uint8_t &head0) const {
+                                        size_t &expected_min_len, uint8_t &head0, std::string &reason) const {
   (void) had_crlf;
+  reason.clear();
   const char *expected_command = this->xml_state_command_(state);
   if (expected_command == nullptr || expected_command[0] == '\0') {
+    reason = "missing_expected_command";
     ESP_LOGW(TAG, "XML validate: kein erwarteter Befehl für Zustand %d", static_cast<int>(state));
     return false;
   }
   if (this->xml_last_command_ != expected_command) {
+    reason = "pending_command_mismatch";
     ESP_LOGW(TAG, "XML %s verworfen: pending command mismatch (pending=%s expected=%s)",
              this->xml_state_label_(state), this->xml_last_command_.c_str(), expected_command);
     return false;
@@ -1569,11 +1647,13 @@ bool JuraComponent::validate_xml_frame_(XmlPollState state, const std::vector<ui
       minimum = kTGC0MinFrameLength;
       break;
     default:
+      reason = "unexpected_state";
       ESP_LOGW(TAG, "XML validate: unerwarteter Zustand %d", static_cast<int>(state));
       return false;
   }
 
   if (mapping == nullptr || mapping->empty()) {
+    reason = "mapping_empty";
     ESP_LOGW(TAG, "XML %s: kein Mapping aktiv", this->xml_state_label_(state));
     return false;
   }
@@ -1592,11 +1672,13 @@ bool JuraComponent::validate_xml_frame_(XmlPollState state, const std::vector<ui
     }
   }
   if (start_index < 0) {
+    reason = "invalid_start_byte";
     ESP_LOGW(TAG, "XML %s: Startbyte 0x26 nicht gefunden (decoded_len=%u)", this->xml_state_label_(state),
              static_cast<unsigned>(decoded.size()));
     return false;
   }
   if (start_index != 0) {
+    reason = "invalid_start_byte";
     ESP_LOGW(TAG, "XML %s verworfen: Startbyte 0x26 erst bei Index %d (decoded_len=%u)",
              this->xml_state_label_(state), start_index, static_cast<unsigned>(decoded.size()));
     return false;
@@ -1607,11 +1689,13 @@ bool JuraComponent::validate_xml_frame_(XmlPollState state, const std::vector<ui
 
   std::size_t avail = payload.size();
   if (avail != expected_min_len) {
+    reason = "invalid_length";
     ESP_LOGW(TAG, "XML %s verworfen: decoded_len (%u) != expected_len (%u)",
              this->xml_state_label_(state), static_cast<unsigned>(avail), static_cast<unsigned>(expected_min_len));
     return false;
   }
   if (head0 != 0x26) {
+    reason = "invalid_start_byte";
     ESP_LOGW(TAG, "XML %s: erstes Payload-Byte 0x%02X statt 0x26", this->xml_state_label_(state),
              static_cast<unsigned>(head0));
     return false;
@@ -1804,12 +1888,16 @@ bool JuraComponent::should_retry_current_(XmlPollState wait_state, uint32_t now)
                                   : (wait_state == XmlPollState::WAIT_TG43 ? XmlPollState::SEND_TG43
                                                                            : XmlPollState::SEND_TGC0);
   ESP_LOGW(TAG, "XML %s: erneuter Versuch", this->xml_state_label_(wait_state));
+  ESP_LOGD(TAG, "xml_retry_scheduled cmd=%s delay_ms=%u", this->xml_state_command_(wait_state),
+           static_cast<unsigned>(kInterCmdGapMs));
   this->transition_to_state_(resend_state, now, kInterCmdGapMs);
   return true;
 }
 
-void JuraComponent::handle_xml_failure_(XmlPollState wait_state, bool is_timeout, size_t decoded_len, uint32_t now) {
+void JuraComponent::handle_xml_failure_(XmlPollState wait_state, bool is_timeout, size_t decoded_len, uint32_t now,
+                                        const char *reason) {
   size_t index = this->xml_command_index_(wait_state);
+  const char *failure_reason = reason != nullptr && reason[0] != '\0' ? reason : (is_timeout ? "timeout" : "invalid_frame");
   if (index < this->xml_counter_candidate_frame_.size()) {
     this->xml_counter_candidate_frame_[index].clear();
     this->xml_counter_candidate_count_[index] = 0;
@@ -1839,12 +1927,8 @@ void JuraComponent::handle_xml_failure_(XmlPollState wait_state, bool is_timeout
     this->xml_invalid_len_seen_[index] = false;
     this->xml_last_invalid_len_[index] = 0;
   }
-  if (is_timeout) {
-    if (this->coffee_maker_ != nullptr && this->coffee_maker_->connection != nullptr) {
-      this->coffee_maker_->connection->reset_db_rx_buffer();
-    }
-    this->clear_db_transaction_(DbTransactionOwner::XML_POLL);
-  }
+  this->flush_xml_rx_(is_timeout);
+  this->end_xml_transaction_(failure_reason);
 
   this->xml_inflight_ = false;
   this->xml_deadline_ms_ = 0;
@@ -1854,6 +1938,7 @@ void JuraComponent::handle_xml_failure_(XmlPollState wait_state, bool is_timeout
     return;
   }
   this->xml_retry_count_[index] = 0;
+  ESP_LOGD(TAG, "xml_tx_end cmd=%s reason=retry_exhausted", this->xml_state_command_(wait_state));
   XmlPollState next_state = wait_state == XmlPollState::WAIT_TR32
                                 ? XmlPollState::SEND_TG43
                                 : (wait_state == XmlPollState::WAIT_TG43 ? XmlPollState::SEND_TGC0
@@ -2146,7 +2231,7 @@ void JuraComponent::reset_xml_poll_state_() {
   this->xml_last_command_.clear();
   this->xml_rx_buffer_.clear();
   this->xml_stats_.clear();
-  this->xml_next_poll_ = esphome::millis();
+  this->xml_next_poll_ = esphome::millis() + this->xml_startup_delay_ms_;
   this->xml_retry_count_.fill(0);
   this->xml_invalid_len_seen_.fill(false);
   this->xml_last_invalid_len_.fill(0);
@@ -2298,14 +2383,15 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         std::vector<uint8_t> payload;
         size_t expected_min_len = 0;
         uint8_t head0 = 0;
+        std::string reason;
         if (!this->validate_xml_frame_(this->xml_state_, decoded, had_crlf, decoded_len, payload, expected_min_len,
-                                       head0)) {
-          this->handle_xml_failure_(this->xml_state_, false, decoded_len, now);
+                                       head0, reason)) {
+          this->handle_xml_failure_(this->xml_state_, false, decoded_len, now, reason.c_str());
           return;
         }
         if (this->xml_state_ == XmlPollState::WAIT_TGC0) {
           if (!this->process_valid_tgc0_frame_(payload, false)) {
-            this->handle_xml_failure_(this->xml_state_, false, payload.size(), now);
+            this->handle_xml_failure_(this->xml_state_, false, payload.size(), now, "counter_out_of_range");
             return;
           }
         }
@@ -2335,11 +2421,16 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         if (!this->validate_counter_frame_(XmlPollState::PARSE_TR32, this->xml_mapping_.tr32, this->xml_rx_buffer_,
                                            "@TR:32", reason)) {
           ESP_LOGW(TAG, "XML @TR:32 verworfen: %s", reason.c_str());
+          this->end_xml_transaction_(reason.c_str());
         } else if (!this->counter_frame_is_stable_(XmlPollState::PARSE_TR32, this->xml_rx_buffer_, "@TR:32", reason)) {
           ESP_LOGW(TAG, "XML @TR:32 nicht publiziert: %s", reason.c_str());
+          this->end_xml_transaction_(reason.c_str());
         } else {
           any = this->stage_counter_frame_(this->xml_mapping_.tr32, this->xml_rx_buffer_, "@TR:32");
+          this->end_xml_transaction_("full_frame");
         }
+      } else {
+        this->end_xml_transaction_("no_payload");
       }
       this->xml_rx_buffer_.clear();
       if (any) {
@@ -2359,11 +2450,16 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         if (!this->validate_counter_frame_(XmlPollState::PARSE_TG43, this->xml_mapping_.tg43, this->xml_rx_buffer_,
                                            "@TG:43", reason)) {
           ESP_LOGW(TAG, "XML @TG:43 verworfen: %s", reason.c_str());
+          this->end_xml_transaction_(reason.c_str());
         } else if (!this->counter_frame_is_stable_(XmlPollState::PARSE_TG43, this->xml_rx_buffer_, "@TG:43", reason)) {
           ESP_LOGW(TAG, "XML @TG:43 nicht publiziert: %s", reason.c_str());
+          this->end_xml_transaction_(reason.c_str());
         } else {
           any = this->stage_counter_frame_(this->xml_mapping_.tg43, this->xml_rx_buffer_, "@TG:43");
+          this->end_xml_transaction_("full_frame");
         }
+      } else {
+        this->end_xml_transaction_("no_payload");
       }
       this->xml_rx_buffer_.clear();
       if (any) {
@@ -2381,11 +2477,15 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
       if (!this->xml_rx_buffer_.empty() && this->xml_state_has_mapping_(XmlPollState::PARSE_TGC0)) {
         if (this->process_valid_tgc0_frame_(this->xml_rx_buffer_, true)) {
           any = !this->xml_stats_.empty();
+          this->end_xml_transaction_("full_frame");
         } else {
-          this->handle_xml_failure_(XmlPollState::WAIT_TGC0, false, this->xml_rx_buffer_.size(), now);
+          this->handle_xml_failure_(XmlPollState::WAIT_TGC0, false, this->xml_rx_buffer_.size(), now,
+                                    "counter_out_of_range");
           this->xml_rx_buffer_.clear();
           return;
         }
+      } else {
+        this->end_xml_transaction_("no_payload");
       }
       this->xml_rx_buffer_.clear();
       if (any) {
@@ -2493,9 +2593,6 @@ const char *JuraComponent::xml_state_label_(XmlPollState state) const {
 
 void JuraComponent::transition_to_state_(XmlPollState state, uint32_t now, uint32_t delay_ms) {
   this->xml_state_ = state;
-  if (state == XmlPollState::SLEEP || state == XmlPollState::IDLE) {
-    this->clear_db_transaction_(DbTransactionOwner::XML_POLL);
-  }
   if (delay_ms > 0) {
     this->xml_next_action_ms_ = now + delay_ms;
   } else {
@@ -2515,13 +2612,19 @@ bool JuraComponent::send_xml_command_(const char *command, XmlPollState wait_sta
     return false;
   }
   if (this->db_transaction_owner_ == DbTransactionOwner::MACHINE_XML) {
-    ESP_LOGD(TAG, "TX_DB \"%s\" skipped while Machine-XML transaction is active", command);
+    ESP_LOGD(TAG, "xml_tx_skip cmd=%s reason=busy busy_owner=%s", command,
+             this->db_transaction_owner_name_(this->db_transaction_owner_));
+    this->xml_next_action_ms_ = now + kInterCmdGapMs;
     return false;
   }
-  if (this->db_transaction_owner_ == DbTransactionOwner::NONE) {
-    this->db_transaction_owner_ = DbTransactionOwner::XML_POLL;
-  }
   if (this->xml_inflight_) {
+    ESP_LOGD(TAG, "xml_tx_skip cmd=%s reason=inflight busy_owner=%s", command,
+             this->db_transaction_owner_name_(this->db_transaction_owner_));
+    this->xml_next_action_ms_ = now + kInterCmdGapMs;
+    return false;
+  }
+  if (!this->begin_xml_transaction_(command, now)) {
+    this->xml_next_action_ms_ = now + kInterCmdGapMs;
     return false;
   }
   auto *connection = this->coffee_maker_->connection.get();

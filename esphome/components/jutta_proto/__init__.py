@@ -33,6 +33,7 @@ CONF_MACHINE_READY = "machine_ready"
 CONF_ENABLE_XML_POLL = "enable_xml_poll"
 CONF_XML_MAPPING_PATH = "xml_mapping_path"
 CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
+CONF_XML_STARTUP_DELAY_MS = "xml_startup_delay_ms"
 CONF_XML_PUBLISH_UNSTABLE = "xml_publish_unstable"
 CONF_XML_COUNTER_MAX = "xml_counter_max"
 CONF_XML_SENSORS = "xml_sensors"
@@ -124,6 +125,9 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_XML_MAPPING_PATH, default="embedded"): cv.string,
             cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=30000): cv.All(
                 cv.positive_int, cv.Range(min=25000)
+            ),
+            cv.Optional(CONF_XML_STARTUP_DELAY_MS, default=10000): cv.All(
+                cv.positive_int, cv.Range(min=10000)
             ),
             cv.Optional(CONF_XML_PUBLISH_UNSTABLE, default=False): cv.boolean,
             cv.Optional(CONF_XML_COUNTER_MAX, default=20000): cv.positive_int,
@@ -329,6 +333,7 @@ async def to_code(config):
         )
     )
     cg.add(var.set_xml_poll_interval(config[CONF_XML_POLL_INTERVAL_MS]))
+    cg.add(var.set_xml_startup_delay(config[CONF_XML_STARTUP_DELAY_MS]))
 
     if CONF_MACHINE_DATA in config:
         machine_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
