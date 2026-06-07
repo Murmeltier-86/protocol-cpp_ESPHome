@@ -204,6 +204,76 @@ bool parse_double_attr(const AttributeMap &attrs, std::initializer_list<const ch
   return false;
 }
 
+bool parse_bool_attr(const AttributeMap &attrs, std::initializer_list<const char *> keys, bool &out) {
+  for (const char *key : keys) {
+    std::string value = to_lower_copy(attrs.get(key));
+    trim(value);
+    if (value.empty()) {
+      continue;
+    }
+    if (value == "true" || value == "1" || value == "yes" || value == "on") {
+      out = true;
+      return true;
+    }
+    if (value == "false" || value == "0" || value == "no" || value == "off") {
+      out = false;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool parse_u32_text(const std::string &value, int base, uint32_t &out) {
+  if (value.empty()) {
+    return false;
+  }
+  char *end = nullptr;
+  auto parsed = std::strtoul(value.c_str(), &end, base);
+  if (end == value.c_str()) {
+    return false;
+  }
+  out = static_cast<uint32_t>(parsed);
+  return true;
+}
+
+bool parse_u32_attr(const AttributeMap &attrs, std::initializer_list<const char *> keys, int base, uint32_t &out) {
+  for (const char *key : keys) {
+    std::string value = attrs.get(key);
+    trim(value);
+    if (parse_u32_text(value, base, out)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string first_attr(const AttributeMap &attrs, std::initializer_list<const char *> keys) {
+  for (const char *key : keys) {
+    std::string value = attrs.get(key);
+    trim(value);
+    if (!value.empty()) {
+      return value;
+    }
+  }
+  return {};
+}
+
+std::string resolve_text_attrs(const AttributeMap &attrs, std::initializer_list<const char *> fallback_keys) {
+  std::string value = first_attr(attrs, {"german", "de", "deutsch", "text_de", "name_de", "title_de", "message_de"});
+  if (!value.empty()) {
+    return value;
+  }
+  value = first_attr(attrs, {"english", "en", "text_en", "name_en", "title_en", "message_en"});
+  if (!value.empty()) {
+    return value;
+  }
+  value = first_attr(attrs, fallback_keys);
+  if (!value.empty()) {
+    return value;
+  }
+  return {};
+}
+
 bool contains_percent_hint(const std::string &value) {
   if (value.find('%') != std::string::npos) {
     return true;
@@ -632,6 +702,164 @@ bool parse_textitem_mapping(const std::string &xml, const std::string &command, 
   return true;
 }
 
+std::vector<JuraProductDesc> parse_products(const std::string &xml) {
+  std::vector<JuraProductDesc> products;
+  std::string block;
+  if (!extract_section_content(xml, "products", block)) {
+    return products;
+  }
+  for_each_tag(block, "totalcounter", [&](const std::string &tag_text) {
+    auto attrs = parse_attributes(tag_text);
+    JuraProductDesc product;
+    if (!parse_u32_attr(attrs, {"code"}, 16, product.code)) {
+      return;
+    }
+    product.name = resolve_text_attrs(attrs, {"name", "text", "code"});
+    if (product.name.empty()) {
+      char buf[12];
+      std::snprintf(buf, sizeof(buf), "0x%02X", static_cast<unsigned>(product.code & 0xFFu));
+      product.name = buf;
+    }
+    product.kind = "counter";
+    product.active = true;
+    products.push_back(product);
+  });
+  for_each_tag(block, "product", [&](const std::string &tag_text) {
+    auto attrs = parse_attributes(tag_text);
+    JuraProductDesc product;
+    if (!parse_u32_attr(attrs, {"code"}, 16, product.code)) {
+      return;
+    }
+    product.name = resolve_text_attrs(attrs, {"name", "text", "code"});
+    if (product.name.empty()) {
+      char buf[12];
+      std::snprintf(buf, sizeof(buf), "0x%02X", static_cast<unsigned>(product.code & 0xFFu));
+      product.name = buf;
+    }
+    product.kind = attrs.get("p_kind");
+    trim(product.kind);
+    parse_bool_attr(attrs, {"active"}, product.active);
+    parse_bool_attr(attrs, {"doubleproduct", "double_product"}, product.double_product);
+    products.push_back(product);
+  });
+  return products;
+}
+
+std::vector<JuraStatusDesc> parse_status_values(const std::string &xml) {
+  std::vector<JuraStatusDesc> states;
+  std::string block;
+  if (!extract_section_content(xml, "progress_state_intake", block)) {
+    return states;
+  }
+  for_each_tag(block, "enjoyscreen", [&](const std::string &tag_text) {
+    auto attrs = parse_attributes(tag_text);
+    JuraStatusDesc state;
+    if (!parse_u32_attr(attrs, {"value"}, 16, state.value)) {
+      return;
+    }
+    state.name = resolve_text_attrs(attrs, {"name", "title", "message", "value"});
+    state.title = attrs.get("title");
+    state.message = attrs.get("message");
+    state.progress = true;
+    states.push_back(state);
+  });
+  for_each_tag(block, "state", [&](const std::string &tag_text) {
+    auto attrs = parse_attributes(tag_text);
+    JuraStatusDesc state;
+    if (!parse_u32_attr(attrs, {"value"}, 16, state.value)) {
+      return;
+    }
+    state.name = resolve_text_attrs(attrs, {"name", "title", "message", "value"});
+    if (state.name.empty()) {
+      char buf[12];
+      std::snprintf(buf, sizeof(buf), "0x%02X", static_cast<unsigned>(state.value & 0xFFu));
+      state.name = buf;
+    }
+    state.title = attrs.get("title");
+    state.message = attrs.get("message");
+    state.accept_command = attrs.get("acceptcommand");
+    parse_bool_attr(attrs, {"progress"}, state.progress);
+    states.push_back(state);
+  });
+  return states;
+}
+
+std::vector<JuraAlertDesc> parse_alerts(const std::string &xml) {
+  std::vector<JuraAlertDesc> alerts;
+  std::string block;
+  if (!extract_section_content(xml, "alerts", block)) {
+    return alerts;
+  }
+  for_each_tag(block, "alert", [&](const std::string &tag_text) {
+    auto attrs = parse_attributes(tag_text);
+    JuraAlertDesc alert;
+    if (!parse_u32_attr(attrs, {"bit"}, 10, alert.bit)) {
+      return;
+    }
+    alert.name = resolve_text_attrs(attrs, {"name", "title", "message", "bit"});
+    if (alert.name.empty()) {
+      alert.name = "bit_" + std::to_string(alert.bit);
+    }
+    alert.title = attrs.get("title");
+    alert.message = attrs.get("message");
+    alert.type = attrs.get("type");
+    alert.process = attrs.get("process");
+    trim(alert.title);
+    trim(alert.message);
+    trim(alert.type);
+    trim(alert.process);
+    alerts.push_back(alert);
+  });
+  return alerts;
+}
+
+std::vector<JuraProcessDesc> parse_processes(const std::string &xml) {
+  std::vector<JuraProcessDesc> processes;
+  std::string block;
+  if (!extract_section_content(xml, "processes", block)) {
+    return processes;
+  }
+  for_each_tag(block, "process", [&](const std::string &tag_text) {
+    auto attrs = parse_attributes(tag_text);
+    JuraProcessDesc process;
+    process.type = attrs.get("type");
+    trim(process.type);
+    process.execute_command = attrs.get("executecommand");
+    trim(process.execute_command);
+    process.title = resolve_text_attrs(attrs, {"type", "title"});
+    parse_bool_attr(attrs, {"progress"}, process.progress);
+    if (!process.type.empty() || !process.execute_command.empty()) {
+      processes.push_back(process);
+    }
+  });
+  return processes;
+}
+
+std::string byte_hex(uint8_t byte) {
+  char buf[5];
+  std::snprintf(buf, sizeof(buf), "0x%02X", static_cast<unsigned>(byte));
+  return buf;
+}
+
+JuraDecodedField make_text_field(const std::string &category, const std::string &key, const std::string &name,
+                                 const std::string &raw_value, const std::string &decoded_text) {
+  JuraDecodedField field;
+  field.category = category;
+  field.key = key;
+  field.name = name;
+  field.raw_value = raw_value;
+  field.decoded_text = decoded_text;
+  return field;
+}
+
+JuraDecodedField make_numeric_field(const std::string &category, const std::string &key, const std::string &name,
+                                    const std::string &raw_value, const std::string &decoded_text, float value) {
+  JuraDecodedField field = make_text_field(category, key, name, raw_value, decoded_text);
+  field.numeric_value = value;
+  field.has_numeric_value = true;
+  return field;
+}
+
 XmlMapping g_mapping;
 bool g_mapping_loaded = false;
 
@@ -756,7 +984,12 @@ bool load_mapping_from_string(const std::string &xml) {
     tgc0_has_fields = legacy_tgc0 && !g_mapping.tgc0.empty();
   }
 
-  g_mapping.valid = tr32_has_fields || tg43_has_fields || tgc0_has_fields;
+  g_mapping.products = parse_products(xml);
+  g_mapping.status_values = parse_status_values(xml);
+  g_mapping.alerts = parse_alerts(xml);
+  g_mapping.processes = parse_processes(xml);
+  g_mapping.valid = tr32_has_fields || tg43_has_fields || tgc0_has_fields || !g_mapping.products.empty() ||
+                    !g_mapping.status_values.empty() || !g_mapping.alerts.empty() || !g_mapping.processes.empty();
   g_mapping_loaded = true;
 
   if (!tr32_found || g_mapping.tr32.empty()) {
@@ -768,6 +1001,11 @@ bool load_mapping_from_string(const std::string &xml) {
   if (!tgc0_found || g_mapping.tgc0.empty()) {
     ESP_LOGW(TAG, "XML Mapping enthält keine Felder für @TG:C0");
   }
+  ESP_LOGCONFIG(TAG, "XML App-Mapping: products=%u states=%u alerts=%u processes=%u",
+                static_cast<unsigned>(g_mapping.products.size()),
+                static_cast<unsigned>(g_mapping.status_values.size()),
+                static_cast<unsigned>(g_mapping.alerts.size()),
+                static_cast<unsigned>(g_mapping.processes.size()));
   return g_mapping.valid;
 }
 
@@ -797,6 +1035,83 @@ bool parse_TGC0(const std::vector<uint8_t> &decoded, Stats &out) {
   return parse_payload(decoded, g_mapping.tgc0, out, "@TG:C0", TGC0_MIN_FRAME_LENGTH);
 }
 
+bool decode_status_payload(const std::vector<uint8_t> &payload, const std::string &source,
+                           std::vector<JuraDecodedField> &out) {
+  if (!g_mapping_loaded) {
+    ESP_LOGW(TAG, "XML Mapping wurde nicht geladen");
+    return false;
+  }
+  const std::size_t before = out.size();
+  out.push_back(make_text_field("raw", source.empty() ? "payload" : source, "Raw payload", format_hex_string(payload),
+                                format_ascii_string(payload)));
+
+  bool alert_like_frame = !payload.empty() &&
+                          (payload[0] == 0x0E || payload[0] == 0xE1 || payload[0] == 0xE2 ||
+                           payload[0] == 0xE3 || payload[0] == 0xE4);
+
+  for (std::size_t index = 0; index < payload.size(); ++index) {
+    const uint8_t byte = payload[index];
+    std::string key = "byte_" + std::to_string(index);
+    std::string raw = byte_hex(byte);
+    bool matched = false;
+
+    if (!alert_like_frame || index == 0) {
+      for (const auto &state : g_mapping.status_values) {
+        if (state.value == byte) {
+          out.push_back(make_numeric_field("status", key, "Status " + key, raw, state.name,
+                                           static_cast<float>(byte)));
+          matched = true;
+        }
+      }
+
+      for (const auto &product : g_mapping.products) {
+        if (product.code == 0) {
+          continue;
+        }
+        if (product.code == byte) {
+          out.push_back(make_numeric_field("product_candidate", key, "Product " + key, raw, product.name,
+                                           static_cast<float>(byte)));
+          matched = true;
+        }
+      }
+    }
+
+    if (!matched) {
+      out.push_back(make_numeric_field("unknown", key, "Unknown " + key, raw, raw, static_cast<float>(byte)));
+    }
+  }
+
+  if (!g_mapping.alerts.empty() && alert_like_frame && payload.size() > 1) {
+    for (const auto &alert : g_mapping.alerts) {
+      std::size_t byte_index = 1U + static_cast<std::size_t>(alert.bit / 8U);
+      uint8_t bit_mask = static_cast<uint8_t>(1U << (alert.bit % 8U));
+      if (byte_index >= payload.size()) {
+        continue;
+      }
+      bool active = (payload[byte_index] & bit_mask) != 0;
+      if (!active) {
+        continue;
+      }
+      std::string raw = "byte " + std::to_string(byte_index) + " bit " + std::to_string(alert.bit) +
+                        " mask " + byte_hex(bit_mask);
+      std::string key = "bit_" + std::to_string(alert.bit);
+      std::string text = alert.name;
+      if (!alert.process.empty()) {
+        text.append(" -> ");
+        text.append(alert.process);
+      }
+      out.push_back(make_numeric_field("alert", key, "Alert " + key, raw, text, static_cast<float>(alert.bit)));
+    }
+  }
+
+  return out.size() > before;
+}
+
+bool decode_status_response(const std::string &response, const std::string &parser_branch,
+                            std::vector<JuraDecodedField> &out) {
+  std::vector<uint8_t> payload(response.begin(), response.end());
+  return decode_status_payload(payload, parser_branch, out);
+}
+
 }  // namespace jutta_component
 }  // namespace esphome
-

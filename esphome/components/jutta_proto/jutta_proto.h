@@ -251,6 +251,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void publish_machine_status_(const std::string &status);
   void publish_machine_online_(bool online);
   void publish_machine_ready_(bool ready);
+  bool decode_and_publish_status_(const std::string &response, const char *parser_branch);
+  std::string format_decoded_status_(const std::vector<JuraDecodedField> &fields) const;
   void process_machine_data_query();
   void publish_machine_data_(const std::string &response);
   void process_xml_polling();
@@ -386,6 +388,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool settings_entities_created_{false};
   bool errors_entities_created_{false};
   uint32_t last_error_code_{0};
+  std::vector<JuraDecodedField> last_decoded_fields_{};
 };
 
 class StartBrewAction : public esphome::Action<> {

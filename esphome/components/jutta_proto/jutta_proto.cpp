@@ -222,6 +222,125 @@ std::string collapse_whitespace(std::string value) {
   return result;
 }
 
+bool status_field_is_publishable(const JuraDecodedField &field) {
+  return field.category == "status" || field.category == "alert";
+}
+
+std::string xml_table_for_decoded_category(const std::string &category) {
+  if (category == "status") {
+    return "PROGRESS_STATE_INTAKE";
+  }
+  if (category == "alert") {
+    return "ALERTS";
+  }
+  if (category == "product_candidate") {
+    return "PRODUCTS";
+  }
+  if (category == "process") {
+    return "PROCESSES";
+  }
+  return "unknown";
+}
+
+void append_unique(std::vector<std::string> &values, const std::string &value) {
+  if (value.empty()) {
+    return;
+  }
+  if (std::find(values.begin(), values.end(), value) == values.end()) {
+    values.push_back(value);
+  }
+}
+
+std::string join_values(const std::vector<std::string> &values, const char *separator) {
+  std::string out;
+  for (const auto &value : values) {
+    if (!out.empty()) {
+      out.append(separator);
+    }
+    out.append(value);
+  }
+  return out;
+}
+
+std::string truncate_for_log(const std::string &value, size_t limit = 240) {
+  if (value.size() <= limit) {
+    return value;
+  }
+  return value.substr(0, limit - 3) + "...";
+}
+
+std::string infer_response_command(const std::string &response, const std::string &active_command) {
+  if (!active_command.empty()) {
+    return active_command;
+  }
+  if (response.empty()) {
+    return "unknown";
+  }
+  if (response[0] == '@') {
+    auto end = response.find_first_of(":\r\n ");
+    if (end != std::string::npos && end > 1) {
+      return response.substr(0, end);
+    }
+  }
+  if (response.size() >= 3 && std::isalpha(static_cast<unsigned char>(response[0])) != 0 &&
+      std::isalpha(static_cast<unsigned char>(response[1])) != 0 && response[2] == ':') {
+    return response.substr(0, 2);
+  }
+  return "status_hex";
+}
+
+std::string infer_response_family(const std::string &command) {
+  if (command.empty() || command == "unknown") {
+    return "unknown";
+  }
+  if (command == "status_hex") {
+    return "status_hex";
+  }
+  if (command[0] == '@' && command.size() >= 3) {
+    return command.substr(1, 2);
+  }
+  if (command.size() >= 2) {
+    return command.substr(0, 2);
+  }
+  return command;
+}
+
+std::string format_decoded_field_trace(const std::vector<JuraDecodedField> &fields, std::vector<std::string> &tables,
+                                       bool &has_publishable) {
+  std::vector<std::string> details;
+  has_publishable = false;
+  for (const auto &field : fields) {
+    if (field.category == "raw" || field.category == "unknown") {
+      continue;
+    }
+    std::string table = xml_table_for_decoded_category(field.category);
+    append_unique(tables, table);
+    if (status_field_is_publishable(field)) {
+      has_publishable = true;
+    }
+
+    std::string detail = table;
+    detail.push_back(':');
+    detail.append(field.key.empty() ? "?" : field.key);
+    detail.append(" raw=");
+    detail.append(field.raw_value.empty() ? "?" : field.raw_value);
+    detail.append(" text='");
+    detail.append(sanitize_text_for_api(field.decoded_text));
+    detail.push_back('\'');
+    if (field.category == "product_candidate") {
+      detail.append(" publish=no reason=product_candidate_unverified");
+    } else {
+      detail.append(status_field_is_publishable(field) ? " publish=yes" : " publish=no");
+    }
+    details.push_back(detail);
+  }
+  if (details.empty()) {
+    append_unique(tables, "unknown");
+    return "none";
+  }
+  return truncate_for_log(join_values(details, " | "), 700);
+}
+
 std::string to_pascal_case(const std::string &value) {
   std::string result;
   result.reserve(value.size());
@@ -788,6 +907,9 @@ void JuraComponent::handle_decoded_response_(const std::string &response, const 
   }
 
   if (parser_branch != nullptr && std::string(parser_branch) == "db_frame") {
+    if (this->decode_and_publish_status_(response, parser_branch)) {
+      return;
+    }
     std::string safe = sanitize_text_for_api(response);
     if (safe.find("\\x") == std::string::npos && !safe.empty()) {
       this->publish_machine_status_(safe);
@@ -795,9 +917,118 @@ void JuraComponent::handle_decoded_response_(const std::string &response, const 
   }
 }
 
+bool JuraComponent::decode_and_publish_status_(const std::string &response, const char *parser_branch) {
+  if (response.find('<') != std::string::npos || response.find('>') != std::string::npos) {
+    return false;
+  }
+  std::string active_command_raw = this->xml_last_command_;
+  std::string active_command = active_command_raw;
+  std::transform(active_command.begin(), active_command.end(), active_command.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (active_command == "@tr:32" || active_command == "@tg:43" || active_command == "@tg:c0") {
+    return false;
+  }
+  std::string branch = parser_branch != nullptr ? parser_branch : "unknown";
+  std::string command = infer_response_command(response, active_command_raw);
+  std::string family = infer_response_family(command);
+  std::string payload_hex = format_hex_string(response);
+  std::string raw_rx = sanitize_text_for_api(response);
+
+  if (!this->ensure_xml_mapping_loaded_()) {
+    ESP_LOGD(TAG,
+             "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
+             "xml_tables=unknown fields=none final='' fallback=xml_mapping_unavailable",
+             raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str());
+    return false;
+  }
+
+  std::vector<JuraDecodedField> fields;
+  if (!decode_status_response(response, branch, fields) || fields.empty()) {
+    ESP_LOGD(TAG,
+             "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
+             "xml_tables=unknown fields=none final='' fallback=decoder_returned_no_fields",
+             raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str());
+    return false;
+  }
+  this->last_decoded_fields_ = fields;
+  std::string summary = this->format_decoded_status_(fields);
+  if (summary.empty()) {
+    ESP_LOGD(TAG,
+             "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
+             "xml_tables=unknown fields=none final='' fallback=empty_summary",
+             raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str());
+    return false;
+  }
+  std::vector<std::string> tables;
+  bool has_publishable = false;
+  std::string field_trace = format_decoded_field_trace(fields, tables, has_publishable);
+  std::string table_trace = tables.empty() ? "unknown" : join_values(tables, ",");
+  std::string fallback_reason = has_publishable ? "none" : "no_verified_status_or_alert_match_raw_used";
+  ESP_LOGD(TAG,
+           "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
+           "xml_tables=%s fields=%s final='%s' fallback=%s",
+           raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str(),
+           table_trace.c_str(), field_trace.c_str(), sanitize_text_for_api(summary).c_str(), fallback_reason.c_str());
+  this->publish_machine_status_(summary);
+  this->publish_last_command_result_("decoded_status");
+  return true;
+}
+
+std::string JuraComponent::format_decoded_status_(const std::vector<JuraDecodedField> &fields) const {
+  std::vector<std::string> known;
+  std::string raw;
+  for (const auto &field : fields) {
+    if (field.category == "raw") {
+      raw = field.raw_value;
+      continue;
+    }
+    if (field.category == "unknown" || field.category == "product_candidate") {
+      continue;
+    }
+    std::string text = field.decoded_text.empty() ? field.raw_value : field.decoded_text;
+    if (text.empty()) {
+      continue;
+    }
+    std::string item;
+    if (field.category == "status") {
+      item = "Status: ";
+    } else if (field.category == "alert") {
+      item = "Alert: ";
+    } else if (field.category == "product") {
+      item = "Product: ";
+    } else {
+      item = field.category + ": ";
+    }
+    item.append(text);
+    if (!field.raw_value.empty()) {
+      item.append(" (");
+      item.append(field.raw_value);
+      item.push_back(')');
+    }
+    known.push_back(item);
+  }
+
+  if (known.empty()) {
+    return raw.empty() ? std::string{} : std::string("Raw: ") + raw;
+  }
+
+  std::string summary;
+  for (const auto &item : known) {
+    if (!summary.empty()) {
+      summary.append("; ");
+    }
+    if (summary.size() + item.size() > 240) {
+      summary.append("...");
+      break;
+    }
+    summary.append(item);
+  }
+  return sanitize_text_for_api(summary);
+}
+
 void JuraComponent::publish_raw_rx_(const std::string &response, const char *parser_branch) {
   std::string safe = sanitize_text_for_api(response);
-  ESP_LOGD(TAG, "RX decoded branch=%s value='%s'", parser_branch != nullptr ? parser_branch : "unknown",
+  ESP_LOGV(TAG, "RX decoded branch=%s value='%s'", parser_branch != nullptr ? parser_branch : "unknown",
            safe.c_str());
   if (this->raw_rx_sensor_ != nullptr) {
     this->raw_rx_sensor_->publish_state(safe);
@@ -806,7 +1037,7 @@ void JuraComponent::publish_raw_rx_(const std::string &response, const char *par
 
 void JuraComponent::publish_last_command_result_(const std::string &result) {
   std::string safe = sanitize_text_for_api(result);
-  ESP_LOGD(TAG, "Command result: %s", safe.c_str());
+  ESP_LOGV(TAG, "Command result: %s", safe.c_str());
   if (this->last_command_result_sensor_ != nullptr) {
     this->last_command_result_sensor_->publish_state(safe);
   }
@@ -820,7 +1051,7 @@ void JuraComponent::publish_machine_type_() {
 
 void JuraComponent::publish_machine_status_(const std::string &status) {
   std::string safe = sanitize_text_for_api(status);
-  ESP_LOGD(TAG, "Machine status: %s", safe.c_str());
+  ESP_LOGV(TAG, "Machine status: %s", safe.c_str());
   if (this->machine_status_sensor_ != nullptr) {
     this->machine_status_sensor_->publish_state(safe);
   }
@@ -1636,9 +1867,6 @@ void JuraComponent::ensure_xml_sensors_created_() {
 }
 
 bool JuraComponent::ensure_xml_mapping_loaded_() {
-  if (!this->enable_xml_poll_) {
-    return false;
-  }
   if (this->xml_mapping_loaded_) {
     return this->xml_mapping_.valid;
   }
