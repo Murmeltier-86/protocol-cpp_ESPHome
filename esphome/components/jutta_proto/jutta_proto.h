@@ -277,14 +277,23 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void start_new_xml_cycle_(uint32_t now);
   enum class XmlPollState {
     IDLE,
+    TS_LOCK,
+    WAIT_TS_LOCK,
+    TR32_PAGE,
+    WAIT_TR32_PAGE,
+    TG43,
+    WAIT_TG43,
+    TGC0,
+    WAIT_TGC0,
+    TS_UNLOCK,
+    WAIT_TS_UNLOCK,
+    DONE,
     SEND_TR32,
     WAIT_TR32,
     PARSE_TR32,
     SEND_TG43,
-    WAIT_TG43,
     PARSE_TG43,
     SEND_TGC0,
-    WAIT_TGC0,
     PARSE_TGC0,
     SLEEP
   };
@@ -313,7 +322,19 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const char *xml_state_command_(XmlPollState state) const;
   const char *xml_state_label_(XmlPollState state) const;
   void transition_to_state_(XmlPollState state, uint32_t now, uint32_t delay_ms = 0);
-  bool send_xml_command_(const char *command, XmlPollState wait_state, uint32_t now);
+  bool send_stats_ascii_command_(const std::string &command, XmlPollState wait_state, uint32_t now);
+  bool read_stats_line_(std::string &line);
+  bool handle_stats_line_(const std::string &line, uint32_t now);
+  bool parse_tr32_page_line_(const std::string &line, uint8_t expected_page);
+  bool parse_tg43_line_(const std::string &line);
+  bool parse_tgc0_line_(const std::string &line);
+  bool extract_stats_hex_payload_(const std::string &line, const std::string &prefix, std::string &payload) const;
+  bool parse_hex_bytes_(const std::string &hex, std::vector<uint8_t> &bytes, std::string &reason) const;
+  bool stage_xml_stat_value_(const std::string &name, const std::string &label, double value,
+                             XmlSensorKind kind, const char *command_label);
+  std::string product_counter_field_name_(uint8_t product_index, std::string &label) const;
+  std::string raw_product_counter_field_name_(uint8_t page, uint8_t slot) const;
+  void finish_stats_cycle_(uint32_t now, const char *reason);
   void handle_xml_timeout_(XmlPollState next_state, const char *label, uint32_t now);
   void poll_settings_once_();
   void poll_settings_refresh_();
@@ -373,6 +394,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   DbTransactionOwner db_transaction_owner_{DbTransactionOwner::NONE};
   std::string xml_transaction_cmd_{};
   std::string xml_last_command_{};
+  std::string xml_rx_line_{};
+  uint8_t xml_tr32_page_{0};
+  bool xml_stats_locked_{false};
+  bool xml_cycle_failed_{false};
   std::vector<uint8_t> xml_rx_buffer_{};
   bool xml_mapping_logged_{false};
   bool xml_mapping_loaded_{false};
