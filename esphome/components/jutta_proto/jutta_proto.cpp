@@ -2928,7 +2928,7 @@ bool JuraComponent::read_stats_line_(std::string &line) {
   }
 
   std::vector<uint8_t> buffer;
-  if (!this->coffee_maker_->connection->read_decoded_unsafe(buffer) || buffer.empty()) {
+  if (!this->coffee_maker_->connection->read_decoded(buffer) || buffer.empty()) {
     return false;
   }
 
