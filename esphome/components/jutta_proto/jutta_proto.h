@@ -221,6 +221,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_log_decoded_tx(bool enabled) { this->log_decoded_tx_ = enabled; }
   void set_log_encoded_uart(bool enabled) { this->log_encoded_uart_ = enabled; }
   void set_enable_xml_poll(bool enabled) { this->enable_xml_poll_ = enabled; }
+  void set_xml_publish_unstable(bool enabled) { this->xml_publish_unstable_ = enabled; }
+  void set_xml_counter_max(uint32_t max_value) { this->xml_counter_max_ = max_value; }
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
   void set_xml_mapping_source(const char *data, size_t length) {
     this->xml_mapping_data_ = data;
@@ -288,6 +290,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool validate_xml_frame_(XmlPollState state, const std::vector<uint8_t> &decoded, bool had_crlf,
                            size_t decoded_len, std::vector<uint8_t> &payload, size_t &expected_min_len,
                            uint8_t &head0) const;
+  bool validate_counter_frame_(XmlPollState state, const XmlCommandMapping &mapping, const std::vector<uint8_t> &frame,
+                               const char *command_label, std::string &reason) const;
+  bool counter_frame_is_stable_(XmlPollState state, const std::vector<uint8_t> &frame, const char *command_label,
+                                std::string &reason);
   bool stage_counter_frame_(const XmlCommandMapping &mapping, const std::vector<uint8_t> &frame,
                             const char *command_label);
   bool process_valid_tgc0_frame_(const std::vector<uint8_t> &frame, bool stage_values);
@@ -342,6 +348,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t machine_xml_timestamp_{0};
 
   bool enable_xml_poll_{false};
+  bool xml_publish_unstable_{false};
+  uint32_t xml_counter_max_{20000};
   uint32_t xml_poll_interval_ms_{30000};
   std::string xml_mapping_path_{"embedded"};
   const char *xml_mapping_data_{nullptr};
@@ -371,6 +379,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::array<uint8_t, XML_COMMAND_COUNT> xml_retry_count_{{0, 0, 0}};
   std::array<bool, XML_COMMAND_COUNT> xml_invalid_len_seen_{{false, false, false}};
   std::array<size_t, XML_COMMAND_COUNT> xml_last_invalid_len_{{0, 0, 0}};
+  std::array<std::vector<uint8_t>, XML_COMMAND_COUNT> xml_counter_candidate_frame_{};
+  std::array<uint8_t, XML_COMMAND_COUNT> xml_counter_candidate_count_{{0, 0, 0}};
   uint8_t xml_tgc0_timeout_streak_{0};
   bool xml_skip_tgc0_{false};
   void prepare_tgc0_request_();

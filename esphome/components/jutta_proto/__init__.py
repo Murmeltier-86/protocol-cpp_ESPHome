@@ -33,6 +33,8 @@ CONF_MACHINE_READY = "machine_ready"
 CONF_ENABLE_XML_POLL = "enable_xml_poll"
 CONF_XML_MAPPING_PATH = "xml_mapping_path"
 CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
+CONF_XML_PUBLISH_UNSTABLE = "xml_publish_unstable"
+CONF_XML_COUNTER_MAX = "xml_counter_max"
 CONF_XML_SENSORS = "xml_sensors"
 CONF_FIELD = "field"
 CONF_LOG_DECODED_TX = "log_decoded_tx"
@@ -123,6 +125,8 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=30000): cv.All(
                 cv.positive_int, cv.Range(min=25000)
             ),
+            cv.Optional(CONF_XML_PUBLISH_UNSTABLE, default=False): cv.boolean,
+            cv.Optional(CONF_XML_COUNTER_MAX, default=20000): cv.positive_int,
             cv.Optional(CONF_XML_SENSORS, default=[]): cv.ensure_list(XML_SENSOR_SCHEMA),
             cv.Optional(CONF_LOG_DECODED_TX, default=True): cv.boolean,
             cv.Optional(CONF_LOG_ENCODED_UART, default=False): cv.boolean,
@@ -278,6 +282,8 @@ async def to_code(config):
     cg.add(var.set_log_decoded_tx(config[CONF_LOG_DECODED_TX]))
     cg.add(var.set_log_encoded_uart(config[CONF_LOG_ENCODED_UART]))
     cg.add(var.set_enable_xml_poll(config[CONF_ENABLE_XML_POLL]))
+    cg.add(var.set_xml_publish_unstable(config[CONF_XML_PUBLISH_UNSTABLE]))
+    cg.add(var.set_xml_counter_max(config[CONF_XML_COUNTER_MAX]))
     mapping_path = config[CONF_XML_MAPPING_PATH]
     if mapping_path == "embedded":
         resolved_path = os.path.join(COMPONENT_DIR, "jura_mapping_embed.xml")
