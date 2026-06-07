@@ -215,7 +215,7 @@ bool JuttaConnection::read_decoded_unsafe(std::vector<uint8_t>& data) const {
     size_t frames_read = read_encoded_unsafe(dataBuffer);
     if (frames_read == 0) {
         if (any_data) {
-            ESP_LOGD(TAG, "Read decoded payload from buffer (%zu byte%s).", data.size(), data.size() == 1 ? "" : "s");
+            ESP_LOGV(TAG, "Read decoded payload from buffer (%zu byte%s).", data.size(), data.size() == 1 ? "" : "s");
             return true;
         }
         ESP_LOGVV(TAG, "No complete encoded frames available to decode yet.");
@@ -234,14 +234,14 @@ bool JuttaConnection::read_decoded_unsafe(std::vector<uint8_t>& data) const {
         ++index;
     }
     std::string decoded = vec_to_string(newly_decoded);
-    ESP_LOGD(TAG, "Read decoded payload (%zu byte%s): '%s' (hex %s)", dataBuffer.size(),
+    ESP_LOGV(TAG, "Read decoded payload (%zu byte%s): '%s' (hex %s)", dataBuffer.size(),
              dataBuffer.size() == 1 ? "" : "s", format_printable(decoded).c_str(), format_hex(newly_decoded).c_str());
     return true;
 }
 
 bool JuttaConnection::write_decoded_unsafe(const uint8_t& byte) const {
     if (this->log_decoded_tx_) {
-        ESP_LOGD(TAG, "TX decoded byte: '%s' (%s)", format_printable(byte).c_str(), format_hex(byte).c_str());
+        ESP_LOGV(TAG, "TX decoded byte: '%s' (%s)", format_printable(byte).c_str(), format_hex(byte).c_str());
     }
     auto encoded = encode(byte);
     if (this->log_encoded_uart_) {
@@ -260,7 +260,7 @@ bool JuttaConnection::write_decoded_unsafe(const std::vector<uint8_t>& data) con
     // So we use this until it gets better:
     if (!data.empty()) {
         if (this->log_decoded_tx_) {
-            ESP_LOGD(TAG, "Queueing %zu decoded byte%s for transmission: '%s' (hex %s)", data.size(),
+            ESP_LOGV(TAG, "Queueing %zu decoded byte%s for transmission: '%s' (hex %s)", data.size(),
                      data.size() == 1 ? "" : "s", format_printable(data).c_str(), format_hex(data).c_str());
         }
     } else {
@@ -526,7 +526,7 @@ void JuttaConnection::reinject_decoded_front(const std::string& data) const {
 
 bool JuttaConnection::read_line_until(std::string& line) {
     if (try_extract_line(this->response_line_buffer_, line)) {
-        ESP_LOGD(TAG, "Polled buffered response line: '%s'", format_printable(line).c_str());
+        ESP_LOGV(TAG, "Polled buffered response line: '%s'", format_printable(line).c_str());
         this->emit_response_(line, "line_buffer");
         return true;
     }
@@ -538,12 +538,12 @@ bool JuttaConnection::read_line_until(std::string& line) {
 
     std::string incoming = vec_to_string(buffer);
     this->response_line_buffer_.append(incoming);
-    ESP_LOGD(TAG, "Received chunk while polling for response line: '%s' (hex %s) -> buffer '%s'",
+    ESP_LOGV(TAG, "Received chunk while polling for response line: '%s' (hex %s) -> buffer '%s'",
              format_printable(incoming).c_str(), format_hex(buffer).c_str(),
              format_printable(this->response_line_buffer_).c_str());
 
     if (try_extract_line(this->response_line_buffer_, line)) {
-        ESP_LOGD(TAG, "Polled response line: '%s'", format_printable(line).c_str());
+        ESP_LOGV(TAG, "Polled response line: '%s'", format_printable(line).c_str());
         this->emit_response_(line, "line");
         return true;
     }
