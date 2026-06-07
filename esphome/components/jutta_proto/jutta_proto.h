@@ -330,6 +330,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool send_stats_fire_and_forget_(const std::string &command, XmlPollState next_state, uint32_t now,
                                    uint32_t settle_delay_ms);
   bool read_stats_line_(std::string &line);
+  bool finish_stats_rx_capture_(std::string &line, uint32_t now);
   bool handle_stats_line_(const std::string &line, uint32_t now);
   bool decode_stats_inner_transport_line_(const std::string &raw_line, std::string &decoded_line);
   bool handle_stats_binary_response_(uint32_t now);
@@ -409,6 +410,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string xml_transaction_cmd_{};
   std::string xml_last_command_{};
   std::string xml_rx_line_{};
+  uint32_t xml_stats_capture_start_ms_{0};
   std::string xml_stats_reject_reason_{};
   bool xml_stats_rx_logged_{false};
   bool xml_stats_binary_response_{false};

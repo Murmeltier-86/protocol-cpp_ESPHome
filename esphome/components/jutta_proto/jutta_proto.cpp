@@ -32,6 +32,7 @@ constexpr std::size_t MACHINE_XML_MIN_LENGTH = 32;
 const char *const MACHINE_XML_PRIMARY_COMMAND = "@hr:00\r\n";
 const char *const MACHINE_XML_FALLBACK_COMMAND = "@hr:05\r\n";
 constexpr uint32_t kXmlRxTimeoutMs = 1000;
+constexpr uint32_t kStatsRxCaptureWindowMs = 1500;
 constexpr uint32_t kInterCmdGapMs = 250;
 constexpr uint32_t kXmlQuietMs = 120;
 constexpr uint32_t kCycleSleepMs = 2000;
@@ -139,8 +140,46 @@ bool extract_crlf_line(std::string &buffer, std::string &line) {
   return true;
 }
 
+size_t first_raw_crlf_len(const std::string &buffer) {
+  auto terminator = buffer.find("\r\n");
+  return terminator == std::string::npos ? 0 : terminator;
+}
+
 bool is_inner_transport_start(uint8_t byte) {
   return byte == '&' || byte == '*' || byte == '+';
+}
+
+std::vector<std::string> split_inner_transport_frames(const std::string &buffer) {
+  std::vector<std::string> frames;
+  size_t frame_start = 0;
+  bool escaped = false;
+  for (size_t i = 0; i < buffer.size(); ++i) {
+    uint8_t byte = static_cast<uint8_t>(buffer[i]);
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (byte == 0x1B) {
+      escaped = true;
+      continue;
+    }
+    if (i > frame_start && is_inner_transport_start(byte)) {
+      frames.push_back(buffer.substr(frame_start, i - frame_start));
+      frame_start = i;
+      continue;
+    }
+    if (byte == '\r' && i + 1 < buffer.size() && static_cast<uint8_t>(buffer[i + 1]) == '\n') {
+      if (i > frame_start) {
+        frames.push_back(buffer.substr(frame_start, i - frame_start));
+      }
+      frame_start = i + 2;
+      ++i;
+    }
+  }
+  if (frame_start < buffer.size()) {
+    frames.push_back(buffer.substr(frame_start));
+  }
+  return frames;
 }
 
 bool is_stats_ascii_response(const std::string &line) {
@@ -2556,6 +2595,7 @@ void JuraComponent::reset_xml_poll_state_() {
   this->clear_db_transaction_(DbTransactionOwner::NONE);
   this->xml_last_command_.clear();
   this->xml_rx_line_.clear();
+  this->xml_stats_capture_start_ms_ = 0;
   this->xml_stats_reject_reason_.clear();
   this->xml_stats_rx_logged_ = false;
   this->xml_stats_binary_response_ = false;
@@ -2725,7 +2765,8 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         this->xml_inflight_ = false;
         this->xml_deadline_ms_ = 0;
         this->xml_rx_line_.clear();
-        connection->reset_response_line_buffer();
+        this->xml_stats_capture_start_ms_ = 0;
+              connection->reset_response_line_buffer();
         connection->reset_db_rx_buffer();
         connection->drain_serial_input_nonblocking();
         this->advance_after_stats_timeout_(now);
@@ -2892,6 +2933,7 @@ bool JuraComponent::send_stats_ascii_command_(const std::string &command, XmlPol
   connection->reset_db_rx_buffer();
   this->xml_rx_buffer_.clear();
   this->xml_rx_line_.clear();
+  this->xml_stats_capture_start_ms_ = 0;
   this->xml_stats_rx_logged_ = false;
   this->xml_stats_binary_response_ = false;
   this->xml_stats_reject_reason_.clear();
@@ -2941,6 +2983,7 @@ bool JuraComponent::send_stats_fire_and_forget_(const std::string &command, XmlP
   connection->reset_db_rx_buffer();
   this->xml_rx_line_.clear();
   this->xml_rx_buffer_.clear();
+  this->xml_stats_capture_start_ms_ = 0;
   this->xml_stats_rx_logged_ = false;
   this->xml_stats_binary_response_ = false;
   this->xml_stats_reject_reason_.clear();
@@ -2967,6 +3010,34 @@ bool JuraComponent::read_stats_line_(std::string &line) {
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     return false;
   }
+  uint32_t now = esphome::millis();
+  bool starts_inner_transport = !this->xml_rx_line_.empty() && this->xml_decode_inner_transport_ &&
+                                is_inner_transport_start(static_cast<uint8_t>(this->xml_rx_line_.front()));
+  if (starts_inner_transport) {
+    if (this->xml_stats_capture_start_ms_ == 0) {
+      this->xml_stats_capture_start_ms_ = now;
+      this->xml_deadline_ms_ = now + kStatsRxCaptureWindowMs + kInterCmdGapMs;
+    }
+    if (!time_reached(now, this->xml_stats_capture_start_ms_ + kStatsRxCaptureWindowMs)) {
+      std::vector<uint8_t> buffer;
+      if (this->coffee_maker_->connection->read_decoded(buffer) && !buffer.empty()) {
+        std::string incoming(buffer.begin(), buffer.end());
+        this->xml_rx_line_.append(incoming);
+        ESP_LOGV(TAG, "stats_rx_chunk cmd=%s len=%u hex=\"%s\"", this->xml_last_command_.c_str(),
+                 static_cast<unsigned>(incoming.size()), compact_hex_string(incoming).c_str());
+      }
+      return false;
+    }
+    std::vector<uint8_t> buffer;
+    if (this->coffee_maker_->connection->read_decoded(buffer) && !buffer.empty()) {
+      std::string incoming(buffer.begin(), buffer.end());
+      this->xml_rx_line_.append(incoming);
+      ESP_LOGV(TAG, "stats_rx_chunk cmd=%s len=%u hex=\"%s\"", this->xml_last_command_.c_str(),
+               static_cast<unsigned>(incoming.size()), compact_hex_string(incoming).c_str());
+    }
+    return this->finish_stats_rx_capture_(line, now);
+  }
+
   if (extract_crlf_line(this->xml_rx_line_, line)) {
     if (!this->xml_stats_rx_logged_ || !this->xml_debug_compact_) {
       uint8_t first = line.empty() ? 0 : static_cast<uint8_t>(line.front());
@@ -2993,6 +3064,19 @@ bool JuraComponent::read_stats_line_(std::string &line) {
   ESP_LOGV(TAG, "stats_rx_chunk cmd=%s len=%u hex=\"%s\"", this->xml_last_command_.c_str(),
            static_cast<unsigned>(incoming.size()), compact_hex_string(incoming).c_str());
 
+  starts_inner_transport = !this->xml_rx_line_.empty() && this->xml_decode_inner_transport_ &&
+                           is_inner_transport_start(static_cast<uint8_t>(this->xml_rx_line_.front()));
+  if (starts_inner_transport) {
+    if (this->xml_stats_capture_start_ms_ == 0) {
+      this->xml_stats_capture_start_ms_ = now;
+      this->xml_deadline_ms_ = now + kStatsRxCaptureWindowMs + kInterCmdGapMs;
+    }
+    if (!time_reached(now, this->xml_stats_capture_start_ms_ + kStatsRxCaptureWindowMs)) {
+      return false;
+    }
+    return this->finish_stats_rx_capture_(line, now);
+  }
+
   if (extract_crlf_line(this->xml_rx_line_, line)) {
     if (!this->xml_stats_rx_logged_ || !this->xml_debug_compact_) {
       uint8_t first = line.empty() ? 0 : static_cast<uint8_t>(line.front());
@@ -3009,8 +3093,6 @@ bool JuraComponent::read_stats_line_(std::string &line) {
     return true;
   }
 
-  bool starts_inner_transport = !this->xml_rx_line_.empty() && this->xml_decode_inner_transport_ &&
-                                is_inner_transport_start(static_cast<uint8_t>(this->xml_rx_line_.front()));
   if (!this->xml_rx_line_.empty() && !starts_inner_transport &&
       (has_binary_bytes(this->xml_rx_line_) || this->xml_rx_line_.front() != '@')) {
     if (!this->xml_stats_rx_logged_ || !this->xml_debug_compact_) {
@@ -3024,6 +3106,63 @@ bool JuraComponent::read_stats_line_(std::string &line) {
     this->xml_stats_reject_reason_ = "unexpected_binary";
     this->xml_stats_binary_response_ = true;
   }
+  return false;
+}
+
+bool JuraComponent::finish_stats_rx_capture_(std::string &line, uint32_t now) {
+  line.clear();
+  uint32_t duration = this->xml_stats_capture_start_ms_ == 0 ? 0 : now - this->xml_stats_capture_start_ms_;
+  size_t line_based_len = first_raw_crlf_len(this->xml_rx_line_);
+  ESP_LOGD(TAG, "stats_rx_capture cmd=%s bytes=%u duration_ms=%u line_based_len=%u hex=\"%s\"",
+           this->xml_last_command_.c_str(), static_cast<unsigned>(this->xml_rx_line_.size()),
+           static_cast<unsigned>(duration), static_cast<unsigned>(line_based_len),
+           compact_hex_string(this->xml_rx_line_, this->xml_rx_line_.size()).c_str());
+
+  std::vector<std::string> frames = split_inner_transport_frames(this->xml_rx_line_);
+  size_t frame0_len = frames.size() > 0 ? frames[0].size() : 0;
+  size_t frame1_len = frames.size() > 1 ? frames[1].size() : 0;
+  size_t frame2_len = frames.size() > 2 ? frames[2].size() : 0;
+  ESP_LOGD(TAG, "stats_rx_frame_split cmd=%s frames=%u frame0_len=%u frame1_len=%u frame2_len=%u",
+           this->xml_last_command_.c_str(), static_cast<unsigned>(frames.size()), static_cast<unsigned>(frame0_len),
+           static_cast<unsigned>(frame1_len), static_cast<unsigned>(frame2_len));
+
+  bool saw_inner_frame = false;
+  for (size_t i = 0; i < frames.size(); ++i) {
+    const std::string &frame = frames[i];
+    if (frame.empty()) {
+      continue;
+    }
+    ESP_LOGD(TAG, "stats_rx_frame cmd=%s index=%u len=%u first=0x%02X hex=\"%s\"",
+             this->xml_last_command_.c_str(), static_cast<unsigned>(i), static_cast<unsigned>(frame.size()),
+             static_cast<unsigned>(static_cast<uint8_t>(frame.front())),
+             compact_hex_string(frame, frame.size()).c_str());
+    if (!is_inner_transport_start(static_cast<uint8_t>(frame.front()))) {
+      continue;
+    }
+    saw_inner_frame = true;
+    std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(frame);
+    for (const auto &candidate : candidates) {
+      bool plausible_tr = payload_starts_with_tr(candidate.payload) && candidate.payload.size() >= 16;
+      bool plausible_tg = payload_starts_with_tg(candidate.payload) && candidate.payload.size() >= 8;
+      ESP_LOGD(TAG, "stats_rx_capture_candidate cmd=%s frame=%u table=%s len=%u plausible_tr=%s plausible_tg=%s "
+                    "printable=%u%% first_ascii=\"%s\"",
+               this->xml_last_command_.c_str(), static_cast<unsigned>(i), candidate.table_name,
+               static_cast<unsigned>(candidate.payload.size()), YESNO(plausible_tr), YESNO(plausible_tg),
+               static_cast<unsigned>(candidate.printable_ratio), printable_preview(candidate.payload, 32).c_str());
+    }
+
+    std::string decoded_line;
+    if (this->decode_stats_inner_transport_line_(frame, decoded_line)) {
+      line = decoded_line;
+      this->xml_rx_line_.clear();
+      this->xml_stats_capture_start_ms_ = 0;
+      return true;
+    }
+  }
+
+  this->publish_raw_rx_(this->xml_rx_line_, saw_inner_frame ? "stats_inner_transport_capture" : "stats_binary_capture");
+  this->xml_stats_reject_reason_ = saw_inner_frame ? "inner_decode_not_ascii" : "unexpected_binary";
+  this->xml_stats_binary_response_ = true;
   return false;
 }
 
@@ -3227,6 +3366,7 @@ bool JuraComponent::handle_stats_binary_response_(uint32_t now) {
   this->xml_inflight_ = false;
   this->xml_deadline_ms_ = 0;
   this->xml_rx_line_.clear();
+  this->xml_stats_capture_start_ms_ = 0;
   if (this->coffee_maker_ != nullptr && this->coffee_maker_->connection != nullptr) {
     auto *connection = this->coffee_maker_->connection.get();
     connection->reset_response_line_buffer();
@@ -3617,6 +3757,7 @@ void JuraComponent::finish_stats_cycle_(uint32_t now, const char *reason) {
   this->xml_stats_locked_ = false;
   this->xml_last_command_.clear();
   this->xml_rx_line_.clear();
+  this->xml_stats_capture_start_ms_ = 0;
   this->xml_rx_buffer_.clear();
   this->xml_stats_.clear();
   uint32_t sleep = std::max(this->xml_poll_interval_ms_, kCycleSleepMs);
