@@ -229,6 +229,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_decode_inner_transport(bool enabled) { this->xml_decode_inner_transport_ = enabled; }
   void set_xml_inner_decode_trace(bool enabled) { this->xml_inner_decode_trace_ = enabled; }
   void set_xml_run_tablet_start_sequence(bool enabled) { this->xml_run_tablet_start_sequence_ = enabled; }
+  void set_xml_tablet_sequence_mode(const std::string &mode) { this->xml_tablet_sequence_mode_ = mode; }
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
   void set_xml_mapping_source(const char *data, size_t length) {
     this->xml_mapping_data_ = data;
@@ -421,6 +422,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_decode_inner_transport_{true};
   bool xml_inner_decode_trace_{false};
   bool xml_run_tablet_start_sequence_{false};
+  std::string xml_tablet_sequence_mode_{"minimal"};
   bool xml_tablet_start_sequence_done_{false};
   TabletSeqState tablet_seq_state_{TabletSeqState::IDLE};
   std::string tablet_seq_rx_buffer_{};

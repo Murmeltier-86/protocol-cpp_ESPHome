@@ -995,6 +995,7 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML inner transport decode: %s", YESNO(this->xml_decode_inner_transport_));
   ESP_LOGCONFIG(TAG, "  XML inner decode trace: %s", YESNO(this->xml_inner_decode_trace_));
   ESP_LOGCONFIG(TAG, "  XML tablet start sequence: %s", YESNO(this->xml_run_tablet_start_sequence_));
+  ESP_LOGCONFIG(TAG, "  XML tablet sequence mode: %s", this->xml_tablet_sequence_mode_.c_str());
   ESP_LOGCONFIG(TAG, "  XML counter max: %u", static_cast<unsigned>(this->xml_counter_max_));
   if (this->enable_xml_poll_) {
     this->log_xml_mapping_status_(true);
@@ -3104,8 +3105,8 @@ void JuraComponent::start_tablet_start_sequence_(uint32_t now) {
   this->tablet_seq_current_cmd_.clear();
   this->tablet_seq_deadline_ms_ = 0;
   this->tablet_seq_tx_failed_ = false;
-  ESP_LOGD(TAG, "tablet_seq_start t2_word=0x%04X source=%s", static_cast<unsigned>(t2_word),
-           t2_word_found ? "handshake_t2" : "default");
+  ESP_LOGD(TAG, "tablet_seq_start mode=%s t2_word=0x%04X source=%s", this->xml_tablet_sequence_mode_.c_str(),
+           static_cast<unsigned>(t2_word), t2_word_found ? "handshake_t2" : "default");
   (void) now;
 }
 
@@ -3155,19 +3156,22 @@ void JuraComponent::finish_tablet_sequence_command_(uint32_t now, bool timeout) 
 
   switch (this->tablet_seq_state_) {
     case TabletSeqState::WAIT_D1:
-      this->tablet_seq_state_ = TabletSeqState::SEND_TY;
+      if (this->xml_tablet_sequence_mode_ == "minimal_tr37") {
+        this->tablet_seq_state_ = TabletSeqState::SEND_TR37;
+      } else {
+        this->tablet_seq_state_ = TabletSeqState::DONE;
+        this->xml_tablet_start_sequence_done_ = true;
+        ESP_LOGD(TAG, "tablet_seq_done result=%s", this->tablet_seq_tx_failed_ ? "partial" : "success");
+      }
       break;
     case TabletSeqState::WAIT_TY:
-      this->tablet_seq_state_ = TabletSeqState::SEND_T1;
-      break;
     case TabletSeqState::WAIT_T1:
-      this->tablet_seq_state_ = TabletSeqState::SEND_T2;
-      break;
     case TabletSeqState::WAIT_T2:
-      this->tablet_seq_state_ = TabletSeqState::SEND_T3;
-      break;
     case TabletSeqState::WAIT_T3:
-      this->tablet_seq_state_ = TabletSeqState::SEND_TR37;
+      ESP_LOGD(TAG, "tablet_seq_done result=failed reason=unsupported_mode_state state=%s mode=%s",
+               this->tablet_sequence_state_name_(this->tablet_seq_state_), this->xml_tablet_sequence_mode_.c_str());
+      this->tablet_seq_state_ = TabletSeqState::FAILED;
+      this->xml_tablet_start_sequence_done_ = true;
       break;
     case TabletSeqState::WAIT_TR37:
       this->tablet_seq_state_ = TabletSeqState::DONE;
@@ -3204,37 +3208,20 @@ bool JuraComponent::process_tablet_start_sequence_(uint32_t now) {
       this->send_tablet_sequence_command_("@D1", TabletSeqState::WAIT_D1, now);
       return true;
     case TabletSeqState::SEND_TY:
-      this->send_tablet_sequence_command_("TY:", TabletSeqState::WAIT_TY, now);
-      return true;
     case TabletSeqState::SEND_T1:
-      this->send_tablet_sequence_command_("@T1", TabletSeqState::WAIT_T1, now);
-      return true;
-    case TabletSeqState::SEND_T2: {
-      uint16_t t2_word = 0;
-      if (this->handshake_t2_response_.size() >= 14) {
-        std::string candidate = this->handshake_t2_response_.substr(10, 4);
-        char *end = nullptr;
-        unsigned long parsed = std::strtoul(candidate.c_str(), &end, 16);
-        if (end != candidate.c_str() && end != nullptr && *end == '\0' && parsed <= 0xFFFFUL) {
-          t2_word = static_cast<uint16_t>(parsed);
-        }
-      }
-      char command[32];
-      std::snprintf(command, sizeof(command), "@t2:818811%04X0000", static_cast<unsigned>(t2_word));
-      this->send_tablet_sequence_command_(command, TabletSeqState::WAIT_T2, now);
+    case TabletSeqState::SEND_T2:
+    case TabletSeqState::SEND_T3: {
+      TabletSeqState blocked_state = this->tablet_seq_state_;
+      this->tablet_seq_state_ = TabletSeqState::FAILED;
+      this->xml_tablet_start_sequence_done_ = true;
+      ESP_LOGD(TAG, "tablet_seq_done result=failed reason=unsupported_mode_state state=%s mode=%s",
+               this->tablet_sequence_state_name_(blocked_state), this->xml_tablet_sequence_mode_.c_str());
       return true;
     }
-    case TabletSeqState::SEND_T3:
-      this->send_tablet_sequence_command_("@t3", TabletSeqState::WAIT_T3, now);
-      return true;
     case TabletSeqState::SEND_TR37:
       this->send_tablet_sequence_command_("@TR:37", TabletSeqState::WAIT_TR37, now);
       return true;
     case TabletSeqState::WAIT_D1:
-    case TabletSeqState::WAIT_TY:
-    case TabletSeqState::WAIT_T1:
-    case TabletSeqState::WAIT_T2:
-    case TabletSeqState::WAIT_T3:
     case TabletSeqState::WAIT_TR37: {
       std::vector<uint8_t> buffer;
       if (connection->read_decoded(buffer) && !buffer.empty()) {
@@ -3252,6 +3239,17 @@ bool JuraComponent::process_tablet_start_sequence_(uint32_t now) {
       if (this->tablet_seq_deadline_ms_ != 0 && time_reached(now, this->tablet_seq_deadline_ms_)) {
         this->finish_tablet_sequence_command_(now, true);
       }
+      return true;
+    }
+    case TabletSeqState::WAIT_TY:
+    case TabletSeqState::WAIT_T1:
+    case TabletSeqState::WAIT_T2:
+    case TabletSeqState::WAIT_T3: {
+      TabletSeqState blocked_state = this->tablet_seq_state_;
+      this->tablet_seq_state_ = TabletSeqState::FAILED;
+      this->xml_tablet_start_sequence_done_ = true;
+      ESP_LOGD(TAG, "tablet_seq_done result=failed reason=unsupported_mode_state state=%s mode=%s",
+               this->tablet_sequence_state_name_(blocked_state), this->xml_tablet_sequence_mode_.c_str());
       return true;
     }
     case TabletSeqState::DONE:
@@ -3507,6 +3505,14 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
   std::string lower = to_lower_copy(line);
   trim_in_place(lower);
   bool parsed = false;
+
+  if (lower.rfind("@t3", 0) == 0 || lower.rfind("@t0", 0) == 0) {
+    ESP_LOGD(TAG, "stats_reject cmd=%s reason=session_desync raw='%s'", this->xml_last_command_.c_str(),
+             sanitize_text_for_api(line).c_str());
+    this->xml_stats_reject_reason_ = "session_desync";
+    this->xml_stats_binary_response_ = true;
+    return false;
+  }
 
   switch (this->xml_state_) {
     case XmlPollState::WAIT_TS_LOCK:
