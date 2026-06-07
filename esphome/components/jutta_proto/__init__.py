@@ -30,6 +30,7 @@ CONF_MACHINE_TYPE = "machine_type"
 CONF_MACHINE_STATUS = "machine_status"
 CONF_MACHINE_ONLINE = "machine_online"
 CONF_MACHINE_READY = "machine_ready"
+CONF_ENABLE_MACHINE_XML_POLL = "enable_machine_xml_poll"
 CONF_ENABLE_XML_POLL = "enable_xml_poll"
 CONF_XML_MAPPING_PATH = "xml_mapping_path"
 CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
@@ -126,6 +127,7 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_MACHINE_STATUS): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_MACHINE_ONLINE): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_MACHINE_READY): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_ENABLE_MACHINE_XML_POLL): cv.boolean,
             cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
             cv.Optional(CONF_XML_MAPPING_PATH, default="embedded"): cv.string,
             cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=30000): cv.All(
@@ -296,6 +298,8 @@ async def to_code(config):
     cg.add(var.set_log_decoded_tx(config[CONF_LOG_DECODED_TX]))
     cg.add(var.set_log_encoded_uart(config[CONF_LOG_ENCODED_UART]))
     cg.add(var.set_enable_xml_poll(config[CONF_ENABLE_XML_POLL]))
+    machine_xml_default = not config[CONF_ENABLE_XML_POLL]
+    cg.add(var.set_enable_machine_xml_poll(config.get(CONF_ENABLE_MACHINE_XML_POLL, machine_xml_default)))
     cg.add(var.set_xml_publish_unstable(config[CONF_XML_PUBLISH_UNSTABLE]))
     cg.add(var.set_xml_wait_for_ts_ack(config[CONF_XML_WAIT_FOR_TS_ACK]))
     cg.add(var.set_xml_debug_compact(config[CONF_XML_DEBUG_COMPACT]))

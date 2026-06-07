@@ -220,6 +220,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_machine_ready_sensor(binary_sensor::BinarySensor *sensor) { this->machine_ready_sensor_ = sensor; }
   void set_log_decoded_tx(bool enabled) { this->log_decoded_tx_ = enabled; }
   void set_log_encoded_uart(bool enabled) { this->log_encoded_uart_ = enabled; }
+  void set_enable_machine_xml_poll(bool enabled) { this->enable_machine_xml_poll_ = enabled; }
   void set_enable_xml_poll(bool enabled) { this->enable_xml_poll_ = enabled; }
   void set_xml_publish_unstable(bool enabled) { this->xml_publish_unstable_ = enabled; }
   void set_xml_counter_max(uint32_t max_value) { this->xml_counter_max_ = max_value; }
@@ -245,6 +246,23 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
 
  protected:
   enum class HandshakeStage { IDLE, HELLO, SEND_T1, WAIT_T2, SEND_T2, WAIT_T3, SEND_T3, DONE, FAILED };
+  enum class TabletSeqState {
+    IDLE,
+    SEND_D1,
+    WAIT_D1,
+    SEND_TY,
+    WAIT_TY,
+    SEND_T1,
+    WAIT_T1,
+    SEND_T2,
+    WAIT_T2,
+    SEND_T3,
+    WAIT_T3,
+    SEND_TR37,
+    WAIT_TR37,
+    DONE,
+    FAILED
+  };
 
   static const char *handshake_stage_name(HandshakeStage stage);
 
@@ -330,7 +348,11 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool send_stats_ascii_command_(const std::string &command, XmlPollState wait_state, uint32_t now);
   bool send_stats_fire_and_forget_(const std::string &command, XmlPollState next_state, uint32_t now,
                                    uint32_t settle_delay_ms);
-  void run_tablet_start_sequence_();
+  bool process_tablet_start_sequence_(uint32_t now);
+  void start_tablet_start_sequence_(uint32_t now);
+  void send_tablet_sequence_command_(const std::string &command, TabletSeqState wait_state, uint32_t now);
+  void finish_tablet_sequence_command_(uint32_t now, bool timeout);
+  const char *tablet_sequence_state_name_(TabletSeqState state) const;
   bool read_stats_line_(std::string &line);
   bool finish_stats_rx_capture_(std::string &line, uint32_t now);
   bool handle_stats_line_(const std::string &line, uint32_t now);
@@ -391,6 +413,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string machine_xml_cache_{};
   uint32_t machine_xml_timestamp_{0};
 
+  bool enable_machine_xml_poll_{true};
   bool enable_xml_poll_{false};
   bool xml_publish_unstable_{false};
   bool xml_wait_for_ts_ack_{false};
@@ -399,6 +422,11 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_inner_decode_trace_{false};
   bool xml_run_tablet_start_sequence_{false};
   bool xml_tablet_start_sequence_done_{false};
+  TabletSeqState tablet_seq_state_{TabletSeqState::IDLE};
+  std::string tablet_seq_rx_buffer_{};
+  std::string tablet_seq_current_cmd_{};
+  uint32_t tablet_seq_deadline_ms_{0};
+  bool tablet_seq_tx_failed_{false};
   uint32_t xml_counter_max_{20000};
   uint32_t xml_poll_interval_ms_{30000};
   uint32_t xml_startup_delay_ms_{10000};

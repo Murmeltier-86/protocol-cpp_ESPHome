@@ -34,6 +34,7 @@ const char *const MACHINE_XML_FALLBACK_COMMAND = "@hr:05\r\n";
 constexpr uint32_t kXmlRxTimeoutMs = 1000;
 constexpr uint32_t kStatsRxCaptureWindowMs = 1500;
 constexpr uint32_t kTabletSeqRxWindowMs = 1500;
+constexpr size_t kTabletSeqMaxRxBytes = 256;
 constexpr uint32_t kInterCmdGapMs = 250;
 constexpr uint32_t kXmlQuietMs = 120;
 constexpr uint32_t kCycleSleepMs = 2000;
@@ -985,6 +986,7 @@ void JuraComponent::dump_config() {
   }
 
   ESP_LOGCONFIG(TAG, "  XML polling: %s", this->enable_xml_poll_ ? "enabled" : "disabled");
+  ESP_LOGCONFIG(TAG, "  Machine-XML polling: %s", YESNO(this->enable_machine_xml_poll_));
   ESP_LOGCONFIG(TAG, "  XML mapping Quelle: %s", this->xml_mapping_path_.c_str());
   ESP_LOGCONFIG(TAG, "  XML poll interval: %u ms", static_cast<unsigned>(this->xml_poll_interval_ms_));
   ESP_LOGCONFIG(TAG, "  XML startup delay: %u ms", static_cast<unsigned>(this->xml_startup_delay_ms_));
@@ -1522,6 +1524,9 @@ void JuraComponent::publish_machine_ready_(bool ready) {
 
 void JuraComponent::process_machine_data_query() {
   uint32_t now = esphome::millis();
+  if (!this->enable_machine_xml_poll_) {
+    return;
+  }
   if (this->machine_data_sensor_ == nullptr && this->machine_status_sensor_ == nullptr) {
     return;
   }
@@ -1536,7 +1541,9 @@ void JuraComponent::process_machine_data_query() {
   }
   bool xml_poll_active = this->xml_inflight_ || this->db_transaction_owner_ == DbTransactionOwner::XML_POLL ||
                          (this->enable_xml_poll_ && this->xml_state_ != XmlPollState::IDLE &&
-                          this->xml_state_ != XmlPollState::SLEEP);
+                          this->xml_state_ != XmlPollState::SLEEP) ||
+                         (this->enable_xml_poll_ && this->xml_run_tablet_start_sequence_ &&
+                          !this->xml_tablet_start_sequence_done_);
   if (xml_poll_active) {
     if (this->machine_xml_busy_backoff_until_ != 0 && !time_reached(now, this->machine_xml_busy_backoff_until_)) {
       return;
@@ -1579,12 +1586,18 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
 
 bool JuraComponent::request_machine_xml_(std::string &xml) {
   xml.clear();
+  if (!this->enable_machine_xml_poll_) {
+    ESP_LOGD(TAG, "Machine-XML query skipped; enable_machine_xml_poll is false");
+    return false;
+  }
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     return false;
   }
   bool xml_poll_active = this->xml_inflight_ || this->db_transaction_owner_ == DbTransactionOwner::XML_POLL ||
                          (this->enable_xml_poll_ && this->xml_state_ != XmlPollState::IDLE &&
-                          this->xml_state_ != XmlPollState::SLEEP);
+                          this->xml_state_ != XmlPollState::SLEEP) ||
+                         (this->enable_xml_poll_ && this->xml_run_tablet_start_sequence_ &&
+                          !this->xml_tablet_start_sequence_done_);
   if (xml_poll_active) {
     uint32_t now = esphome::millis();
     this->machine_xml_busy_backoff_until_ = now + MACHINE_XML_BUSY_BACKOFF_MS;
@@ -2624,6 +2637,11 @@ void JuraComponent::reset_xml_poll_state_() {
   this->xml_stats_locked_ = false;
   this->xml_cycle_failed_ = false;
   this->xml_tablet_start_sequence_done_ = false;
+  this->tablet_seq_state_ = TabletSeqState::IDLE;
+  this->tablet_seq_rx_buffer_.clear();
+  this->tablet_seq_current_cmd_.clear();
+  this->tablet_seq_deadline_ms_ = 0;
+  this->tablet_seq_tx_failed_ = false;
   this->xml_stats_consecutive_failures_ = 0;
   this->xml_rx_buffer_.clear();
   this->xml_stats_.clear();
@@ -2690,9 +2708,8 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
       return;
     }
     if (this->xml_run_tablet_start_sequence_ && !this->xml_tablet_start_sequence_done_) {
-      this->run_tablet_start_sequence_();
-      this->xml_tablet_start_sequence_done_ = true;
-      now = esphome::millis();
+      this->process_tablet_start_sequence_(now);
+      return;
     }
     this->start_new_xml_cycle_(now);
     this->transition_to_state_(XmlPollState::TS_LOCK, now);
@@ -3033,12 +3050,43 @@ bool JuraComponent::send_stats_fire_and_forget_(const std::string &command, XmlP
   return true;
 }
 
-void JuraComponent::run_tablet_start_sequence_() {
-  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
-    ESP_LOGD(TAG, "tablet_seq_done result=skipped_no_connection");
-    return;
+const char *JuraComponent::tablet_sequence_state_name_(TabletSeqState state) const {
+  switch (state) {
+    case TabletSeqState::IDLE:
+      return "idle";
+    case TabletSeqState::SEND_D1:
+      return "send_d1";
+    case TabletSeqState::WAIT_D1:
+      return "wait_d1";
+    case TabletSeqState::SEND_TY:
+      return "send_ty";
+    case TabletSeqState::WAIT_TY:
+      return "wait_ty";
+    case TabletSeqState::SEND_T1:
+      return "send_t1";
+    case TabletSeqState::WAIT_T1:
+      return "wait_t1";
+    case TabletSeqState::SEND_T2:
+      return "send_t2";
+    case TabletSeqState::WAIT_T2:
+      return "wait_t2";
+    case TabletSeqState::SEND_T3:
+      return "send_t3";
+    case TabletSeqState::WAIT_T3:
+      return "wait_t3";
+    case TabletSeqState::SEND_TR37:
+      return "send_tr37";
+    case TabletSeqState::WAIT_TR37:
+      return "wait_tr37";
+    case TabletSeqState::DONE:
+      return "done";
+    case TabletSeqState::FAILED:
+      return "failed";
   }
+  return "unknown";
+}
 
+void JuraComponent::start_tablet_start_sequence_(uint32_t now) {
   uint16_t t2_word = 0;
   bool t2_word_found = false;
   if (this->handshake_t2_response_.size() >= 14) {
@@ -3051,50 +3099,169 @@ void JuraComponent::run_tablet_start_sequence_() {
     }
   }
 
-  char t2_command[32];
-  std::snprintf(t2_command, sizeof(t2_command), "@t2:818811%04X0000", static_cast<unsigned>(t2_word));
-  const std::array<std::string, 6> commands{{"@D1", "TY:", "@T1", t2_command, "@t3", "@TR:37"}};
-
-  auto *connection = this->coffee_maker_->connection.get();
-  bool all_sent = true;
+  this->tablet_seq_state_ = TabletSeqState::SEND_D1;
+  this->tablet_seq_rx_buffer_.clear();
+  this->tablet_seq_current_cmd_.clear();
+  this->tablet_seq_deadline_ms_ = 0;
+  this->tablet_seq_tx_failed_ = false;
   ESP_LOGD(TAG, "tablet_seq_start t2_word=0x%04X source=%s", static_cast<unsigned>(t2_word),
            t2_word_found ? "handshake_t2" : "default");
+  (void) now;
+}
 
-  for (const auto &command : commands) {
-    connection->reset_response_line_buffer();
-    connection->reset_db_rx_buffer();
-    connection->drain_serial_input_nonblocking();
-
-    ESP_LOGD(TAG, "tablet_seq_tx cmd=%s", command.c_str());
-    if (!connection->write_decoded(command + "\r\n")) {
-      ESP_LOGD(TAG, "tablet_seq_rx cmd=%s result=tx_failed", command.c_str());
-      all_sent = false;
-      continue;
-    }
-
-    std::string captured;
-    uint32_t start = esphome::millis();
-    while (!time_reached(esphome::millis(), start + kTabletSeqRxWindowMs)) {
-      std::vector<uint8_t> buffer;
-      if (connection->read_decoded(buffer) && !buffer.empty()) {
-        captured.append(buffer.begin(), buffer.end());
-      }
-      esphome::delay(10);
-    }
-    std::vector<uint8_t> tail;
-    if (connection->read_decoded(tail) && !tail.empty()) {
-      captured.append(tail.begin(), tail.end());
-    }
-
-    uint32_t duration = esphome::millis() - start;
-    ESP_LOGD(TAG, "tablet_seq_rx cmd=%s bytes=%u duration_ms=%u hex=\"%s\" ascii=\"%s\"", command.c_str(),
-             static_cast<unsigned>(captured.size()), static_cast<unsigned>(duration),
-             compact_hex_string(captured, captured.size()).c_str(), printable_or_dot_ascii(captured, 80).c_str());
+void JuraComponent::send_tablet_sequence_command_(const std::string &command, TabletSeqState wait_state, uint32_t now) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    this->tablet_seq_state_ = TabletSeqState::FAILED;
+    this->xml_tablet_start_sequence_done_ = true;
+    ESP_LOGD(TAG, "tablet_seq_done result=failed");
+    return;
   }
 
+  auto *connection = this->coffee_maker_->connection.get();
   connection->reset_response_line_buffer();
   connection->reset_db_rx_buffer();
-  ESP_LOGD(TAG, "tablet_seq_done result=%s", all_sent ? "ok" : "partial");
+  connection->drain_serial_input_nonblocking();
+
+  this->tablet_seq_rx_buffer_.clear();
+  this->tablet_seq_current_cmd_ = command;
+  ESP_LOGD(TAG, "tablet_seq_state state=%s", this->tablet_sequence_state_name_(this->tablet_seq_state_));
+  ESP_LOGD(TAG, "tablet_seq_tx cmd=%s", command.c_str());
+  if (!connection->write_decoded(command + "\r\n")) {
+    ESP_LOGD(TAG, "tablet_seq_rx cmd=%s result=tx_failed", command.c_str());
+    this->tablet_seq_tx_failed_ = true;
+    this->tablet_seq_state_ = wait_state;
+    this->finish_tablet_sequence_command_(now, false);
+    return;
+  }
+
+  this->tablet_seq_deadline_ms_ = now + kTabletSeqRxWindowMs;
+  this->tablet_seq_state_ = wait_state;
+}
+
+void JuraComponent::finish_tablet_sequence_command_(uint32_t now, bool timeout) {
+  uint32_t start = this->tablet_seq_deadline_ms_ >= kTabletSeqRxWindowMs
+                       ? this->tablet_seq_deadline_ms_ - kTabletSeqRxWindowMs
+                       : now;
+  uint32_t duration = now - start;
+  if (!this->tablet_seq_rx_buffer_.empty()) {
+    ESP_LOGD(TAG, "tablet_seq_rx cmd=%s bytes=%u duration_ms=%u hex=\"%s\" ascii=\"%s\"",
+             this->tablet_seq_current_cmd_.c_str(), static_cast<unsigned>(this->tablet_seq_rx_buffer_.size()),
+             static_cast<unsigned>(duration),
+             compact_hex_string(this->tablet_seq_rx_buffer_, this->tablet_seq_rx_buffer_.size()).c_str(),
+             printable_or_dot_ascii(this->tablet_seq_rx_buffer_, 80).c_str());
+  } else if (timeout) {
+    ESP_LOGD(TAG, "tablet_seq_timeout cmd=%s", this->tablet_seq_current_cmd_.c_str());
+  }
+
+  switch (this->tablet_seq_state_) {
+    case TabletSeqState::WAIT_D1:
+      this->tablet_seq_state_ = TabletSeqState::SEND_TY;
+      break;
+    case TabletSeqState::WAIT_TY:
+      this->tablet_seq_state_ = TabletSeqState::SEND_T1;
+      break;
+    case TabletSeqState::WAIT_T1:
+      this->tablet_seq_state_ = TabletSeqState::SEND_T2;
+      break;
+    case TabletSeqState::WAIT_T2:
+      this->tablet_seq_state_ = TabletSeqState::SEND_T3;
+      break;
+    case TabletSeqState::WAIT_T3:
+      this->tablet_seq_state_ = TabletSeqState::SEND_TR37;
+      break;
+    case TabletSeqState::WAIT_TR37:
+      this->tablet_seq_state_ = TabletSeqState::DONE;
+      this->xml_tablet_start_sequence_done_ = true;
+      ESP_LOGD(TAG, "tablet_seq_done result=%s", this->tablet_seq_tx_failed_ ? "partial" : "success");
+      break;
+    default:
+      this->tablet_seq_state_ = TabletSeqState::FAILED;
+      this->xml_tablet_start_sequence_done_ = true;
+      ESP_LOGD(TAG, "tablet_seq_done result=failed");
+      break;
+  }
+
+  this->tablet_seq_rx_buffer_.clear();
+  this->tablet_seq_current_cmd_.clear();
+  this->tablet_seq_deadline_ms_ = 0;
+}
+
+bool JuraComponent::process_tablet_start_sequence_(uint32_t now) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    this->tablet_seq_state_ = TabletSeqState::FAILED;
+    this->xml_tablet_start_sequence_done_ = true;
+    ESP_LOGD(TAG, "tablet_seq_done result=failed");
+    return true;
+  }
+  if (this->tablet_seq_state_ == TabletSeqState::IDLE) {
+    this->start_tablet_start_sequence_(now);
+    return true;
+  }
+
+  auto *connection = this->coffee_maker_->connection.get();
+  switch (this->tablet_seq_state_) {
+    case TabletSeqState::SEND_D1:
+      this->send_tablet_sequence_command_("@D1", TabletSeqState::WAIT_D1, now);
+      return true;
+    case TabletSeqState::SEND_TY:
+      this->send_tablet_sequence_command_("TY:", TabletSeqState::WAIT_TY, now);
+      return true;
+    case TabletSeqState::SEND_T1:
+      this->send_tablet_sequence_command_("@T1", TabletSeqState::WAIT_T1, now);
+      return true;
+    case TabletSeqState::SEND_T2: {
+      uint16_t t2_word = 0;
+      if (this->handshake_t2_response_.size() >= 14) {
+        std::string candidate = this->handshake_t2_response_.substr(10, 4);
+        char *end = nullptr;
+        unsigned long parsed = std::strtoul(candidate.c_str(), &end, 16);
+        if (end != candidate.c_str() && end != nullptr && *end == '\0' && parsed <= 0xFFFFUL) {
+          t2_word = static_cast<uint16_t>(parsed);
+        }
+      }
+      char command[32];
+      std::snprintf(command, sizeof(command), "@t2:818811%04X0000", static_cast<unsigned>(t2_word));
+      this->send_tablet_sequence_command_(command, TabletSeqState::WAIT_T2, now);
+      return true;
+    }
+    case TabletSeqState::SEND_T3:
+      this->send_tablet_sequence_command_("@t3", TabletSeqState::WAIT_T3, now);
+      return true;
+    case TabletSeqState::SEND_TR37:
+      this->send_tablet_sequence_command_("@TR:37", TabletSeqState::WAIT_TR37, now);
+      return true;
+    case TabletSeqState::WAIT_D1:
+    case TabletSeqState::WAIT_TY:
+    case TabletSeqState::WAIT_T1:
+    case TabletSeqState::WAIT_T2:
+    case TabletSeqState::WAIT_T3:
+    case TabletSeqState::WAIT_TR37: {
+      std::vector<uint8_t> buffer;
+      if (connection->read_decoded(buffer) && !buffer.empty()) {
+        size_t current_size = this->tablet_seq_rx_buffer_.size();
+        size_t remaining = current_size < kTabletSeqMaxRxBytes ? kTabletSeqMaxRxBytes - current_size : 0;
+        size_t count = std::min(remaining, buffer.size());
+        if (count > 0) {
+          this->tablet_seq_rx_buffer_.append(reinterpret_cast<const char *>(buffer.data()), count);
+        }
+        if (count < buffer.size()) {
+          ESP_LOGD(TAG, "tablet_seq_rx_truncated cmd=%s max_bytes=%u", this->tablet_seq_current_cmd_.c_str(),
+                   static_cast<unsigned>(kTabletSeqMaxRxBytes));
+        }
+      }
+      if (this->tablet_seq_deadline_ms_ != 0 && time_reached(now, this->tablet_seq_deadline_ms_)) {
+        this->finish_tablet_sequence_command_(now, true);
+      }
+      return true;
+    }
+    case TabletSeqState::DONE:
+    case TabletSeqState::FAILED:
+      this->xml_tablet_start_sequence_done_ = true;
+      return true;
+    case TabletSeqState::IDLE:
+    default:
+      return true;
+  }
 }
 
 bool JuraComponent::read_stats_line_(std::string &line) {
