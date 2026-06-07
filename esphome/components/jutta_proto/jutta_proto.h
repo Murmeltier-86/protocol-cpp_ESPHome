@@ -225,6 +225,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_counter_max(uint32_t max_value) { this->xml_counter_max_ = max_value; }
   void set_xml_wait_for_ts_ack(bool enabled) { this->xml_wait_for_ts_ack_ = enabled; }
   void set_xml_debug_compact(bool enabled) { this->xml_debug_compact_ = enabled; }
+  void set_xml_decode_inner_transport(bool enabled) { this->xml_decode_inner_transport_ = enabled; }
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
   void set_xml_mapping_source(const char *data, size_t length) {
     this->xml_mapping_data_ = data;
@@ -329,6 +330,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
                                    uint32_t settle_delay_ms);
   bool read_stats_line_(std::string &line);
   bool handle_stats_line_(const std::string &line, uint32_t now);
+  bool decode_stats_inner_transport_line_(const std::string &raw_line, std::string &decoded_line);
   bool handle_stats_binary_response_(uint32_t now);
   void advance_after_stats_timeout_(uint32_t now);
   void advance_after_stats_reject_(uint32_t now);
@@ -389,6 +391,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_publish_unstable_{false};
   bool xml_wait_for_ts_ack_{false};
   bool xml_debug_compact_{true};
+  bool xml_decode_inner_transport_{true};
   uint32_t xml_counter_max_{20000};
   uint32_t xml_poll_interval_ms_{30000};
   uint32_t xml_startup_delay_ms_{10000};
@@ -404,6 +407,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string xml_transaction_cmd_{};
   std::string xml_last_command_{};
   std::string xml_rx_line_{};
+  std::string xml_stats_reject_reason_{};
   bool xml_stats_rx_logged_{false};
   bool xml_stats_binary_response_{false};
   uint8_t xml_tr32_page_{0};

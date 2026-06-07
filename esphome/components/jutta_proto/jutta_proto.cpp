@@ -138,6 +138,187 @@ bool extract_crlf_line(std::string &buffer, std::string &line) {
   return true;
 }
 
+bool is_inner_transport_start(uint8_t byte) {
+  return byte == '&' || byte == '*' || byte == '+';
+}
+
+bool is_stats_ascii_response(const std::string &line) {
+  std::string lower = line;
+  while (!lower.empty() && (lower.back() == '\r' || lower.back() == '\n' || lower.back() == ' ' ||
+                            lower.back() == '\t')) {
+    lower.pop_back();
+  }
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return lower.rfind("@tr:", 0) == 0 || lower.rfind("@tg:", 0) == 0 || lower.rfind("@ts", 0) == 0 ||
+         lower == "ok" || lower == "ok:";
+}
+
+bool is_printable_transport_payload(const std::string &line) {
+  if (line.empty()) {
+    return false;
+  }
+  for (unsigned char c : line) {
+    if (c == '\r' || c == '\n' || c == '\t') {
+      continue;
+    }
+    if (c < 0x20 || c >= 0x7F) {
+      return false;
+    }
+  }
+  return true;
+}
+
+uint8_t fw_mod8(int value) {
+  value %= 256;
+  if (value < 0) {
+    value += 256;
+  }
+  return static_cast<uint8_t>(value);
+}
+
+uint8_t fw_mod4(int value) {
+  return static_cast<uint8_t>(fw_mod8(value) & 0x0F);
+}
+
+uint8_t fw_nibble_transform(uint8_t nibble, uint8_t position, uint8_t key_hi, uint8_t key_lo,
+                            const uint8_t table_a[16], const uint8_t table_b[16]) {
+  int pos = position;
+  int pos_hi = position >> 4;
+  int first = fw_mod4(nibble + pos + key_hi);
+  int second = fw_mod4((fw_mod8(pos_hi) + table_a[first] + key_lo) - pos - key_hi);
+  int third = fw_mod4((table_b[second] + key_hi + pos) - key_lo - fw_mod8(pos_hi));
+  return fw_mod4(table_a[third] - pos - key_hi);
+}
+
+struct InnerTransportDecodeResult {
+  bool ok{false};
+  std::string payload{};
+  std::string reason{};
+  const char *table_name{"unknown"};
+};
+
+InnerTransportDecodeResult decode_inner_transport_with_tables(const std::string &frame, const uint8_t table_a[16],
+                                                              const uint8_t table_b[16], const char *table_name) {
+  InnerTransportDecodeResult result;
+  result.table_name = table_name;
+  if (frame.size() < 2) {
+    result.reason = "short_frame";
+    return result;
+  }
+  uint8_t start = static_cast<uint8_t>(frame[0]);
+  if (!is_inner_transport_start(start)) {
+    result.reason = "unsupported_start";
+    return result;
+  }
+
+  size_t index = 1;
+  if (static_cast<uint8_t>(frame[index]) == 0x1B) {
+    ++index;
+    if (index >= frame.size()) {
+      result.reason = "truncated_escaped_key";
+      return result;
+    }
+  }
+  uint8_t key = static_cast<uint8_t>(frame[index]) & 0x7F;
+  uint8_t key_hi = (key >> 4) & 0x0F;
+  uint8_t key_lo = key & 0x0F;
+  ++index;
+
+  uint8_t position = 0;
+  std::string payload;
+  payload.reserve(frame.size());
+  while (index < frame.size()) {
+    uint8_t encoded = static_cast<uint8_t>(frame[index]);
+    if (encoded == '\r' || encoded == '\n') {
+      break;
+    }
+    if (encoded == 0x1B) {
+      ++index;
+      if (index >= frame.size()) {
+        result.reason = "truncated_escape";
+        return result;
+      }
+      encoded = static_cast<uint8_t>(frame[index]) & 0x7F;
+    }
+
+    uint8_t hi = fw_nibble_transform((encoded >> 4) & 0x0F, position, key_hi, key_lo, table_a, table_b);
+    uint8_t next_position = static_cast<uint8_t>(position + 1);
+    uint8_t lo = fw_nibble_transform(encoded & 0x0F, next_position, key_hi, key_lo, table_a, table_b);
+    payload.push_back(static_cast<char>((hi << 4) | lo));
+    position = static_cast<uint8_t>(position + 2);
+    ++index;
+  }
+
+  if (payload.empty()) {
+    result.reason = "empty_payload";
+    return result;
+  }
+  result.ok = true;
+  result.payload = payload;
+  result.reason.clear();
+  return result;
+}
+
+InnerTransportDecodeResult decode_inner_transport_frame(const std::string &frame) {
+  // Tables are the 16-byte substitution pairs used by FUN_40101408. The WiFi
+  // and BLE2 pairs are also present verbatim in the Android transport layer.
+  static constexpr uint8_t WIFI_A[16] = {1, 0, 3, 2, 15, 14, 8, 10, 6, 13, 7, 12, 11, 9, 5, 4};
+  static constexpr uint8_t WIFI_B[16] = {9, 12, 6, 11, 10, 15, 2, 14, 13, 0, 4, 3, 1, 8, 7, 5};
+  static constexpr uint8_t BLE2_A[16] = {14, 4, 3, 2, 1, 13, 8, 11, 6, 15, 12, 7, 10, 5, 0, 9};
+  static constexpr uint8_t BLE2_B[16] = {10, 6, 13, 12, 14, 11, 1, 9, 15, 7, 0, 5, 3, 2, 4, 8};
+  static constexpr uint8_t FW_PARAM0_A[16] = {13, 0, 4, 3, 1, 8, 7, 5, 1, 0, 3, 2, 15, 14, 8, 10};
+  static constexpr uint8_t FW_PARAM0_B[16] = {6, 7, 0, 12, 11, 5, 1, 3, 9, 12, 6, 11, 10, 15, 2, 14};
+
+  struct Candidate {
+    const char *name;
+    const uint8_t *a;
+    const uint8_t *b;
+  };
+
+  uint8_t start = frame.empty() ? 0 : static_cast<uint8_t>(frame.front());
+  const Candidate amp_candidates[] = {{"fw_param0", FW_PARAM0_A, FW_PARAM0_B},
+                                      {"wifi", WIFI_A, WIFI_B},
+                                      {"ble2", BLE2_A, BLE2_B}};
+  const Candidate star_candidates[] = {{"wifi", WIFI_A, WIFI_B}, {"fw_param0", FW_PARAM0_A, FW_PARAM0_B}};
+  const Candidate plus_candidates[] = {{"ble2", BLE2_A, BLE2_B}, {"wifi", WIFI_A, WIFI_B}};
+
+  const Candidate *candidates = amp_candidates;
+  size_t count = sizeof(amp_candidates) / sizeof(amp_candidates[0]);
+  if (start == '*') {
+    candidates = star_candidates;
+    count = sizeof(star_candidates) / sizeof(star_candidates[0]);
+  } else if (start == '+') {
+    candidates = plus_candidates;
+    count = sizeof(plus_candidates) / sizeof(plus_candidates[0]);
+  }
+
+  InnerTransportDecodeResult fallback;
+  fallback.reason = "no_candidate_matched";
+  for (size_t i = 0; i < count; ++i) {
+    InnerTransportDecodeResult decoded =
+        decode_inner_transport_with_tables(frame, candidates[i].a, candidates[i].b, candidates[i].name);
+    if (!decoded.ok) {
+      if (fallback.reason == "no_candidate_matched") {
+        fallback = decoded;
+      }
+      continue;
+    }
+    if (is_stats_ascii_response(decoded.payload)) {
+      return decoded;
+    }
+    if (fallback.reason == "no_candidate_matched" || fallback.ok) {
+      fallback = decoded;
+      fallback.reason = "inner_decode_not_ascii";
+    }
+  }
+  fallback.ok = false;
+  if (fallback.reason.empty()) {
+    fallback.reason = "inner_decode_not_ascii";
+  }
+  return fallback;
+}
+
 int determine_accuracy(XmlSensorKind kind, double scale) {
   if (kind == XmlSensorKind::Counter) {
     return 0;
@@ -695,6 +876,7 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML startup delay: %u ms", static_cast<unsigned>(this->xml_startup_delay_ms_));
   ESP_LOGCONFIG(TAG, "  XML publish unstable counters: %s", YESNO(this->xml_publish_unstable_));
   ESP_LOGCONFIG(TAG, "  XML compact debug: %s", YESNO(this->xml_debug_compact_));
+  ESP_LOGCONFIG(TAG, "  XML inner transport decode: %s", YESNO(this->xml_decode_inner_transport_));
   ESP_LOGCONFIG(TAG, "  XML counter max: %u", static_cast<unsigned>(this->xml_counter_max_));
   if (this->enable_xml_poll_) {
     this->log_xml_mapping_status_(true);
@@ -2318,6 +2500,7 @@ void JuraComponent::reset_xml_poll_state_() {
   this->clear_db_transaction_(DbTransactionOwner::NONE);
   this->xml_last_command_.clear();
   this->xml_rx_line_.clear();
+  this->xml_stats_reject_reason_.clear();
   this->xml_stats_rx_logged_ = false;
   this->xml_stats_binary_response_ = false;
   this->xml_tr32_page_ = 0;
@@ -2655,6 +2838,7 @@ bool JuraComponent::send_stats_ascii_command_(const std::string &command, XmlPol
   this->xml_rx_line_.clear();
   this->xml_stats_rx_logged_ = false;
   this->xml_stats_binary_response_ = false;
+  this->xml_stats_reject_reason_.clear();
   ESP_LOGD(TAG, "stats_tx cmd=%s", command.c_str());
   if (command == "@TS:00") {
     ESP_LOGD(TAG, "stats_unlock_sent fire_and_forget=false");
@@ -2703,6 +2887,7 @@ bool JuraComponent::send_stats_fire_and_forget_(const std::string &command, XmlP
   this->xml_rx_buffer_.clear();
   this->xml_stats_rx_logged_ = false;
   this->xml_stats_binary_response_ = false;
+  this->xml_stats_reject_reason_.clear();
 
   ESP_LOGD(TAG, "stats_tx cmd=%s", command.c_str());
   if (command == "@TS:01") {
@@ -2733,6 +2918,12 @@ bool JuraComponent::read_stats_line_(std::string &line) {
                static_cast<unsigned>(line.size()), static_cast<unsigned>(first), compact_hex_string(line).c_str());
       this->xml_stats_rx_logged_ = true;
     }
+    std::string decoded_line;
+    if (this->decode_stats_inner_transport_line_(line, decoded_line)) {
+      line = decoded_line;
+    } else if (this->xml_stats_binary_response_) {
+      return false;
+    }
     return true;
   }
 
@@ -2753,10 +2944,18 @@ bool JuraComponent::read_stats_line_(std::string &line) {
                static_cast<unsigned>(line.size()), static_cast<unsigned>(first), compact_hex_string(line).c_str());
       this->xml_stats_rx_logged_ = true;
     }
+    std::string decoded_line;
+    if (this->decode_stats_inner_transport_line_(line, decoded_line)) {
+      line = decoded_line;
+    } else if (this->xml_stats_binary_response_) {
+      return false;
+    }
     return true;
   }
 
-  if (!this->xml_rx_line_.empty() &&
+  bool starts_inner_transport = !this->xml_rx_line_.empty() && this->xml_decode_inner_transport_ &&
+                                is_inner_transport_start(static_cast<uint8_t>(this->xml_rx_line_.front()));
+  if (!this->xml_rx_line_.empty() && !starts_inner_transport &&
       (has_binary_bytes(this->xml_rx_line_) || this->xml_rx_line_.front() != '@')) {
     if (!this->xml_stats_rx_logged_ || !this->xml_debug_compact_) {
       uint8_t first = static_cast<uint8_t>(this->xml_rx_line_.front());
@@ -2766,9 +2965,47 @@ bool JuraComponent::read_stats_line_(std::string &line) {
       this->xml_stats_rx_logged_ = true;
     }
     this->publish_raw_rx_(this->xml_rx_line_, "stats_binary");
+    this->xml_stats_reject_reason_ = "unexpected_binary";
     this->xml_stats_binary_response_ = true;
   }
   return false;
+}
+
+bool JuraComponent::decode_stats_inner_transport_line_(const std::string &raw_line, std::string &decoded_line) {
+  decoded_line.clear();
+  if (raw_line.empty() || !this->xml_decode_inner_transport_ ||
+      !is_inner_transport_start(static_cast<uint8_t>(raw_line.front()))) {
+    return false;
+  }
+
+  uint8_t start = static_cast<uint8_t>(raw_line.front());
+  ESP_LOGD(TAG, "stats_rx_transport cmd=%s start=0x%02X len=%u hex=\"%s\"", this->xml_last_command_.c_str(),
+           static_cast<unsigned>(start), static_cast<unsigned>(raw_line.size()), compact_hex_string(raw_line).c_str());
+  this->publish_raw_rx_(raw_line, "stats_inner_transport");
+
+  InnerTransportDecodeResult decoded = decode_inner_transport_frame(raw_line);
+  if (!decoded.ok) {
+    std::string reason = decoded.reason.empty() ? "inner_decode_failed" : decoded.reason;
+    ESP_LOGD(TAG, "stats_inner_decode cmd=%s ok=false reason=%s table=%s", this->xml_last_command_.c_str(),
+             reason.c_str(), decoded.table_name);
+    this->xml_stats_reject_reason_ = reason;
+    this->xml_stats_binary_response_ = true;
+    return false;
+  }
+
+  if (!is_printable_transport_payload(decoded.payload) || !is_stats_ascii_response(decoded.payload)) {
+    ESP_LOGD(TAG, "stats_inner_decode cmd=%s ok=false reason=inner_decode_not_ascii table=%s len=%u hex=\"%s\"",
+             this->xml_last_command_.c_str(), decoded.table_name, static_cast<unsigned>(decoded.payload.size()),
+             compact_hex_string(decoded.payload).c_str());
+    this->xml_stats_reject_reason_ = "inner_decode_not_ascii";
+    this->xml_stats_binary_response_ = true;
+    return false;
+  }
+
+  decoded_line = decoded.payload;
+  ESP_LOGD(TAG, "stats_inner_decode cmd=%s ok=true table=%s len=%u ascii=\"%s\"", this->xml_last_command_.c_str(),
+           decoded.table_name, static_cast<unsigned>(decoded_line.size()), sanitize_text_for_api(decoded_line).c_str());
+  return true;
 }
 
 bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
@@ -2888,8 +3125,10 @@ bool JuraComponent::handle_stats_binary_response_(uint32_t now) {
     return false;
   }
 
-  ESP_LOGD(TAG, "stats_reject cmd=%s reason=unexpected_binary", this->xml_last_command_.c_str());
+  const char *reason = this->xml_stats_reject_reason_.empty() ? "unexpected_binary" : this->xml_stats_reject_reason_.c_str();
+  ESP_LOGD(TAG, "stats_reject cmd=%s reason=%s", this->xml_last_command_.c_str(), reason);
   this->xml_stats_binary_response_ = false;
+  this->xml_stats_reject_reason_.clear();
   this->xml_cycle_failed_ = true;
   this->xml_inflight_ = false;
   this->xml_deadline_ms_ = 0;
