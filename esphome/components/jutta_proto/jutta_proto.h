@@ -223,6 +223,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_enable_xml_poll(bool enabled) { this->enable_xml_poll_ = enabled; }
   void set_xml_publish_unstable(bool enabled) { this->xml_publish_unstable_ = enabled; }
   void set_xml_counter_max(uint32_t max_value) { this->xml_counter_max_ = max_value; }
+  void set_xml_wait_for_ts_ack(bool enabled) { this->xml_wait_for_ts_ack_ = enabled; }
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
   void set_xml_mapping_source(const char *data, size_t length) {
     this->xml_mapping_data_ = data;
@@ -323,8 +324,11 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const char *xml_state_label_(XmlPollState state) const;
   void transition_to_state_(XmlPollState state, uint32_t now, uint32_t delay_ms = 0);
   bool send_stats_ascii_command_(const std::string &command, XmlPollState wait_state, uint32_t now);
+  bool send_stats_fire_and_forget_(const std::string &command, XmlPollState next_state, uint32_t now,
+                                   uint32_t settle_delay_ms);
   bool read_stats_line_(std::string &line);
   bool handle_stats_line_(const std::string &line, uint32_t now);
+  void advance_after_stats_timeout_(uint32_t now);
   bool parse_tr32_page_line_(const std::string &line, uint8_t expected_page);
   bool parse_tg43_line_(const std::string &line);
   bool parse_tgc0_line_(const std::string &line);
@@ -380,6 +384,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
 
   bool enable_xml_poll_{false};
   bool xml_publish_unstable_{false};
+  bool xml_wait_for_ts_ack_{false};
   uint32_t xml_counter_max_{20000};
   uint32_t xml_poll_interval_ms_{30000};
   uint32_t xml_startup_delay_ms_{10000};
@@ -398,6 +403,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint8_t xml_tr32_page_{0};
   bool xml_stats_locked_{false};
   bool xml_cycle_failed_{false};
+  uint8_t xml_stats_consecutive_failures_{0};
   std::vector<uint8_t> xml_rx_buffer_{};
   bool xml_mapping_logged_{false};
   bool xml_mapping_loaded_{false};

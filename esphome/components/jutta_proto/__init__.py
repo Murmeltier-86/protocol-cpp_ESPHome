@@ -35,6 +35,7 @@ CONF_XML_MAPPING_PATH = "xml_mapping_path"
 CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
 CONF_XML_STARTUP_DELAY_MS = "xml_startup_delay_ms"
 CONF_XML_PUBLISH_UNSTABLE = "xml_publish_unstable"
+CONF_XML_WAIT_FOR_TS_ACK = "xml_wait_for_ts_ack"
 CONF_XML_COUNTER_MAX = "xml_counter_max"
 CONF_XML_SENSORS = "xml_sensors"
 CONF_FIELD = "field"
@@ -130,6 +131,7 @@ CONFIG_SCHEMA = (
                 cv.positive_int, cv.Range(min=10000)
             ),
             cv.Optional(CONF_XML_PUBLISH_UNSTABLE, default=False): cv.boolean,
+            cv.Optional(CONF_XML_WAIT_FOR_TS_ACK, default=False): cv.boolean,
             cv.Optional(CONF_XML_COUNTER_MAX, default=20000): cv.positive_int,
             cv.Optional(CONF_XML_SENSORS, default=[]): cv.ensure_list(XML_SENSOR_SCHEMA),
             cv.Optional(CONF_LOG_DECODED_TX, default=True): cv.boolean,
@@ -287,6 +289,7 @@ async def to_code(config):
     cg.add(var.set_log_encoded_uart(config[CONF_LOG_ENCODED_UART]))
     cg.add(var.set_enable_xml_poll(config[CONF_ENABLE_XML_POLL]))
     cg.add(var.set_xml_publish_unstable(config[CONF_XML_PUBLISH_UNSTABLE]))
+    cg.add(var.set_xml_wait_for_ts_ack(config[CONF_XML_WAIT_FOR_TS_ACK]))
     cg.add(var.set_xml_counter_max(config[CONF_XML_COUNTER_MAX]))
     mapping_path = config[CONF_XML_MAPPING_PATH]
     if mapping_path == "embedded":
