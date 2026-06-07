@@ -33,6 +33,7 @@ const char *const MACHINE_XML_PRIMARY_COMMAND = "@hr:00\r\n";
 const char *const MACHINE_XML_FALLBACK_COMMAND = "@hr:05\r\n";
 constexpr uint32_t kXmlRxTimeoutMs = 1000;
 constexpr uint32_t kStatsRxCaptureWindowMs = 1500;
+constexpr uint32_t kTabletSeqRxWindowMs = 1500;
 constexpr uint32_t kInterCmdGapMs = 250;
 constexpr uint32_t kXmlQuietMs = 120;
 constexpr uint32_t kCycleSleepMs = 2000;
@@ -234,6 +235,25 @@ std::string printable_preview(const std::string &line, size_t max_bytes = 32) {
     out.append("...");
   }
   return out;
+}
+
+std::string printable_or_dot_ascii(const std::string &line, size_t max_bytes = 80) {
+  return printable_preview(line, max_bytes);
+}
+
+bool matches_known_repeated_tr32_frame(const std::string &frame) {
+  static constexpr uint8_t KNOWN_FRAME[] = {
+      0x26, 0x3D, 0x29, 0xE1, 0xBE, 0xE8, 0x53, 0x2F, 0xE6, 0x50, 0xFC,
+      0x47, 0x07, 0xFF, 0xA5, 0x04, 0xDE, 0xA3, 0xD1, 0x1B, 0xA6};
+  if (frame.size() != sizeof(KNOWN_FRAME)) {
+    return false;
+  }
+  for (size_t i = 0; i < sizeof(KNOWN_FRAME); ++i) {
+    if (static_cast<uint8_t>(frame[i]) != KNOWN_FRAME[i]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool payload_starts_with_at(const std::string &line) { return !line.empty() && line.front() == '@'; }
@@ -972,6 +992,7 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML compact debug: %s", YESNO(this->xml_debug_compact_));
   ESP_LOGCONFIG(TAG, "  XML inner transport decode: %s", YESNO(this->xml_decode_inner_transport_));
   ESP_LOGCONFIG(TAG, "  XML inner decode trace: %s", YESNO(this->xml_inner_decode_trace_));
+  ESP_LOGCONFIG(TAG, "  XML tablet start sequence: %s", YESNO(this->xml_run_tablet_start_sequence_));
   ESP_LOGCONFIG(TAG, "  XML counter max: %u", static_cast<unsigned>(this->xml_counter_max_));
   if (this->enable_xml_poll_) {
     this->log_xml_mapping_status_(true);
@@ -2602,6 +2623,7 @@ void JuraComponent::reset_xml_poll_state_() {
   this->xml_tr32_page_ = 0;
   this->xml_stats_locked_ = false;
   this->xml_cycle_failed_ = false;
+  this->xml_tablet_start_sequence_done_ = false;
   this->xml_stats_consecutive_failures_ = 0;
   this->xml_rx_buffer_.clear();
   this->xml_stats_.clear();
@@ -2666,6 +2688,11 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
       this->xml_next_poll_ = this->xml_deadline_ms_;
       this->transition_to_state_(XmlPollState::SLEEP, now);
       return;
+    }
+    if (this->xml_run_tablet_start_sequence_ && !this->xml_tablet_start_sequence_done_) {
+      this->run_tablet_start_sequence_();
+      this->xml_tablet_start_sequence_done_ = true;
+      now = esphome::millis();
     }
     this->start_new_xml_cycle_(now);
     this->transition_to_state_(XmlPollState::TS_LOCK, now);
@@ -3006,6 +3033,70 @@ bool JuraComponent::send_stats_fire_and_forget_(const std::string &command, XmlP
   return true;
 }
 
+void JuraComponent::run_tablet_start_sequence_() {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    ESP_LOGD(TAG, "tablet_seq_done result=skipped_no_connection");
+    return;
+  }
+
+  uint16_t t2_word = 0;
+  bool t2_word_found = false;
+  if (this->handshake_t2_response_.size() >= 14) {
+    std::string candidate = this->handshake_t2_response_.substr(10, 4);
+    char *end = nullptr;
+    unsigned long parsed = std::strtoul(candidate.c_str(), &end, 16);
+    if (end != candidate.c_str() && end != nullptr && *end == '\0' && parsed <= 0xFFFFUL) {
+      t2_word = static_cast<uint16_t>(parsed);
+      t2_word_found = true;
+    }
+  }
+
+  char t2_command[32];
+  std::snprintf(t2_command, sizeof(t2_command), "@t2:818811%04X0000", static_cast<unsigned>(t2_word));
+  const std::array<std::string, 6> commands{{"@D1", "TY:", "@T1", t2_command, "@t3", "@TR:37"}};
+
+  auto *connection = this->coffee_maker_->connection.get();
+  bool all_sent = true;
+  ESP_LOGD(TAG, "tablet_seq_start t2_word=0x%04X source=%s", static_cast<unsigned>(t2_word),
+           t2_word_found ? "handshake_t2" : "default");
+
+  for (const auto &command : commands) {
+    connection->reset_response_line_buffer();
+    connection->reset_db_rx_buffer();
+    connection->drain_serial_input_nonblocking();
+
+    ESP_LOGD(TAG, "tablet_seq_tx cmd=%s", command.c_str());
+    if (!connection->write_decoded(command + "\r\n")) {
+      ESP_LOGD(TAG, "tablet_seq_rx cmd=%s result=tx_failed", command.c_str());
+      all_sent = false;
+      continue;
+    }
+
+    std::string captured;
+    uint32_t start = esphome::millis();
+    while (!time_reached(esphome::millis(), start + kTabletSeqRxWindowMs)) {
+      std::vector<uint8_t> buffer;
+      if (connection->read_decoded(buffer) && !buffer.empty()) {
+        captured.append(buffer.begin(), buffer.end());
+      }
+      esphome::delay(10);
+    }
+    std::vector<uint8_t> tail;
+    if (connection->read_decoded(tail) && !tail.empty()) {
+      captured.append(tail.begin(), tail.end());
+    }
+
+    uint32_t duration = esphome::millis() - start;
+    ESP_LOGD(TAG, "tablet_seq_rx cmd=%s bytes=%u duration_ms=%u hex=\"%s\" ascii=\"%s\"", command.c_str(),
+             static_cast<unsigned>(captured.size()), static_cast<unsigned>(duration),
+             compact_hex_string(captured, captured.size()).c_str(), printable_or_dot_ascii(captured, 80).c_str());
+  }
+
+  connection->reset_response_line_buffer();
+  connection->reset_db_rx_buffer();
+  ESP_LOGD(TAG, "tablet_seq_done result=%s", all_sent ? "ok" : "partial");
+}
+
 bool JuraComponent::read_stats_line_(std::string &line) {
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     return false;
@@ -3138,6 +3229,10 @@ bool JuraComponent::finish_stats_rx_capture_(std::string &line, uint32_t now) {
              compact_hex_string(frame, frame.size()).c_str());
     if (!is_inner_transport_start(static_cast<uint8_t>(frame.front()))) {
       continue;
+    }
+    if (this->xml_last_command_.rfind("@TR:32", 0) == 0) {
+      ESP_LOGD(TAG, "stats_frame_changed cmd=%s changed=%s", this->xml_last_command_.c_str(),
+               YESNO(!matches_known_repeated_tr32_frame(frame)));
     }
     saw_inner_frame = true;
     std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(frame);
