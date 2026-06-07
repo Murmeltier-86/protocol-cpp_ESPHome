@@ -11,6 +11,7 @@
 #include <sstream>
 #include <utility>
 #include <unordered_set>
+#include <vector>
 
 #include "esphome/core/application.h"
 #include "esphome/core/time.h"
@@ -150,8 +151,8 @@ bool is_stats_ascii_response(const std::string &line) {
   }
   std::transform(lower.begin(), lower.end(), lower.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return lower.rfind("@tr:", 0) == 0 || lower.rfind("@tg:", 0) == 0 || lower.rfind("@ts", 0) == 0 ||
-         lower == "ok" || lower == "ok:";
+  return lower.rfind("@tr", 0) == 0 || lower.rfind("@tg", 0) == 0 || lower.rfind("@ts", 0) == 0 ||
+         lower.rfind("ok", 0) == 0;
 }
 
 bool is_printable_transport_payload(const std::string &line) {
@@ -167,6 +168,59 @@ bool is_printable_transport_payload(const std::string &line) {
     }
   }
   return true;
+}
+
+uint8_t printable_ratio_percent(const std::string &line) {
+  if (line.empty()) {
+    return 0;
+  }
+  size_t printable = 0;
+  for (unsigned char c : line) {
+    if ((c >= 0x20 && c <= 0x7E) || c == '\r' || c == '\n' || c == '\t') {
+      ++printable;
+    }
+  }
+  return static_cast<uint8_t>((printable * 100U) / line.size());
+}
+
+std::string printable_preview(const std::string &line, size_t max_bytes = 32) {
+  std::string out;
+  size_t count = std::min(line.size(), max_bytes);
+  out.reserve(count + (line.size() > max_bytes ? 4 : 0));
+  for (size_t i = 0; i < count; ++i) {
+    unsigned char c = static_cast<unsigned char>(line[i]);
+    out.push_back(c >= 0x20 && c <= 0x7E ? static_cast<char>(c) : '.');
+  }
+  if (line.size() > max_bytes) {
+    out.append("...");
+  }
+  return out;
+}
+
+bool payload_starts_with_at(const std::string &line) { return !line.empty() && line.front() == '@'; }
+bool payload_starts_with_tr(const std::string &line) {
+  std::string lower = line.substr(0, std::min<size_t>(3, line.size()));
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return lower == "@tr";
+}
+bool payload_starts_with_tg(const std::string &line) {
+  std::string lower = line.substr(0, std::min<size_t>(3, line.size()));
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return lower == "@tg";
+}
+bool payload_starts_with_ts(const std::string &line) {
+  std::string lower = line.substr(0, std::min<size_t>(3, line.size()));
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return lower == "@ts";
+}
+bool payload_starts_with_ok(const std::string &line) {
+  std::string lower = line.substr(0, std::min<size_t>(2, line.size()));
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return lower == "ok";
 }
 
 uint8_t fw_mod8(int value) {
@@ -194,14 +248,22 @@ uint8_t fw_nibble_transform(uint8_t nibble, uint8_t position, uint8_t key_hi, ui
 struct InnerTransportDecodeResult {
   bool ok{false};
   std::string payload{};
+  std::string encoded_payload{};
   std::string reason{};
   const char *table_name{"unknown"};
+  uint8_t start{0};
+  uint8_t key{0};
+  bool key_escaped{false};
+  size_t payload_len{0};
+  size_t esc_count{0};
+  uint8_t printable_ratio{0};
 };
 
 InnerTransportDecodeResult decode_inner_transport_with_tables(const std::string &frame, const uint8_t table_a[16],
                                                               const uint8_t table_b[16], const char *table_name) {
   InnerTransportDecodeResult result;
   result.table_name = table_name;
+  result.start = frame.empty() ? 0 : static_cast<uint8_t>(frame.front());
   if (frame.size() < 2) {
     result.reason = "short_frame";
     return result;
@@ -214,6 +276,8 @@ InnerTransportDecodeResult decode_inner_transport_with_tables(const std::string 
 
   size_t index = 1;
   if (static_cast<uint8_t>(frame[index]) == 0x1B) {
+    result.key_escaped = true;
+    result.esc_count += 1;
     ++index;
     if (index >= frame.size()) {
       result.reason = "truncated_escaped_key";
@@ -221,19 +285,23 @@ InnerTransportDecodeResult decode_inner_transport_with_tables(const std::string 
     }
   }
   uint8_t key = static_cast<uint8_t>(frame[index]) & 0x7F;
+  result.key = key;
   uint8_t key_hi = (key >> 4) & 0x0F;
   uint8_t key_lo = key & 0x0F;
   ++index;
 
   uint8_t position = 0;
   std::string payload;
+  std::string encoded_payload;
   payload.reserve(frame.size());
+  encoded_payload.reserve(frame.size());
   while (index < frame.size()) {
     uint8_t encoded = static_cast<uint8_t>(frame[index]);
     if (encoded == '\r' || encoded == '\n') {
       break;
     }
     if (encoded == 0x1B) {
+      result.esc_count += 1;
       ++index;
       if (index >= frame.size()) {
         result.reason = "truncated_escape";
@@ -242,6 +310,7 @@ InnerTransportDecodeResult decode_inner_transport_with_tables(const std::string 
       encoded = static_cast<uint8_t>(frame[index]) & 0x7F;
     }
 
+    encoded_payload.push_back(static_cast<char>(encoded));
     uint8_t hi = fw_nibble_transform((encoded >> 4) & 0x0F, position, key_hi, key_lo, table_a, table_b);
     uint8_t next_position = static_cast<uint8_t>(position + 1);
     uint8_t lo = fw_nibble_transform(encoded & 0x0F, next_position, key_hi, key_lo, table_a, table_b);
@@ -250,17 +319,20 @@ InnerTransportDecodeResult decode_inner_transport_with_tables(const std::string 
     ++index;
   }
 
+  result.encoded_payload = encoded_payload;
+  result.payload_len = encoded_payload.size();
+  result.printable_ratio = printable_ratio_percent(payload);
   if (payload.empty()) {
     result.reason = "empty_payload";
     return result;
   }
-  result.ok = true;
   result.payload = payload;
-  result.reason.clear();
+  result.ok = is_stats_ascii_response(payload);
+  result.reason = result.ok ? "" : "inner_decode_not_ascii";
   return result;
 }
 
-InnerTransportDecodeResult decode_inner_transport_frame(const std::string &frame) {
+std::vector<InnerTransportDecodeResult> decode_inner_transport_candidates(const std::string &frame) {
   // Tables are the 16-byte substitution pairs used by FUN_40101408. The WiFi
   // and BLE2 pairs are also present verbatim in the Android transport layer.
   static constexpr uint8_t WIFI_A[16] = {1, 0, 3, 2, 15, 14, 8, 10, 6, 13, 7, 12, 11, 9, 5, 4};
@@ -293,30 +365,13 @@ InnerTransportDecodeResult decode_inner_transport_frame(const std::string &frame
     count = sizeof(plus_candidates) / sizeof(plus_candidates[0]);
   }
 
-  InnerTransportDecodeResult fallback;
-  fallback.reason = "no_candidate_matched";
+  std::vector<InnerTransportDecodeResult> decoded_candidates;
+  decoded_candidates.reserve(count);
   for (size_t i = 0; i < count; ++i) {
-    InnerTransportDecodeResult decoded =
-        decode_inner_transport_with_tables(frame, candidates[i].a, candidates[i].b, candidates[i].name);
-    if (!decoded.ok) {
-      if (fallback.reason == "no_candidate_matched") {
-        fallback = decoded;
-      }
-      continue;
-    }
-    if (is_stats_ascii_response(decoded.payload)) {
-      return decoded;
-    }
-    if (fallback.reason == "no_candidate_matched" || fallback.ok) {
-      fallback = decoded;
-      fallback.reason = "inner_decode_not_ascii";
-    }
+    decoded_candidates.push_back(
+        decode_inner_transport_with_tables(frame, candidates[i].a, candidates[i].b, candidates[i].name));
   }
-  fallback.ok = false;
-  if (fallback.reason.empty()) {
-    fallback.reason = "inner_decode_not_ascii";
-  }
-  return fallback;
+  return decoded_candidates;
 }
 
 int determine_accuracy(XmlSensorKind kind, double scale) {
@@ -877,6 +932,7 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML publish unstable counters: %s", YESNO(this->xml_publish_unstable_));
   ESP_LOGCONFIG(TAG, "  XML compact debug: %s", YESNO(this->xml_debug_compact_));
   ESP_LOGCONFIG(TAG, "  XML inner transport decode: %s", YESNO(this->xml_decode_inner_transport_));
+  ESP_LOGCONFIG(TAG, "  XML inner decode trace: %s", YESNO(this->xml_inner_decode_trace_));
   ESP_LOGCONFIG(TAG, "  XML counter max: %u", static_cast<unsigned>(this->xml_counter_max_));
   if (this->enable_xml_poll_) {
     this->log_xml_mapping_status_(true);
@@ -2979,11 +3035,49 @@ bool JuraComponent::decode_stats_inner_transport_line_(const std::string &raw_li
   }
 
   uint8_t start = static_cast<uint8_t>(raw_line.front());
-  ESP_LOGD(TAG, "stats_rx_transport cmd=%s start=0x%02X len=%u hex=\"%s\"", this->xml_last_command_.c_str(),
-           static_cast<unsigned>(start), static_cast<unsigned>(raw_line.size()), compact_hex_string(raw_line).c_str());
+  std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(raw_line);
+  const InnerTransportDecodeResult *frame_info = candidates.empty() ? nullptr : &candidates.front();
+  if (this->xml_inner_decode_trace_ && frame_info != nullptr) {
+    ESP_LOGD(TAG, "stats_rx_transport cmd=%s start=0x%02X len=%u key_byte=0x%02X key_escaped=%s payload_len=%u "
+                  "esc_count=%u hex=\"%s\"",
+             this->xml_last_command_.c_str(), static_cast<unsigned>(start), static_cast<unsigned>(raw_line.size()),
+             static_cast<unsigned>(frame_info->key), YESNO(frame_info->key_escaped),
+             static_cast<unsigned>(frame_info->payload_len), static_cast<unsigned>(frame_info->esc_count),
+             compact_hex_string(raw_line).c_str());
+  } else {
+    ESP_LOGD(TAG, "stats_rx_transport cmd=%s start=0x%02X len=%u hex=\"%s\"", this->xml_last_command_.c_str(),
+             static_cast<unsigned>(start), static_cast<unsigned>(raw_line.size()), compact_hex_string(raw_line).c_str());
+  }
   this->publish_raw_rx_(raw_line, "stats_inner_transport");
 
-  InnerTransportDecodeResult decoded = decode_inner_transport_frame(raw_line);
+  InnerTransportDecodeResult decoded;
+  decoded.reason = "no_candidate_matched";
+  for (const auto &candidate : candidates) {
+    if (this->xml_inner_decode_trace_) {
+      ESP_LOGD(TAG, "stats_inner_candidate cmd=%s table=%s ok=%s key=0x%02X key_escaped=%s payload_len=%u "
+                    "esc_count=%u pre_hex=\"%s\" decoded_hex=\"%s\" len=%u printable=%u%% starts_at=%s "
+                    "starts_tr=%s starts_tg=%s starts_ts=%s starts_ok=%s first_hex=\"%s\" first_ascii=\"%s\" "
+                    "reason=%s",
+               this->xml_last_command_.c_str(), candidate.table_name, YESNO(candidate.ok),
+               static_cast<unsigned>(candidate.key), YESNO(candidate.key_escaped),
+               static_cast<unsigned>(candidate.payload_len), static_cast<unsigned>(candidate.esc_count),
+               compact_hex_string(candidate.encoded_payload, 32).c_str(),
+               compact_hex_string(candidate.payload, 32).c_str(), static_cast<unsigned>(candidate.payload.size()),
+               static_cast<unsigned>(candidate.printable_ratio), YESNO(payload_starts_with_at(candidate.payload)),
+               YESNO(payload_starts_with_tr(candidate.payload)), YESNO(payload_starts_with_tg(candidate.payload)),
+               YESNO(payload_starts_with_ts(candidate.payload)), YESNO(payload_starts_with_ok(candidate.payload)),
+               compact_hex_string(candidate.payload, 12).c_str(), printable_preview(candidate.payload, 32).c_str(),
+               candidate.reason.empty() ? "none" : candidate.reason.c_str());
+    }
+    if (candidate.ok) {
+      decoded = candidate;
+      break;
+    }
+    if (decoded.reason == "no_candidate_matched" || candidate.payload.size() > decoded.payload.size()) {
+      decoded = candidate;
+    }
+  }
+
   if (!decoded.ok) {
     std::string reason = decoded.reason.empty() ? "inner_decode_failed" : decoded.reason;
     ESP_LOGD(TAG, "stats_inner_decode cmd=%s ok=false reason=%s table=%s", this->xml_last_command_.c_str(),
@@ -3526,9 +3620,11 @@ void JuraComponent::finish_stats_cycle_(uint32_t now, const char *reason) {
   this->xml_rx_buffer_.clear();
   this->xml_stats_.clear();
   uint32_t sleep = std::max(this->xml_poll_interval_ms_, kCycleSleepMs);
+  this->transition_to_state_(XmlPollState::SLEEP, now);
   this->xml_deadline_ms_ = now + sleep;
   this->xml_next_poll_ = this->xml_deadline_ms_;
-  this->transition_to_state_(XmlPollState::SLEEP, now);
+  ESP_LOGD(TAG, "stats_cycle_end result=%s next_retry_ms=%u",
+           std::string(end_reason) == "done_with_errors" ? "failed" : "ok", static_cast<unsigned>(sleep));
 }
 
 void JuraComponent::handle_xml_timeout_(XmlPollState next_state, const char *label, uint32_t now) {
