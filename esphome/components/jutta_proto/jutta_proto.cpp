@@ -912,10 +912,7 @@ void JuraComponent::handle_decoded_response_(const std::string &response, const 
     if (this->decode_and_publish_status_(response, parser_branch)) {
       return;
     }
-    std::string safe = sanitize_text_for_api(response);
-    if (safe.find("\\x") == std::string::npos && !safe.empty()) {
-      this->publish_machine_status_(safe);
-    }
+    ESP_LOGD(TAG, "DB frame kept raw-only; no verified status text decoded");
   }
 }
 
@@ -953,24 +950,32 @@ bool JuraComponent::decode_and_publish_status_(const std::string &response, cons
     return false;
   }
   this->last_decoded_fields_ = fields;
-  std::string summary = this->format_decoded_status_(fields);
-  if (summary.empty()) {
-    ESP_LOGD(TAG,
-             "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
-             "xml_tables=unknown fields=none final='' fallback=empty_summary",
-             raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str());
-    return false;
-  }
   std::vector<std::string> tables;
   bool has_publishable = false;
   std::string field_trace = format_decoded_field_trace(fields, tables, has_publishable);
   std::string table_trace = tables.empty() ? "unknown" : join_values(tables, ",");
-  std::string fallback_reason = has_publishable ? "none" : "no_verified_status_or_alert_match_raw_used";
+  if (!has_publishable) {
+    ESP_LOGD(TAG,
+             "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
+             "xml_tables=%s fields=%s final='' fallback=no_verified_status_or_alert_match_raw_only",
+             raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str(),
+             table_trace.c_str(), field_trace.c_str());
+    return false;
+  }
+  std::string summary = this->format_decoded_status_(fields);
+  if (summary.empty()) {
+    ESP_LOGD(TAG,
+             "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
+             "xml_tables=%s fields=%s final='' fallback=empty_summary",
+             raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str(),
+             table_trace.c_str(), field_trace.c_str());
+    return false;
+  }
   ESP_LOGD(TAG,
            "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
            "xml_tables=%s fields=%s final='%s' fallback=%s",
            raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str(),
-           table_trace.c_str(), field_trace.c_str(), sanitize_text_for_api(summary).c_str(), fallback_reason.c_str());
+           table_trace.c_str(), field_trace.c_str(), sanitize_text_for_api(summary).c_str(), "none");
   this->publish_machine_status_(summary);
   this->publish_last_command_result_("decoded_status");
   return true;
@@ -1028,6 +1033,62 @@ std::string JuraComponent::format_decoded_status_(const std::vector<JuraDecodedF
   return sanitize_text_for_api(summary);
 }
 
+bool JuraComponent::is_printable_status_text_(const std::string &text) const {
+  if (text.empty()) {
+    return false;
+  }
+  size_t escaped_binary_markers = 0;
+  size_t hex_like_tokens = 0;
+  for (size_t i = 0; i < text.size(); ++i) {
+    unsigned char c = static_cast<unsigned char>(text[i]);
+    if (c == '\r' || c == '\n' || c == '\t') {
+      continue;
+    }
+    if (c < 0x20 || c == 0x7F) {
+      return false;
+    }
+    if (c >= 0x80) {
+      size_t remaining = 0;
+      if ((c & 0xE0) == 0xC0) {
+        remaining = 1;
+        if (c < 0xC2) {
+          return false;
+        }
+      } else if ((c & 0xF0) == 0xE0) {
+        remaining = 2;
+      } else if ((c & 0xF8) == 0xF0) {
+        remaining = 3;
+        if (c > 0xF4) {
+          return false;
+        }
+      } else {
+        return false;
+      }
+      if (i + remaining >= text.size()) {
+        return false;
+      }
+      for (size_t j = 1; j <= remaining; ++j) {
+        unsigned char cc = static_cast<unsigned char>(text[i + j]);
+        if ((cc & 0xC0) != 0x80) {
+          return false;
+        }
+      }
+      i += remaining;
+      continue;
+    }
+    if (c == '\\' && i + 1 < text.size() && text[i + 1] == 'x') {
+      ++escaped_binary_markers;
+    }
+    if (c == '0' && i + 1 < text.size() && (text[i + 1] == 'x' || text[i + 1] == 'X')) {
+      ++hex_like_tokens;
+    }
+  }
+  if (escaped_binary_markers > 0) {
+    return false;
+  }
+  return hex_like_tokens <= 4 || text.find('<') != std::string::npos;
+}
+
 void JuraComponent::publish_raw_rx_(const std::string &response, const char *parser_branch) {
   std::string safe = sanitize_text_for_api(response);
   ESP_LOGV(TAG, "RX decoded branch=%s value='%s'", parser_branch != nullptr ? parser_branch : "unknown",
@@ -1052,6 +1113,10 @@ void JuraComponent::publish_machine_type_() {
 }
 
 void JuraComponent::publish_machine_status_(const std::string &status) {
+  if (!this->is_printable_status_text_(status)) {
+    ESP_LOGW(TAG, "Machine status publish suppressed (binary/non-printable payload)");
+    return;
+  }
   std::string safe = sanitize_text_for_api(status);
   ESP_LOGV(TAG, "Machine status: %s", safe.c_str());
   if (this->machine_status_sensor_ != nullptr) {
@@ -1086,6 +1151,13 @@ void JuraComponent::process_machine_data_query() {
   if (this->is_busy()) {
     return;
   }
+  bool xml_poll_active = this->xml_inflight_ || this->db_transaction_owner_ == DbTransactionOwner::XML_POLL ||
+                         (this->enable_xml_poll_ && this->xml_state_ != XmlPollState::IDLE &&
+                          this->xml_state_ != XmlPollState::SLEEP);
+  if (xml_poll_active) {
+    ESP_LOGD(TAG, "Machine-XML query skipped while XML DB polling is active");
+    return;
+  }
 
   uint32_t now = esphome::millis();
   if (this->machine_data_query_next_ != 0 && !time_reached(now, this->machine_data_query_next_)) {
@@ -1107,21 +1179,27 @@ void JuraComponent::publish_machine_data_(const std::string &response) {
   sanitized.erase(std::remove_if(sanitized.begin(), sanitized.end(),
                                  [](unsigned char c) { return c == '\r' || c == '\n'; }),
                   sanitized.end());
-  ESP_LOGD(TAG, "Machine data response: %s", sanitized.c_str());
+  ESP_LOGD(TAG, "Machine data response: %s", sanitize_text_for_api(sanitized).c_str());
+  if (!this->is_printable_status_text_(sanitized)) {
+    ESP_LOGW(TAG, "Machine data publish skipped (binary/non-printable payload)");
+    return;
+  }
   if (this->machine_data_sensor_ != nullptr) {
     std::string safe = sanitize_text_for_api(sanitized);
-    bool likely_binary = safe.find("\\x") != std::string::npos;
-    if (likely_binary) {
-      ESP_LOGV(TAG, "Machine data publish skipped (likely binary payload)");
-    } else {
-      this->machine_data_sensor_->publish_state(safe);
-    }
+    this->machine_data_sensor_->publish_state(safe);
   }
 }
 
 bool JuraComponent::request_machine_xml_(std::string &xml) {
   xml.clear();
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return false;
+  }
+  bool xml_poll_active = this->xml_inflight_ || this->db_transaction_owner_ == DbTransactionOwner::XML_POLL ||
+                         (this->enable_xml_poll_ && this->xml_state_ != XmlPollState::IDLE &&
+                          this->xml_state_ != XmlPollState::SLEEP);
+  if (xml_poll_active) {
+    ESP_LOGD(TAG, "Machine-XML query skipped while XML DB polling is active");
     return false;
   }
 
@@ -1131,24 +1209,43 @@ bool JuraComponent::request_machine_xml_(std::string &xml) {
     if (command == nullptr || command[0] == '\0') {
       return false;
     }
+    if (this->db_transaction_owner_ != DbTransactionOwner::NONE) {
+      ESP_LOGD(TAG, "Machine-XML command %s skipped; DB transaction already active", command);
+      return false;
+    }
+    this->db_transaction_owner_ = DbTransactionOwner::MACHINE_XML;
     connection->reset_db_rx_buffer();
     if (!connection->write_decoded(command)) {
       ESP_LOGW(TAG, "Machine-XML Befehl %s konnte nicht gesendet werden.", command);
+      this->clear_db_transaction_(DbTransactionOwner::MACHINE_XML);
       return false;
     }
     std::vector<uint8_t> decoded;
     bool had_crlf = false;
     size_t decoded_len = 0;
     if (!connection->read_db_frame(decoded, MACHINE_XML_TIMEOUT_MS, &had_crlf, &decoded_len)) {
+      ESP_LOGW(TAG, "Machine-XML timeout for %s", command);
+      connection->reset_db_rx_buffer();
+      this->clear_db_transaction_(DbTransactionOwner::MACHINE_XML);
       return false;
     }
     if (decoded.empty()) {
+      this->clear_db_transaction_(DbTransactionOwner::MACHINE_XML);
       return false;
     }
     out.assign(decoded.begin(), decoded.end());
+    if (!this->is_printable_status_text_(out)) {
+      ESP_LOGW(TAG, "Machine-XML ignored binary response");
+      connection->reset_db_rx_buffer();
+      out.clear();
+      this->clear_db_transaction_(DbTransactionOwner::MACHINE_XML);
+      return false;
+    }
     out.erase(std::remove(out.begin(), out.end(), '\r'), out.end());
     trim_in_place(out);
-    return !out.empty();
+    bool ok = !out.empty();
+    this->clear_db_transaction_(DbTransactionOwner::MACHINE_XML);
+    return ok;
   };
 
   std::string primary;
@@ -1178,6 +1275,14 @@ bool JuraComponent::request_machine_xml_(std::string &xml) {
 }
 
 void JuraComponent::handle_machine_xml_(const std::string &xml) {
+  if (!this->is_printable_status_text_(xml)) {
+    ESP_LOGW(TAG, "Machine-XML ignored binary response");
+    return;
+  }
+  if (xml.find('<') == std::string::npos || xml.find('>') == std::string::npos) {
+    ESP_LOGW(TAG, "Machine-XML ignored non-XML response");
+    return;
+  }
   uint32_t now = esphome::millis();
   std::string normalized = xml;
   normalized.erase(std::remove(normalized.begin(), normalized.end(), '\r'), normalized.end());
@@ -1185,8 +1290,10 @@ void JuraComponent::handle_machine_xml_(const std::string &xml) {
   this->machine_xml_timestamp_ = now;
 
   std::string summary = this->format_machine_status_summary_(normalized);
-  this->publish_machine_status_(summary);
-  this->publish_machine_data_(summary);
+  if (this->is_printable_status_text_(summary)) {
+    this->publish_machine_status_(summary);
+    this->publish_machine_data_(summary);
+  }
   this->update_settings_from_xml_(normalized);
   this->update_errors_from_xml_(normalized);
 }
@@ -1395,6 +1502,7 @@ bool JuraComponent::decode_field_value_(const std::vector<uint8_t> &decoded, con
 
 void JuraComponent::start_new_xml_cycle_(uint32_t now) {
   (void) now;
+  this->db_transaction_owner_ = DbTransactionOwner::XML_POLL;
   this->xml_stats_.clear();
   this->xml_rx_buffer_.clear();
   this->xml_inflight_ = false;
@@ -1422,6 +1530,12 @@ size_t JuraComponent::xml_command_index_(XmlPollState state) const {
       break;
   }
   return 0;
+}
+
+void JuraComponent::clear_db_transaction_(DbTransactionOwner owner) {
+  if (owner == DbTransactionOwner::NONE || this->db_transaction_owner_ == owner) {
+    this->db_transaction_owner_ = DbTransactionOwner::NONE;
+  }
 }
 
 bool JuraComponent::validate_xml_frame_(XmlPollState state, const std::vector<uint8_t> &decoded, bool had_crlf,
@@ -1725,6 +1839,12 @@ void JuraComponent::handle_xml_failure_(XmlPollState wait_state, bool is_timeout
     this->xml_invalid_len_seen_[index] = false;
     this->xml_last_invalid_len_[index] = 0;
   }
+  if (is_timeout) {
+    if (this->coffee_maker_ != nullptr && this->coffee_maker_->connection != nullptr) {
+      this->coffee_maker_->connection->reset_db_rx_buffer();
+    }
+    this->clear_db_transaction_(DbTransactionOwner::XML_POLL);
+  }
 
   this->xml_inflight_ = false;
   this->xml_deadline_ms_ = 0;
@@ -2022,6 +2142,7 @@ void JuraComponent::reset_xml_poll_state_() {
   this->xml_deadline_ms_ = 0;
   this->xml_next_action_ms_ = 0;
   this->xml_inflight_ = false;
+  this->clear_db_transaction_(DbTransactionOwner::NONE);
   this->xml_last_command_.clear();
   this->xml_rx_buffer_.clear();
   this->xml_stats_.clear();
@@ -2049,6 +2170,10 @@ void JuraComponent::process_xml_polling() {
   }
   this->ensure_xml_sensors_created_();
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return;
+  }
+  if (this->db_transaction_owner_ == DbTransactionOwner::MACHINE_XML) {
+    ESP_LOGD(TAG, "XML DB polling skipped while Machine-XML transaction is active");
     return;
   }
 
@@ -2279,6 +2404,7 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         this->xml_state_ = XmlPollState::IDLE;
         this->xml_next_action_ms_ = 0;
         this->xml_next_poll_ = now;
+        this->clear_db_transaction_(DbTransactionOwner::XML_POLL);
         return;
       }
       if (static_cast<int32_t>(now - this->xml_deadline_ms_) >= 0) {
@@ -2288,6 +2414,7 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         this->xml_next_poll_ = now;
         this->xml_inflight_ = false;
         this->xml_last_command_.clear();
+        this->clear_db_transaction_(DbTransactionOwner::XML_POLL);
       }
       return;
     }
@@ -2366,6 +2493,9 @@ const char *JuraComponent::xml_state_label_(XmlPollState state) const {
 
 void JuraComponent::transition_to_state_(XmlPollState state, uint32_t now, uint32_t delay_ms) {
   this->xml_state_ = state;
+  if (state == XmlPollState::SLEEP || state == XmlPollState::IDLE) {
+    this->clear_db_transaction_(DbTransactionOwner::XML_POLL);
+  }
   if (delay_ms > 0) {
     this->xml_next_action_ms_ = now + delay_ms;
   } else {
@@ -2383,6 +2513,13 @@ bool JuraComponent::send_xml_command_(const char *command, XmlPollState wait_sta
   }
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     return false;
+  }
+  if (this->db_transaction_owner_ == DbTransactionOwner::MACHINE_XML) {
+    ESP_LOGD(TAG, "TX_DB \"%s\" skipped while Machine-XML transaction is active", command);
+    return false;
+  }
+  if (this->db_transaction_owner_ == DbTransactionOwner::NONE) {
+    this->db_transaction_owner_ = DbTransactionOwner::XML_POLL;
   }
   if (this->xml_inflight_) {
     return false;

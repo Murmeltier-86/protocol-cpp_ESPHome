@@ -255,6 +255,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void publish_machine_ready_(bool ready);
   bool decode_and_publish_status_(const std::string &response, const char *parser_branch);
   std::string format_decoded_status_(const std::vector<JuraDecodedField> &fields) const;
+  bool is_printable_status_text_(const std::string &text) const;
   void process_machine_data_query();
   void publish_machine_data_(const std::string &response);
   void process_xml_polling();
@@ -286,7 +287,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     PARSE_TGC0,
     SLEEP
   };
+  enum class DbTransactionOwner { NONE, XML_POLL, MACHINE_XML };
   size_t xml_command_index_(XmlPollState state) const;
+  void clear_db_transaction_(DbTransactionOwner owner);
   bool validate_xml_frame_(XmlPollState state, const std::vector<uint8_t> &decoded, bool had_crlf,
                            size_t decoded_len, std::vector<uint8_t> &payload, size_t &expected_min_len,
                            uint8_t &head0) const;
@@ -359,6 +362,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t xml_deadline_ms_{0};
   uint32_t xml_next_action_ms_{0};
   bool xml_inflight_{false};
+  DbTransactionOwner db_transaction_owner_{DbTransactionOwner::NONE};
   std::string xml_last_command_{};
   std::vector<uint8_t> xml_rx_buffer_{};
   bool xml_mapping_logged_{false};
