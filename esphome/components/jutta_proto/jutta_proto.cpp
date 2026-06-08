@@ -494,6 +494,7 @@ struct InnerTransportDecodeResult {
   std::string reason{};
   const char *table_name{"unknown"};
   const char *escape_name{"current"};
+  const char *key_variant_name{"key_byte_current"};
   uint8_t start{0};
   uint8_t key{0};
   bool key_escaped{false};
@@ -651,6 +652,111 @@ std::vector<InnerTransportDecodeResult> decode_inner_transport_variant_candidate
         decode_inner_transport_with_tables(frame, candidate.a, candidate.b, candidate.name, escape_variant));
   }
   return decoded_candidates;
+}
+
+InnerTransportDecodeResult decode_inner_payload_with_key(const std::string &encoded_payload, uint8_t key_hi,
+                                                         uint8_t key_lo, const uint8_t table_a[16],
+                                                         const uint8_t table_b[16], const char *table_name,
+                                                         const char *key_variant_name) {
+  InnerTransportDecodeResult result;
+  result.table_name = table_name;
+  result.key_variant_name = key_variant_name;
+  result.key = static_cast<uint8_t>(((key_hi & 0x0F) << 4) | (key_lo & 0x0F));
+  result.encoded_payload = encoded_payload;
+  result.payload_len = encoded_payload.size();
+
+  std::string payload;
+  payload.reserve(encoded_payload.size());
+  uint8_t position = 0;
+  for (unsigned char byte : encoded_payload) {
+    uint8_t hi = fw_nibble_transform((byte >> 4) & 0x0F, position, key_hi & 0x0F, key_lo & 0x0F, table_a, table_b);
+    uint8_t next_position = static_cast<uint8_t>(position + 1);
+    uint8_t lo = fw_nibble_transform(byte & 0x0F, next_position, key_hi & 0x0F, key_lo & 0x0F, table_a, table_b);
+    payload.push_back(static_cast<char>((hi << 4) | lo));
+    position = static_cast<uint8_t>(position + 2);
+  }
+
+  result.payload = payload;
+  result.printable_ratio = printable_ratio_percent(payload);
+  if (payload.empty()) {
+    result.reason = "empty_payload";
+    return result;
+  }
+  result.ok = is_stats_ascii_response(payload);
+  result.reason = result.ok ? "" : "inner_decode_not_ascii";
+  return result;
+}
+
+std::vector<InnerTransportDecodeResult> decode_inner_transport_key_variant_candidates(
+    const InnerBinaryProbePayload &probe, bool has_t2_word, uint16_t t2_word) {
+  static constexpr uint8_t WIFI_A[16] = {1, 0, 3, 2, 15, 14, 8, 10, 6, 13, 7, 12, 11, 9, 5, 4};
+  static constexpr uint8_t WIFI_B[16] = {9, 12, 6, 11, 10, 15, 2, 14, 13, 0, 4, 3, 1, 8, 7, 5};
+  static constexpr uint8_t BLE2_A[16] = {14, 4, 3, 2, 1, 13, 8, 11, 6, 15, 12, 7, 10, 5, 0, 9};
+  static constexpr uint8_t BLE2_B[16] = {10, 6, 13, 12, 14, 11, 1, 9, 15, 7, 0, 5, 3, 2, 4, 8};
+  static constexpr uint8_t FW_PARAM0_A[16] = {13, 0, 4, 3, 1, 8, 7, 5, 1, 0, 3, 2, 15, 14, 8, 10};
+  static constexpr uint8_t FW_PARAM0_B[16] = {6, 7, 0, 12, 11, 5, 1, 3, 9, 12, 6, 11, 10, 15, 2, 14};
+
+  struct TableCandidate {
+    const char *name;
+    const uint8_t *a;
+    const uint8_t *b;
+  };
+  struct KeyCandidate {
+    const char *name;
+    uint8_t hi;
+    uint8_t lo;
+    std::string payload;
+  };
+
+  const TableCandidate tables[] = {{"fw_param0", FW_PARAM0_A, FW_PARAM0_B},
+                                   {"wifi", WIFI_A, WIFI_B},
+                                   {"ble2", BLE2_A, BLE2_B}};
+
+  std::vector<KeyCandidate> keys;
+  keys.reserve(8);
+  uint8_t current_hi = (probe.key >> 4) & 0x0F;
+  uint8_t current_lo = probe.key & 0x0F;
+  keys.push_back({"key_byte_current", current_hi, current_lo, probe.unescaped_payload});
+  keys.push_back({"key_hi_lo_nibbles", current_hi, current_lo, probe.unescaped_payload});
+  keys.push_back({"key_low_high_nibbles", current_lo, current_hi, probe.unescaped_payload});
+  if (!probe.unescaped_payload.empty()) {
+    uint8_t next = static_cast<uint8_t>(probe.unescaped_payload.front());
+    keys.push_back({"key_byte_and_next_byte", probe.key & 0x0F, next & 0x0F, probe.unescaped_payload.substr(1)});
+  }
+  if (has_t2_word) {
+    uint8_t t2_low = static_cast<uint8_t>(t2_word & 0xFF);
+    uint8_t t2_high = static_cast<uint8_t>((t2_word >> 8) & 0xFF);
+    keys.push_back({"key_from_t2_word_low_byte", static_cast<uint8_t>((t2_low >> 4) & 0x0F),
+                    static_cast<uint8_t>(t2_low & 0x0F), probe.unescaped_payload});
+    keys.push_back({"key_from_t2_word_high_byte", static_cast<uint8_t>((t2_high >> 4) & 0x0F),
+                    static_cast<uint8_t>(t2_high & 0x0F), probe.unescaped_payload});
+    keys.push_back({"key_from_t2_word_nibbles", static_cast<uint8_t>((t2_word >> 12) & 0x0F),
+                    static_cast<uint8_t>(t2_word & 0x0F), probe.unescaped_payload});
+  }
+
+  std::vector<InnerTransportDecodeResult> decoded_candidates;
+  decoded_candidates.reserve(keys.size() * (sizeof(tables) / sizeof(tables[0])));
+  for (const auto &key : keys) {
+    for (const auto &table : tables) {
+      decoded_candidates.push_back(
+          decode_inner_payload_with_key(key.payload, key.hi, key.lo, table.a, table.b, table.name, key.name));
+    }
+  }
+  return decoded_candidates;
+}
+
+bool parse_t2_word_from_response(const std::string &response, uint16_t &word) {
+  if (response.size() < 14) {
+    return false;
+  }
+  std::string candidate = response.substr(10, 4);
+  char *end = nullptr;
+  unsigned long parsed = std::strtoul(candidate.c_str(), &end, 16);
+  if (end == candidate.c_str() || end == nullptr || *end != '\0' || parsed > 0xFFFFUL) {
+    return false;
+  }
+  word = static_cast<uint16_t>(parsed);
+  return true;
 }
 
 int determine_accuracy(XmlSensorKind kind, double scale) {
@@ -1214,6 +1320,8 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML inner transport decode: %s", YESNO(this->xml_decode_inner_transport_));
   ESP_LOGCONFIG(TAG, "  XML inner decode trace: %s", YESNO(this->xml_inner_decode_trace_));
   ESP_LOGCONFIG(TAG, "  XML binary probe: %s", YESNO(this->xml_binary_probe_));
+  ESP_LOGCONFIG(TAG, "  XML key probe: %s", YESNO(this->xml_key_probe_));
+  ESP_LOGCONFIG(TAG, "  XML deep debug: %s", YESNO(this->xml_deep_debug_));
   ESP_LOGCONFIG(TAG, "  XML tablet start sequence: %s", YESNO(this->xml_run_tablet_start_sequence_));
   ESP_LOGCONFIG(TAG, "  XML tablet sequence mode: %s", this->xml_tablet_sequence_mode_.c_str());
   ESP_LOGCONFIG(TAG, "  XML counter max: %u", static_cast<unsigned>(this->xml_counter_max_));
@@ -3315,16 +3423,7 @@ const char *JuraComponent::tablet_sequence_state_name_(TabletSeqState state) con
 
 void JuraComponent::start_tablet_start_sequence_(uint32_t now) {
   uint16_t t2_word = 0;
-  bool t2_word_found = false;
-  if (this->handshake_t2_response_.size() >= 14) {
-    std::string candidate = this->handshake_t2_response_.substr(10, 4);
-    char *end = nullptr;
-    unsigned long parsed = std::strtoul(candidate.c_str(), &end, 16);
-    if (end != candidate.c_str() && end != nullptr && *end == '\0' && parsed <= 0xFFFFUL) {
-      t2_word = static_cast<uint16_t>(parsed);
-      t2_word_found = true;
-    }
-  }
+  bool t2_word_found = parse_t2_word_from_response(this->handshake_t2_response_, t2_word);
 
   this->tablet_seq_state_ = TabletSeqState::SEND_D1;
   this->tablet_seq_rx_buffer_.clear();
@@ -3627,7 +3726,7 @@ bool JuraComponent::finish_stats_rx_capture_(std::string &line, uint32_t now) {
     }
     saw_inner_frame = true;
     this->log_stats_binary_probe_(frame);
-    if (this->xml_inner_decode_trace_) {
+    if (this->xml_deep_debug_) {
       std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(frame);
       for (const auto &candidate : candidates) {
         bool plausible_tr = payload_starts_with_tr(candidate.payload) && candidate.payload.size() >= 16;
@@ -3714,6 +3813,42 @@ void JuraComponent::log_stats_binary_probe_(const std::string &frame) {
   }
 }
 
+bool JuraComponent::probe_stats_inner_key_variants_(const std::string &frame, std::string &decoded_line) {
+  decoded_line.clear();
+  if (!this->xml_key_probe_ && !this->xml_deep_debug_) {
+    return false;
+  }
+
+  InnerBinaryProbePayload probe = extract_current_inner_binary_payload(frame);
+  if (!probe.reason.empty()) {
+    ESP_LOGD(TAG, "inner_key_variant cmd=%s variant=extract_failed table=unknown reason=%s",
+             this->xml_last_command_.c_str(), probe.reason.c_str());
+    return false;
+  }
+
+  uint16_t t2_word = 0;
+  bool has_t2_word = parse_t2_word_from_response(this->handshake_t2_response_, t2_word);
+  std::vector<InnerTransportDecodeResult> candidates =
+      decode_inner_transport_key_variant_candidates(probe, has_t2_word, t2_word);
+  for (const auto &candidate : candidates) {
+    ESP_LOGD(TAG, "inner_key_variant cmd=%s variant=%s table=%s len=%u printable=%u%% starts_at=%s "
+                  "starts_tr=%s starts_tg=%s starts_ts=%s starts_ok=%s first_ascii=\"%s\"",
+             this->xml_last_command_.c_str(), candidate.key_variant_name, candidate.table_name,
+             static_cast<unsigned>(candidate.payload.size()), static_cast<unsigned>(candidate.printable_ratio),
+             YESNO(payload_starts_with_at(candidate.payload)), YESNO(payload_starts_with_tr(candidate.payload)),
+             YESNO(payload_starts_with_tg(candidate.payload)), YESNO(payload_starts_with_ts(candidate.payload)),
+             YESNO(payload_starts_with_ok(candidate.payload)), printable_preview(candidate.payload, 32).c_str());
+    if (candidate.ok) {
+      decoded_line = candidate.payload;
+      ESP_LOGD(TAG, "stats_inner_decode cmd=%s ok=true variant=%s table=%s len=%u publish=false ascii=\"%s\"",
+               this->xml_last_command_.c_str(), candidate.key_variant_name, candidate.table_name,
+               static_cast<unsigned>(decoded_line.size()), sanitize_text_for_api(decoded_line).c_str());
+      return true;
+    }
+  }
+  return false;
+}
+
 bool JuraComponent::decode_stats_inner_transport_line_(const std::string &raw_line, std::string &decoded_line) {
   decoded_line.clear();
   if (raw_line.empty() || !this->xml_decode_inner_transport_ ||
@@ -3737,7 +3872,13 @@ bool JuraComponent::decode_stats_inner_transport_line_(const std::string &raw_li
   }
   this->publish_raw_rx_(raw_line, "stats_inner_transport");
 
-  if (this->xml_inner_decode_trace_) {
+  if (this->probe_stats_inner_key_variants_(raw_line, decoded_line)) {
+    this->xml_stats_reject_reason_ = "key_probe_match_not_published";
+    this->xml_stats_binary_response_ = true;
+    return false;
+  }
+
+  if (this->xml_deep_debug_) {
     const InnerEscapeVariant variants[] = {InnerEscapeVariant::CURRENT, InnerEscapeVariant::RAW,
                                            InnerEscapeVariant::MASK_7F, InnerEscapeVariant::XOR_20,
                                            InnerEscapeVariant::PASSTHROUGH};
@@ -3759,7 +3900,7 @@ bool JuraComponent::decode_stats_inner_transport_line_(const std::string &raw_li
   InnerTransportDecodeResult decoded;
   decoded.reason = "no_candidate_matched";
   for (const auto &candidate : candidates) {
-    if (this->xml_inner_decode_trace_) {
+    if (this->xml_deep_debug_) {
       ESP_LOGD(TAG, "stats_inner_candidate cmd=%s esc=%s table=%s ok=%s key=0x%02X key_escaped=%s payload_len=%u "
                     "esc_count=%u pre_hex=\"%s\" decoded_hex=\"%s\" len=%u printable=%u%% starts_at=%s "
                     "starts_tr=%s starts_tg=%s starts_ts=%s starts_ok=%s first_hex=\"%s\" first_ascii=\"%s\" "

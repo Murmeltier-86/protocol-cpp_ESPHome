@@ -229,6 +229,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_decode_inner_transport(bool enabled) { this->xml_decode_inner_transport_ = enabled; }
   void set_xml_inner_decode_trace(bool enabled) { this->xml_inner_decode_trace_ = enabled; }
   void set_xml_binary_probe(bool enabled) { this->xml_binary_probe_ = enabled; }
+  void set_xml_key_probe(bool enabled) { this->xml_key_probe_ = enabled; }
+  void set_xml_deep_debug(bool enabled) { this->xml_deep_debug_ = enabled; }
   void set_xml_run_tablet_start_sequence(bool enabled) { this->xml_run_tablet_start_sequence_ = enabled; }
   void set_xml_tablet_sequence_mode(const std::string &mode) { this->xml_tablet_sequence_mode_ = mode; }
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
@@ -358,6 +360,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool read_stats_line_(std::string &line);
   bool finish_stats_rx_capture_(std::string &line, uint32_t now);
   void log_stats_binary_probe_(const std::string &frame);
+  bool probe_stats_inner_key_variants_(const std::string &frame, std::string &decoded_line);
   bool handle_stats_line_(const std::string &line, uint32_t now);
   bool decode_stats_inner_transport_line_(const std::string &raw_line, std::string &decoded_line);
   bool handle_stats_binary_response_(uint32_t now);
@@ -424,6 +427,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_decode_inner_transport_{true};
   bool xml_inner_decode_trace_{false};
   bool xml_binary_probe_{false};
+  bool xml_key_probe_{false};
+  bool xml_deep_debug_{false};
   bool xml_run_tablet_start_sequence_{false};
   std::string xml_tablet_sequence_mode_{"minimal"};
   bool xml_tablet_start_sequence_done_{false};
