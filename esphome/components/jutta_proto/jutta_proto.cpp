@@ -120,10 +120,10 @@ std::string sanitize_text_for_api(const std::string &input) {
       out.push_back(static_cast<char>(c));
       continue;
     }
-    if (c == '    ') {
-      out.push_back('    ');
-      continue;
-    }
+      if (c == '\t') {
+        out.push_back(' ');
+        continue;
+      }
     out.push_back('\\');
     out.push_back('x');
     out.push_back(kHex[(c >> 4) & 0x0F]);
