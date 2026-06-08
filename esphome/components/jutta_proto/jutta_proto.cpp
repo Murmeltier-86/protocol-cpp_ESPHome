@@ -47,6 +47,7 @@ constexpr uint32_t kDongleStartupProbeDelayMs = 250;
 constexpr uint32_t kDongleStartupTimeoutMs = 1500;
 constexpr uint32_t kDongleStartupT0AfterT3TimeoutMs = 5000;
 constexpr uint32_t kDongleStartupT3QuietMs = 1000;
+constexpr uint32_t kDongleStartupGateOnlyQuietMs = 2000;
 constexpr uint32_t kDongleStartupMaxWaitAfterT3Ms = 5000;
 constexpr uint32_t kDongleStartupTr37TimeoutMs = 3000;
 constexpr size_t kDongleStartupMaxRxBytes = 512;
@@ -1351,7 +1352,8 @@ void JuraComponent::setup() {
     }
   }
   if (this->xml_dongle_startup_) {
-    ESP_LOGI(TAG, "xml_dongle_startup enabled; XML statistics will wait for @TR:37 gate");
+    ESP_LOGI(TAG, "xml_dongle_startup enabled; mode=%s; XML statistics will wait for @TR:37 gate",
+             this->xml_dongle_startup_mode_.c_str());
   }
   if (this->enable_xml_poll_) {
     this->ensure_xml_mapping_loaded_();
@@ -1466,6 +1468,8 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML session probe variant: %s", this->xml_session_probe_variant_.c_str());
   ESP_LOGCONFIG(TAG, "  XML dongle startup: %s", YESNO(this->xml_dongle_startup_));
   ESP_LOGCONFIG(TAG, "  XML dongle startup debug: %s", YESNO(this->xml_dongle_startup_debug_));
+  ESP_LOGCONFIG(TAG, "  XML dongle startup mode: %s", this->xml_dongle_startup_mode_.c_str());
+  ESP_LOGCONFIG(TAG, "  XML dongle wait @t0 after @t3: %s", YESNO(this->xml_dongle_wait_t0_after_t3_));
   ESP_LOGCONFIG(TAG, "  XML tablet start sequence: %s", YESNO(this->xml_run_tablet_start_sequence_));
   ESP_LOGCONFIG(TAG, "  XML tablet sequence mode: %s", this->xml_tablet_sequence_mode_.c_str());
   ESP_LOGCONFIG(TAG, "  XML counter max: %u", static_cast<unsigned>(this->xml_counter_max_));
@@ -4234,6 +4238,19 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         this->coffee_maker_->connection->reset_db_rx_buffer();
         this->coffee_maker_->connection->drain_serial_input_nonblocking();
       }
+      if (this->xml_dongle_startup_mode_ == "gate_only") {
+        ESP_LOGD(TAG, "dongle_startup_mode gate_only");
+        this->dongle_startup_quiet_then_prep_tr37_ = true;
+        this->dongle_startup_t3_seen_during_quiet_ = false;
+        this->dongle_startup_t3_seen_while_waiting_tr37_ = false;
+        this->transition_dongle_startup_(DongleStartupState::WAIT_AFTER_T3, now);
+        this->dongle_startup_quiet_start_ms_ = now;
+        this->dongle_startup_next_action_ms_ = now + kDongleStartupGateOnlyQuietMs;
+        this->dongle_startup_deadline_ms_ = now + kDongleStartupMaxWaitAfterT3Ms;
+        ESP_LOGD(TAG, "dongle_startup_gate_only_wait_after_handshake ms=%u",
+                 static_cast<unsigned>(kDongleStartupGateOnlyQuietMs));
+        return false;
+      }
       this->transition_dongle_startup_(DongleStartupState::PROBE_D1, now);
       return false;
     }
@@ -4364,6 +4381,15 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       this->dongle_startup_t3_seen_during_quiet_ = false;
       this->dongle_startup_t3_seen_while_waiting_tr37_ = false;
       this->dongle_startup_quiet_then_prep_tr37_ = true;
+      if (!this->xml_dongle_wait_t0_after_t3_) {
+        this->transition_dongle_startup_(DongleStartupState::WAIT_AFTER_T3, now);
+        this->dongle_startup_quiet_start_ms_ = now;
+        this->dongle_startup_next_action_ms_ = now + kDongleStartupT3QuietMs;
+        this->dongle_startup_deadline_ms_ = now + kDongleStartupMaxWaitAfterT3Ms;
+        ESP_LOGD(TAG, "dongle_startup_wait_t3_quiet start events=0x%02X",
+                 static_cast<unsigned>(this->dongle_events_));
+        return false;
+      }
       this->transition_dongle_startup_(DongleStartupState::WAIT_T0_AFTER_T3, now);
       this->dongle_startup_deadline_ms_ = now + kDongleStartupT0AfterT3TimeoutMs;
       ESP_LOGD(TAG, "dongle_startup_wait event=0x%02X timeout_ms=%u",
@@ -4429,7 +4455,8 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
 
     case DongleStartupState::SEND_TR37:
       if (this->dongle_startup_tr37_attempt_ >= kDongleStartupMaxTr37Attempts) {
-        this->fail_dongle_startup_(now, "tr37_timeout");
+        this->fail_dongle_startup_(now, this->xml_dongle_startup_mode_ == "gate_only" ? "gate_only_tr37_timeout"
+                                                                                       : "tr37_timeout");
         return false;
       }
       ++this->dongle_startup_tr37_attempt_;
@@ -4458,7 +4485,17 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         if (this->dongle_startup_tr37_attempt_ < kDongleStartupMaxTr37Attempts) {
           ESP_LOGD(TAG, "dongle_startup_retry state=SEND_TR37 attempt=%u",
                    static_cast<unsigned>(this->dongle_startup_tr37_attempt_));
-          if (this->dongle_startup_t3_seen_while_waiting_tr37_) {
+          if (this->xml_dongle_startup_mode_ == "gate_only") {
+            this->dongle_startup_t3_seen_while_waiting_tr37_ = false;
+            this->dongle_startup_t3_seen_during_quiet_ = false;
+            this->dongle_startup_quiet_then_prep_tr37_ = false;
+            this->transition_dongle_startup_(DongleStartupState::WAIT_AFTER_T3, now);
+            this->dongle_startup_quiet_start_ms_ = now;
+            this->dongle_startup_next_action_ms_ = now + kDongleStartupGateOnlyQuietMs;
+            this->dongle_startup_deadline_ms_ = now + kDongleStartupMaxWaitAfterT3Ms;
+            ESP_LOGD(TAG, "dongle_startup_gate_only_wait_after_handshake ms=%u",
+                     static_cast<unsigned>(kDongleStartupGateOnlyQuietMs));
+          } else if (this->dongle_startup_t3_seen_while_waiting_tr37_) {
             this->dongle_startup_t3_seen_while_waiting_tr37_ = false;
             this->dongle_startup_t3_seen_during_quiet_ = false;
             this->dongle_startup_quiet_then_prep_tr37_ = false;
@@ -4472,7 +4509,8 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
             this->transition_dongle_startup_(DongleStartupState::SEND_TR37, now);
           }
         } else {
-          this->fail_dongle_startup_(now, "tr37_timeout");
+          this->fail_dongle_startup_(now, this->xml_dongle_startup_mode_ == "gate_only" ? "gate_only_tr37_timeout"
+                                                                                        : "tr37_timeout");
         }
       }
       return false;

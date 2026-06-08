@@ -245,6 +245,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_session_probe_variant(const std::string &variant) { this->xml_session_probe_variant_ = variant; }
   void set_xml_dongle_startup(bool enabled) { this->xml_dongle_startup_ = enabled; }
   void set_xml_dongle_startup_debug(bool enabled) { this->xml_dongle_startup_debug_ = enabled; }
+  void set_xml_dongle_startup_mode(const std::string &mode) { this->xml_dongle_startup_mode_ = mode; }
+  void set_xml_dongle_wait_t0_after_t3(bool enabled) { this->xml_dongle_wait_t0_after_t3_ = enabled; }
   void set_xml_run_tablet_start_sequence(bool enabled) { this->xml_run_tablet_start_sequence_ = enabled; }
   void set_xml_tablet_sequence_mode(const std::string &mode) { this->xml_tablet_sequence_mode_ = mode; }
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
@@ -519,6 +521,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string xml_session_probe_variant_{"minimal"};
   bool xml_dongle_startup_{false};
   bool xml_dongle_startup_debug_{false};
+  std::string xml_dongle_startup_mode_{"full"};
+  bool xml_dongle_wait_t0_after_t3_{false};
   uint32_t dongle_events_{0};
   bool stats_session_ready_{false};
   uint16_t startup_t2_word_{0};
