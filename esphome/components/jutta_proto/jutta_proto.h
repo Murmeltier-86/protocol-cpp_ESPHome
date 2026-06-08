@@ -234,6 +234,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_transport_selftest(bool enabled) { this->xml_transport_selftest_ = enabled; }
   void set_xml_command_probe(bool enabled) { this->xml_command_probe_ = enabled; }
   void set_xml_command_probe_with_ts_lock(bool enabled) { this->xml_command_probe_with_ts_lock_ = enabled; }
+  void set_xml_session_probe(bool enabled) { this->xml_session_probe_ = enabled; }
+  void set_xml_session_probe_variant(const std::string &variant) { this->xml_session_probe_variant_ = variant; }
   void set_xml_run_tablet_start_sequence(bool enabled) { this->xml_run_tablet_start_sequence_ = enabled; }
   void set_xml_tablet_sequence_mode(const std::string &mode) { this->xml_tablet_sequence_mode_ = mode; }
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
@@ -279,6 +281,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     DONE
   };
   enum class XmlCommandProbeState { IDLE, SEND, WAIT, DONE };
+  enum class XmlSessionProbeState { IDLE, SEND, WAIT, DONE, FAILED };
 
   static const char *handshake_stage_name(HandshakeStage stage);
 
@@ -314,6 +317,17 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void send_xml_command_probe_command_(const std::string &command, uint32_t now);
   void finish_xml_command_probe_step_(const std::string &command, uint32_t now);
   const char *classify_xml_probe_response_(const std::string &response) const;
+  void process_xml_session_probe_scheduler_(uint32_t now);
+  void log_xml_session_probe_wait_(const char *reason, const char *owner = nullptr);
+  bool process_xml_session_probe_(uint32_t now);
+  void start_xml_session_probe_(uint32_t now);
+  const char *xml_session_probe_command_(size_t index) const;
+  size_t xml_session_probe_command_count_() const;
+  std::string xml_session_probe_format_command_(const char *command) const;
+  void send_xml_session_probe_command_(const std::string &command, uint32_t now);
+  void finish_xml_session_probe_step_(const std::string &command, uint32_t now);
+  const char *classify_xml_session_decoded_response_(const std::string &response) const;
+  void finish_xml_session_probe_cycle_(uint32_t now, const char *result, const char *reason = nullptr);
   bool ensure_xml_mapping_loaded_();
   void log_xml_mapping_status_(bool force = false);
   void ensure_xml_sensors_created_();
@@ -389,7 +403,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void log_stats_binary_probe_(const std::string &frame);
   bool probe_stats_inner_key_variants_(const std::string &frame, std::string &decoded_line);
   bool handle_stats_line_(const std::string &line, uint32_t now);
-  bool decode_stats_inner_transport_line_(const std::string &raw_line, std::string &decoded_line);
+  bool decode_stats_inner_transport_line_(const std::string &raw_line, std::string &decoded_line,
+                                          bool frame_complete = true);
   bool handle_stats_binary_response_(uint32_t now);
   void advance_after_stats_timeout_(uint32_t now);
   void advance_after_stats_reject_(uint32_t now);
@@ -459,6 +474,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_transport_selftest_{false};
   bool xml_command_probe_{false};
   bool xml_command_probe_with_ts_lock_{true};
+  bool xml_session_probe_{false};
+  std::string xml_session_probe_variant_{"minimal"};
   bool xml_run_tablet_start_sequence_{false};
   std::string xml_tablet_sequence_mode_{"minimal"};
   bool xml_tablet_start_sequence_done_{false};
@@ -478,6 +495,14 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t xml_command_probe_deadline_ms_{0};
   uint32_t xml_command_probe_next_ms_{0};
   std::string xml_command_probe_last_wait_reason_{};
+  XmlSessionProbeState xml_session_probe_state_{XmlSessionProbeState::IDLE};
+  size_t xml_session_probe_index_{0};
+  std::string xml_session_probe_rx_buffer_{};
+  std::string xml_session_probe_current_cmd_{};
+  uint32_t xml_session_probe_deadline_ms_{0};
+  uint32_t xml_session_probe_next_ms_{0};
+  std::string xml_session_probe_last_wait_reason_{};
+  uint8_t xml_session_probe_timeouts_{0};
   uint32_t xml_counter_max_{20000};
   uint32_t xml_poll_interval_ms_{30000};
   uint32_t xml_startup_delay_ms_{10000};

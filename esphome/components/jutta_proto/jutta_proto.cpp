@@ -292,6 +292,24 @@ size_t first_raw_crlf_len(const std::string &buffer) {
   return terminator == std::string::npos ? 0 : terminator;
 }
 
+bool has_unescaped_inner_transport_cr(const std::string &buffer) {
+  bool escaped = false;
+  for (unsigned char c : buffer) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (c == 0x1B) {
+      escaped = true;
+      continue;
+    }
+    if (c == '\r') {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::vector<std::string> split_inner_transport_frames(const std::string &buffer) {
   std::vector<std::string> frames;
   size_t frame_start = std::string::npos;
@@ -1263,6 +1281,9 @@ void JuraComponent::setup() {
   if (this->xml_command_probe_) {
     ESP_LOGI(TAG, "xml_command_probe_enabled with_ts_lock=%s", YESNO(this->xml_command_probe_with_ts_lock_));
   }
+  if (this->xml_session_probe_) {
+    ESP_LOGI(TAG, "xml_session_probe_enabled variant=%s", this->xml_session_probe_variant_.c_str());
+  }
   if (this->enable_xml_poll_) {
     this->ensure_xml_mapping_loaded_();
     this->ensure_xml_sensors_created_();
@@ -1372,6 +1393,8 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML transport selftest: %s", YESNO(this->xml_transport_selftest_));
   ESP_LOGCONFIG(TAG, "  XML command probe: %s", YESNO(this->xml_command_probe_));
   ESP_LOGCONFIG(TAG, "  XML command probe TS lock: %s", YESNO(this->xml_command_probe_with_ts_lock_));
+  ESP_LOGCONFIG(TAG, "  XML session probe: %s", YESNO(this->xml_session_probe_));
+  ESP_LOGCONFIG(TAG, "  XML session probe variant: %s", this->xml_session_probe_variant_.c_str());
   ESP_LOGCONFIG(TAG, "  XML tablet start sequence: %s", YESNO(this->xml_run_tablet_start_sequence_));
   ESP_LOGCONFIG(TAG, "  XML tablet sequence mode: %s", this->xml_tablet_sequence_mode_.c_str());
   ESP_LOGCONFIG(TAG, "  XML counter max: %u", static_cast<unsigned>(this->xml_counter_max_));
@@ -1920,6 +1943,7 @@ void JuraComponent::process_machine_data_query() {
   }
   bool xml_poll_active = this->xml_inflight_ || this->db_transaction_owner_ == DbTransactionOwner::XML_POLL ||
                          this->xml_command_probe_ ||
+                         this->xml_session_probe_ ||
                          (this->enable_xml_poll_ && this->xml_transport_selftest_) ||
                          (this->enable_xml_poll_ && this->xml_state_ != XmlPollState::IDLE &&
                           this->xml_state_ != XmlPollState::SLEEP) ||
@@ -1976,6 +2000,7 @@ bool JuraComponent::request_machine_xml_(std::string &xml) {
   }
   bool xml_poll_active = this->xml_inflight_ || this->db_transaction_owner_ == DbTransactionOwner::XML_POLL ||
                          this->xml_command_probe_ ||
+                         this->xml_session_probe_ ||
                          (this->enable_xml_poll_ && this->xml_transport_selftest_) ||
                          (this->enable_xml_poll_ && this->xml_state_ != XmlPollState::IDLE &&
                           this->xml_state_ != XmlPollState::SLEEP) ||
@@ -2315,6 +2340,14 @@ void JuraComponent::start_new_xml_cycle_(uint32_t now) {
   this->xml_command_probe_deadline_ms_ = 0;
   this->xml_command_probe_next_ms_ = 0;
   this->xml_command_probe_last_wait_reason_.clear();
+  this->xml_session_probe_state_ = XmlSessionProbeState::IDLE;
+  this->xml_session_probe_index_ = 0;
+  this->xml_session_probe_rx_buffer_.clear();
+  this->xml_session_probe_current_cmd_.clear();
+  this->xml_session_probe_deadline_ms_ = 0;
+  this->xml_session_probe_next_ms_ = 0;
+  this->xml_session_probe_last_wait_reason_.clear();
+  this->xml_session_probe_timeouts_ = 0;
 }
 
 size_t JuraComponent::xml_command_index_(XmlPollState state) const {
@@ -3071,6 +3104,10 @@ void JuraComponent::process_xml_polling() {
     this->process_xml_command_probe_scheduler_(now);
     return;
   }
+  if (this->xml_session_probe_) {
+    this->process_xml_session_probe_scheduler_(now);
+    return;
+  }
   if (!this->enable_xml_poll_) {
     return;
   }
@@ -3333,6 +3370,9 @@ const char *JuraComponent::classify_xml_probe_response_(const std::string &respo
     return "ascii_ok";
   }
   if (first == 0x26) {
+    if (!has_unescaped_inner_transport_cr(response)) {
+      return "binary_26_incomplete";
+    }
     return "binary_26";
   }
   return "binary_other";
@@ -3372,14 +3412,20 @@ void JuraComponent::finish_xml_command_probe_step_(const std::string &command, u
   if (!this->xml_command_probe_rx_buffer_.empty() &&
       static_cast<uint8_t>(this->xml_command_probe_rx_buffer_.front()) == 0x26 &&
       this->xml_decode_inner_transport_) {
+    bool complete_inner_frame = has_unescaped_inner_transport_cr(this->xml_command_probe_rx_buffer_);
     std::vector<InnerTransportDecodeResult> candidates =
         decode_inner_transport_candidates(this->xml_command_probe_rx_buffer_);
     if (!candidates.empty() && !candidates.front().payload.empty()) {
       const auto &decoded = candidates.front();
       const char *decoded_class = classify_decoded_inner_response(decoded.payload);
-      ESP_LOGD(TAG, "xml_probe_inner cmd=%s decoded=\"%s\"", command.c_str(),
-               transport_payload_log_text(decoded.payload).c_str());
-      ESP_LOGD(TAG, "xml_probe_class cmd=%s decoded_class=%s", command.c_str(), decoded_class);
+      if (complete_inner_frame) {
+        ESP_LOGD(TAG, "xml_probe_inner cmd=%s decoded=\"%s\"", command.c_str(),
+                 transport_payload_log_text(decoded.payload).c_str());
+        ESP_LOGD(TAG, "xml_probe_class cmd=%s decoded_class=%s", command.c_str(), decoded_class);
+      } else {
+        ESP_LOGD(TAG, "xml_probe_inner_partial cmd=%s decoded=\"%s\"", command.c_str(),
+                 transport_payload_log_text(decoded.payload).c_str());
+      }
     }
   }
   this->xml_command_probe_rx_buffer_.clear();
@@ -3441,6 +3487,287 @@ bool JuraComponent::process_xml_command_probe_(uint32_t now) {
       this->xml_last_command_.clear();
       return true;
     case XmlCommandProbeState::IDLE:
+    default:
+      return true;
+  }
+}
+
+void JuraComponent::log_xml_session_probe_wait_(const char *reason, const char *owner) {
+  std::string key = reason != nullptr ? reason : "unknown";
+  if (owner != nullptr && owner[0] != '\0') {
+    key.append(":");
+    key.append(owner);
+  }
+  if (key == this->xml_session_probe_last_wait_reason_) {
+    return;
+  }
+  this->xml_session_probe_last_wait_reason_ = key;
+  if (owner != nullptr && owner[0] != '\0') {
+    ESP_LOGD(TAG, "xml_session_probe_wait reason=%s owner=%s", reason, owner);
+  } else {
+    ESP_LOGD(TAG, "xml_session_probe_wait reason=%s", reason);
+  }
+}
+
+void JuraComponent::process_xml_session_probe_scheduler_(uint32_t now) {
+  if (this->handshake_stage_ != HandshakeStage::DONE) {
+    this->log_xml_session_probe_wait_("handshake_not_done");
+    return;
+  }
+  if (!this->is_ready()) {
+    this->log_xml_session_probe_wait_("machine_not_ready");
+    return;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    this->log_xml_session_probe_wait_("controller_not_ready");
+    return;
+  }
+  if (this->is_busy()) {
+    this->log_xml_session_probe_wait_("uart_busy", "coffee_maker");
+    return;
+  }
+  if (this->db_transaction_owner_ != DbTransactionOwner::NONE) {
+    this->log_xml_session_probe_wait_("uart_busy", this->db_transaction_owner_name_(this->db_transaction_owner_));
+    return;
+  }
+  if (this->xml_session_probe_next_ms_ != 0 && !time_reached(now, this->xml_session_probe_next_ms_)) {
+    return;
+  }
+  this->xml_session_probe_last_wait_reason_.clear();
+  this->process_xml_session_probe_(now);
+}
+
+void JuraComponent::start_xml_session_probe_(uint32_t now) {
+  this->xml_session_probe_state_ = XmlSessionProbeState::SEND;
+  this->xml_session_probe_index_ = 0;
+  this->xml_session_probe_rx_buffer_.clear();
+  this->xml_session_probe_current_cmd_.clear();
+  this->xml_session_probe_deadline_ms_ = 0;
+  this->xml_session_probe_timeouts_ = 0;
+  ESP_LOGD(TAG, "xml_session_start variant=%s", this->xml_session_probe_variant_.c_str());
+  (void) now;
+}
+
+size_t JuraComponent::xml_session_probe_command_count_() const {
+  if (this->xml_session_probe_variant_ == "dongle_full") {
+    return 8U;
+  }
+  if (this->xml_session_probe_variant_ == "no_d1") {
+    return 3U;
+  }
+  return 4U;
+}
+
+const char *JuraComponent::xml_session_probe_command_(size_t index) const {
+  static constexpr const char *MINIMAL_COMMANDS[] = {"@D1", "@TR:37", "@TR:32,00", "@TG:C0"};
+  static constexpr const char *DONGLE_FULL_COMMANDS[] = {"@D1", "TY:", "@T1", "@t2:818811%04X0000",
+                                                         "@t3", "@TR:37", "@TR:32,00", "@TG:C0"};
+  static constexpr const char *NO_D1_COMMANDS[] = {"@TR:37", "@TR:32,00", "@TG:C0"};
+
+  if (this->xml_session_probe_variant_ == "dongle_full") {
+    return index < (sizeof(DONGLE_FULL_COMMANDS) / sizeof(DONGLE_FULL_COMMANDS[0])) ? DONGLE_FULL_COMMANDS[index]
+                                                                                    : nullptr;
+  }
+  if (this->xml_session_probe_variant_ == "no_d1") {
+    return index < (sizeof(NO_D1_COMMANDS) / sizeof(NO_D1_COMMANDS[0])) ? NO_D1_COMMANDS[index] : nullptr;
+  }
+  return index < (sizeof(MINIMAL_COMMANDS) / sizeof(MINIMAL_COMMANDS[0])) ? MINIMAL_COMMANDS[index] : nullptr;
+}
+
+std::string JuraComponent::xml_session_probe_format_command_(const char *command) const {
+  if (command == nullptr) {
+    return {};
+  }
+  std::string text(command);
+  if (text.find("%04X") == std::string::npos) {
+    return text;
+  }
+  uint16_t t2_word = 0xB228;
+  parse_t2_word_from_response(this->handshake_t2_response_, t2_word);
+  char buffer[48];
+  std::snprintf(buffer, sizeof(buffer), command, static_cast<unsigned>(t2_word));
+  return std::string(buffer);
+}
+
+const char *JuraComponent::classify_xml_session_decoded_response_(const std::string &response) const {
+  std::string lower = lower_trimmed_transport_payload(response);
+  if (lower.rfind("@tf", 0) == 0) {
+    return "tf_response";
+  }
+  if (lower.rfind("@tr", 0) == 0) {
+    return "stats_response";
+  }
+  if (lower.rfind("@tg", 0) == 0) {
+    return "maintenance_response";
+  }
+  if (lower.rfind("@t1", 0) == 0 || lower.rfind("@t2", 0) == 0 || lower.rfind("@t3", 0) == 0 ||
+      lower.rfind("ty:", 0) == 0) {
+    return "handshake_response";
+  }
+  if (lower.rfind("@ts", 0) == 0 || lower.rfind("ok", 0) == 0) {
+    return "control_response";
+  }
+  return "unknown";
+}
+
+void JuraComponent::send_xml_session_probe_command_(const std::string &command, uint32_t now) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    this->finish_xml_session_probe_cycle_(now, "failed", "controller_not_ready");
+    return;
+  }
+  auto *connection = this->coffee_maker_->connection.get();
+  connection->reset_response_line_buffer();
+  connection->reset_db_rx_buffer();
+  connection->drain_serial_input_nonblocking();
+
+  this->xml_session_probe_rx_buffer_.clear();
+  this->xml_session_probe_current_cmd_ = command;
+  ESP_LOGD(TAG, "xml_session_tx variant=%s cmd=%s", this->xml_session_probe_variant_.c_str(), command.c_str());
+  if (!connection->write_decoded(command + "\r\n")) {
+    ESP_LOGD(TAG, "xml_session_rx variant=%s cmd=%s class=timeout len=0 reason=tx_failed hex=\"\"",
+             this->xml_session_probe_variant_.c_str(), command.c_str());
+    this->finish_xml_session_probe_cycle_(now, "failed", "tx_failed");
+    return;
+  }
+  this->xml_session_probe_deadline_ms_ = now + kStatsRxCaptureWindowMs;
+  this->xml_session_probe_state_ = XmlSessionProbeState::WAIT;
+}
+
+void JuraComponent::finish_xml_session_probe_step_(const std::string &command, uint32_t now) {
+  const bool timed_out = this->xml_session_probe_rx_buffer_.empty();
+  const char *response_class = classify_xml_probe_response_(this->xml_session_probe_rx_buffer_);
+  ESP_LOGD(TAG, "xml_session_rx variant=%s cmd=%s class=%s len=%u hex=\"%s\"",
+           this->xml_session_probe_variant_.c_str(), command.c_str(), response_class,
+           static_cast<unsigned>(this->xml_session_probe_rx_buffer_.size()),
+           compact_hex_string(this->xml_session_probe_rx_buffer_, this->xml_session_probe_rx_buffer_.size()).c_str());
+  if (!this->xml_session_probe_rx_buffer_.empty() &&
+      this->is_printable_status_text_(this->xml_session_probe_rx_buffer_)) {
+    ESP_LOGD(TAG, "xml_session_ascii variant=%s cmd=%s ascii=\"%s\"", this->xml_session_probe_variant_.c_str(),
+             command.c_str(), sanitize_text_for_api(this->xml_session_probe_rx_buffer_).c_str());
+    ESP_LOGD(TAG, "xml_session_class variant=%s cmd=%s decoded_class=%s",
+             this->xml_session_probe_variant_.c_str(), command.c_str(),
+             this->classify_xml_session_decoded_response_(this->xml_session_probe_rx_buffer_));
+  }
+
+  if (!this->xml_session_probe_rx_buffer_.empty() &&
+      static_cast<uint8_t>(this->xml_session_probe_rx_buffer_.front()) == 0x26 &&
+      this->xml_decode_inner_transport_) {
+    const bool complete_inner_frame = has_unescaped_inner_transport_cr(this->xml_session_probe_rx_buffer_);
+    std::vector<InnerTransportDecodeResult> candidates =
+        decode_inner_transport_candidates(this->xml_session_probe_rx_buffer_);
+    if (!candidates.empty() && !candidates.front().payload.empty()) {
+      const auto &decoded = candidates.front();
+      const char *decoded_class = this->classify_xml_session_decoded_response_(decoded.payload);
+      if (complete_inner_frame) {
+        ESP_LOGD(TAG, "xml_session_inner variant=%s cmd=%s decoded=\"%s\"",
+                 this->xml_session_probe_variant_.c_str(), command.c_str(),
+                 transport_payload_log_text(decoded.payload).c_str());
+        ESP_LOGD(TAG, "xml_session_class variant=%s cmd=%s decoded_class=%s",
+                 this->xml_session_probe_variant_.c_str(), command.c_str(), decoded_class);
+      } else {
+        ESP_LOGD(TAG, "xml_session_inner_partial variant=%s cmd=%s decoded=\"%s\"",
+                 this->xml_session_probe_variant_.c_str(), command.c_str(),
+                 transport_payload_log_text(decoded.payload).c_str());
+      }
+    }
+  }
+
+  if (timed_out) {
+    ++this->xml_session_probe_timeouts_;
+  } else {
+    this->xml_session_probe_timeouts_ = 0;
+  }
+
+  this->xml_session_probe_rx_buffer_.clear();
+  this->xml_session_probe_current_cmd_.clear();
+  this->xml_session_probe_deadline_ms_ = 0;
+  ++this->xml_session_probe_index_;
+
+  if (this->xml_session_probe_timeouts_ >= 2U) {
+    this->finish_xml_session_probe_cycle_(now, "failed", "repeated_timeouts");
+    return;
+  }
+
+  this->xml_session_probe_state_ = this->xml_session_probe_index_ < this->xml_session_probe_command_count_()
+                                       ? XmlSessionProbeState::SEND
+                                       : XmlSessionProbeState::DONE;
+}
+
+void JuraComponent::finish_xml_session_probe_cycle_(uint32_t now, const char *result, const char *reason) {
+  if (reason != nullptr && reason[0] != '\0') {
+    ESP_LOGD(TAG, "xml_session_done variant=%s result=%s reason=%s next_retry_ms=300000",
+             this->xml_session_probe_variant_.c_str(), result, reason);
+  } else {
+    ESP_LOGD(TAG, "xml_session_done variant=%s result=%s next_retry_ms=300000",
+             this->xml_session_probe_variant_.c_str(), result);
+  }
+  this->xml_session_probe_state_ = XmlSessionProbeState::IDLE;
+  this->xml_session_probe_index_ = 0;
+  this->xml_session_probe_rx_buffer_.clear();
+  this->xml_session_probe_current_cmd_.clear();
+  this->xml_session_probe_deadline_ms_ = 0;
+  this->xml_session_probe_next_ms_ = now + 300000U;
+  this->xml_session_probe_timeouts_ = 0;
+  this->xml_state_ = XmlPollState::IDLE;
+  this->xml_inflight_ = false;
+  this->xml_last_command_.clear();
+}
+
+bool JuraComponent::process_xml_session_probe_(uint32_t now) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    this->finish_xml_session_probe_cycle_(now, "failed", "controller_not_ready");
+    return true;
+  }
+  if (this->xml_session_probe_state_ != XmlSessionProbeState::IDLE &&
+      this->handshake_stage_ != HandshakeStage::DONE) {
+    this->finish_xml_session_probe_cycle_(now, "failed", "handshake_restarted");
+    return true;
+  }
+
+  auto *connection = this->coffee_maker_->connection.get();
+  if (this->xml_session_probe_state_ == XmlSessionProbeState::IDLE) {
+    this->start_xml_session_probe_(now);
+    return true;
+  }
+
+  switch (this->xml_session_probe_state_) {
+    case XmlSessionProbeState::SEND: {
+      const char *raw_command = this->xml_session_probe_command_(this->xml_session_probe_index_);
+      if (raw_command == nullptr) {
+        this->finish_xml_session_probe_cycle_(now, "failed", "invalid_variant");
+        return true;
+      }
+      std::string command = this->xml_session_probe_format_command_(raw_command);
+      this->send_xml_session_probe_command_(command, now);
+      return true;
+    }
+    case XmlSessionProbeState::WAIT: {
+      std::vector<uint8_t> buffer;
+      if (connection->read_decoded(buffer) && !buffer.empty()) {
+        size_t current_size = this->xml_session_probe_rx_buffer_.size();
+        size_t remaining = current_size < kTabletSeqMaxRxBytes ? kTabletSeqMaxRxBytes - current_size : 0;
+        size_t count = std::min(remaining, buffer.size());
+        if (count > 0) {
+          this->xml_session_probe_rx_buffer_.append(reinterpret_cast<const char *>(buffer.data()), count);
+        }
+        if (count < buffer.size()) {
+          ESP_LOGD(TAG, "xml_session_rx_truncated variant=%s cmd=%s max_bytes=%u",
+                   this->xml_session_probe_variant_.c_str(), this->xml_session_probe_current_cmd_.c_str(),
+                   static_cast<unsigned>(kTabletSeqMaxRxBytes));
+        }
+      }
+      if (this->xml_session_probe_deadline_ms_ != 0 && time_reached(now, this->xml_session_probe_deadline_ms_)) {
+        this->finish_xml_session_probe_step_(this->xml_session_probe_current_cmd_, now);
+      }
+      return true;
+    }
+    case XmlSessionProbeState::DONE:
+      this->finish_xml_session_probe_cycle_(now, "success");
+      return true;
+    case XmlSessionProbeState::FAILED:
+      this->finish_xml_session_probe_cycle_(now, "failed");
+      return true;
+    case XmlSessionProbeState::IDLE:
     default:
       return true;
   }
@@ -4139,6 +4466,7 @@ bool JuraComponent::finish_stats_rx_capture_(std::string &line, uint32_t now) {
   line.clear();
   uint32_t duration = this->xml_stats_capture_start_ms_ == 0 ? 0 : now - this->xml_stats_capture_start_ms_;
   size_t line_based_len = first_raw_crlf_len(this->xml_rx_line_);
+  bool capture_has_complete_inner_frame = has_unescaped_inner_transport_cr(this->xml_rx_line_);
   ESP_LOGD(TAG, "stats_rx_capture cmd=%s bytes=%u duration_ms=%u line_based_len=%u hex=\"%s\"",
            this->xml_last_command_.c_str(), static_cast<unsigned>(this->xml_rx_line_.size()),
            static_cast<unsigned>(duration), static_cast<unsigned>(line_based_len),
@@ -4185,7 +4513,7 @@ bool JuraComponent::finish_stats_rx_capture_(std::string &line, uint32_t now) {
     }
 
     std::string decoded_line;
-    if (this->decode_stats_inner_transport_line_(frame, decoded_line)) {
+    if (this->decode_stats_inner_transport_line_(frame, decoded_line, capture_has_complete_inner_frame)) {
       line = decoded_line;
       this->xml_rx_line_.clear();
       this->xml_stats_capture_start_ms_ = 0;
@@ -4301,7 +4629,8 @@ bool JuraComponent::probe_stats_inner_key_variants_(const std::string &frame, st
   return false;
 }
 
-bool JuraComponent::decode_stats_inner_transport_line_(const std::string &raw_line, std::string &decoded_line) {
+bool JuraComponent::decode_stats_inner_transport_line_(const std::string &raw_line, std::string &decoded_line,
+                                                       bool frame_complete) {
   decoded_line.clear();
   if (raw_line.empty() || !this->xml_decode_inner_transport_ ||
       !is_inner_transport_start(static_cast<uint8_t>(raw_line.front()))) {
@@ -4382,6 +4711,15 @@ bool JuraComponent::decode_stats_inner_transport_line_(const std::string &raw_li
     ESP_LOGD(TAG, "stats_inner_decode cmd=%s ok=false reason=%s table=%s", this->xml_last_command_.c_str(),
              reason.c_str(), decoded.table_name);
     this->xml_stats_reject_reason_ = reason;
+    this->xml_stats_binary_response_ = true;
+    return false;
+  }
+
+  if (!frame_complete) {
+    ESP_LOGD(TAG, "stats_inner_decoded_partial cmd=%s decoded=\"%s\"", this->xml_last_command_.c_str(),
+             transport_payload_log_text(decoded.payload).c_str());
+    this->xml_stats_reject_reason_ = "binary_26_incomplete";
+    this->xml_stats_reject_decoded_ = transport_payload_log_text(decoded.payload);
     this->xml_stats_binary_response_ = true;
     return false;
   }
