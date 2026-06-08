@@ -243,6 +243,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_command_probe_with_ts_lock(bool enabled) { this->xml_command_probe_with_ts_lock_ = enabled; }
   void set_xml_session_probe(bool enabled) { this->xml_session_probe_ = enabled; }
   void set_xml_session_probe_variant(const std::string &variant) { this->xml_session_probe_variant_ = variant; }
+  void set_xml_dongle_startup(bool enabled) { this->xml_dongle_startup_ = enabled; }
+  void set_xml_dongle_startup_debug(bool enabled) { this->xml_dongle_startup_debug_ = enabled; }
   void set_xml_run_tablet_start_sequence(bool enabled) { this->xml_run_tablet_start_sequence_ = enabled; }
   void set_xml_tablet_sequence_mode(const std::string &mode) { this->xml_tablet_sequence_mode_ = mode; }
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
@@ -289,6 +291,22 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   };
   enum class XmlCommandProbeState { IDLE, SEND, WAIT, DONE };
   enum class XmlSessionProbeState { IDLE, SEND, WAIT, DONE, FAILED };
+  enum class DongleStartupState {
+    IDLE,
+    START_CLEAR,
+    PROBE_D1,
+    PROBE_TY,
+    SEND_T1,
+    WAIT_T2,
+    SEND_T2,
+    WAIT_T3,
+    SEND_T3,
+    PREP_TR37,
+    SEND_TR37,
+    WAIT_TR37,
+    READY,
+    FAILED
+  };
 
   static const char *handshake_stage_name(HandshakeStage stage);
 
@@ -337,6 +355,13 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const char *classify_xml_session_decoded_response_(const std::string &response) const;
   bool xml_session_probe_expected_match_(const std::string &command, const std::string &response) const;
   void finish_xml_session_probe_cycle_(uint32_t now, const char *result, const char *reason = nullptr);
+  const char *dongle_startup_state_name_(DongleStartupState state) const;
+  void transition_dongle_startup_(DongleStartupState state, uint32_t now);
+  bool process_dongle_startup_(uint32_t now);
+  bool send_dongle_startup_command_(const std::string &command, uint32_t now);
+  void fail_dongle_startup_(uint32_t now, const char *reason);
+  void update_dongle_events_from_line_(const std::string &line);
+  void process_dongle_startup_rx_(uint32_t now);
   bool ensure_xml_mapping_loaded_();
   void log_xml_mapping_status_(bool force = false);
   void ensure_xml_sensors_created_();
@@ -490,6 +515,21 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_command_probe_with_ts_lock_{true};
   bool xml_session_probe_{false};
   std::string xml_session_probe_variant_{"minimal"};
+  bool xml_dongle_startup_{false};
+  bool xml_dongle_startup_debug_{false};
+  uint32_t dongle_events_{0};
+  bool stats_session_ready_{false};
+  uint16_t startup_t2_word_{0};
+  std::string dongle_machine_identity_{};
+  std::string dongle_tr_payload_{};
+  DongleStartupState dongle_startup_state_{DongleStartupState::IDLE};
+  std::string dongle_startup_rx_buffer_{};
+  uint32_t dongle_startup_deadline_ms_{0};
+  uint32_t dongle_startup_next_action_ms_{0};
+  uint32_t dongle_startup_next_retry_ms_{0};
+  uint8_t dongle_startup_probe_attempt_{0};
+  uint8_t dongle_startup_t1_attempt_{0};
+  uint8_t dongle_startup_tr37_attempt_{0};
   bool xml_run_tablet_start_sequence_{false};
   std::string xml_tablet_sequence_mode_{"minimal"};
   bool xml_tablet_start_sequence_done_{false};

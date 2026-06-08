@@ -43,6 +43,21 @@ constexpr uint8_t kTr32PageCount = 16;
 constexpr uint8_t kTr32ProductsPerPage = 4;
 constexpr uint8_t kTr32BytesPerProduct = 2;
 constexpr uint8_t kStatsMaxConsecutiveFailures = 4;
+constexpr uint32_t kDongleStartupProbeDelayMs = 250;
+constexpr uint32_t kDongleStartupTimeoutMs = 1500;
+constexpr size_t kDongleStartupMaxRxBytes = 512;
+constexpr uint8_t kDongleStartupMaxProbeAttempts = 6;
+constexpr uint8_t kDongleStartupMaxT1Attempts = 6;
+constexpr uint8_t kDongleStartupMaxTr37Attempts = 3;
+constexpr uint32_t DONGLE_EVENT_TY = 0x01;
+constexpr uint32_t DONGLE_EVENT_T1 = 0x04;
+constexpr uint32_t DONGLE_EVENT_T2 = 0x08;
+constexpr uint32_t DONGLE_EVENT_T3 = 0x10;
+constexpr uint32_t DONGLE_EVENT_TR = 0x40;
+constexpr uint32_t DONGLE_EVENT_TF = 0x80;
+constexpr uint32_t DONGLE_STARTUP_CLEAR_MASK =
+    DONGLE_EVENT_TY | DONGLE_EVENT_T1 | DONGLE_EVENT_T2 | DONGLE_EVENT_T3 | DONGLE_EVENT_TR;
+constexpr uint32_t DONGLE_STARTUP_READY_MASK = DONGLE_EVENT_T2 | DONGLE_EVENT_T3 | DONGLE_EVENT_TR;
 constexpr uint32_t kSettingsRefreshMs = 600000;
 constexpr uint32_t kErrorPollIntervalMs = 5000;
 constexpr uint32_t kCommandTimeoutMs = 1500;
@@ -1328,6 +1343,9 @@ void JuraComponent::setup() {
       ESP_LOGW(TAG, "xml_session_probe variant=dongle_full is experimental and may disturb the machine session");
     }
   }
+  if (this->xml_dongle_startup_) {
+    ESP_LOGI(TAG, "xml_dongle_startup enabled; XML statistics will wait for @TR:37 gate");
+  }
   if (this->enable_xml_poll_) {
     this->ensure_xml_mapping_loaded_();
     this->ensure_xml_sensors_created_();
@@ -1439,6 +1457,8 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML command probe TS lock: %s", YESNO(this->xml_command_probe_with_ts_lock_));
   ESP_LOGCONFIG(TAG, "  XML session probe: %s", YESNO(this->xml_session_probe_));
   ESP_LOGCONFIG(TAG, "  XML session probe variant: %s", this->xml_session_probe_variant_.c_str());
+  ESP_LOGCONFIG(TAG, "  XML dongle startup: %s", YESNO(this->xml_dongle_startup_));
+  ESP_LOGCONFIG(TAG, "  XML dongle startup debug: %s", YESNO(this->xml_dongle_startup_debug_));
   ESP_LOGCONFIG(TAG, "  XML tablet start sequence: %s", YESNO(this->xml_run_tablet_start_sequence_));
   ESP_LOGCONFIG(TAG, "  XML tablet sequence mode: %s", this->xml_tablet_sequence_mode_.c_str());
   ESP_LOGCONFIG(TAG, "  XML counter max: %u", static_cast<unsigned>(this->xml_counter_max_));
@@ -1662,6 +1682,12 @@ void JuraComponent::restart_handshake(const char *reason) {
   if (this->connection_ != nullptr) {
     this->connection_->reset_response_line_buffer();
   }
+  this->stats_session_ready_ = false;
+  this->dongle_events_ = 0;
+  this->dongle_startup_state_ = DongleStartupState::IDLE;
+  this->dongle_startup_rx_buffer_.clear();
+  this->dongle_startup_deadline_ms_ = 0;
+  this->dongle_startup_next_action_ms_ = 0;
   this->reset_xml_poll_state_();
 }
 
@@ -1694,6 +1720,7 @@ bool JuraComponent::time_reached(uint32_t now, uint32_t target) {
 void JuraComponent::handle_decoded_response_(const std::string &response, const char *parser_branch) {
   this->publish_raw_rx_(response, parser_branch);
   this->publish_machine_online_(true);
+  this->update_dongle_events_from_line_(response);
 
   std::string lowered = response;
   std::transform(lowered.begin(), lowered.end(), lowered.begin(),
@@ -2069,6 +2096,7 @@ void JuraComponent::process_machine_data_query() {
                          (this->enable_xml_poll_ && this->xml_transport_selftest_) ||
                          (this->enable_xml_poll_ && this->xml_state_ != XmlPollState::IDLE &&
                           this->xml_state_ != XmlPollState::SLEEP) ||
+                         (this->enable_xml_poll_ && this->xml_dongle_startup_ && !this->stats_session_ready_) ||
                          (this->enable_xml_poll_ && this->xml_run_tablet_start_sequence_ &&
                           !this->xml_tablet_start_sequence_done_);
   if (xml_poll_active) {
@@ -2126,6 +2154,7 @@ bool JuraComponent::request_machine_xml_(std::string &xml) {
                          (this->enable_xml_poll_ && this->xml_transport_selftest_) ||
                          (this->enable_xml_poll_ && this->xml_state_ != XmlPollState::IDLE &&
                           this->xml_state_ != XmlPollState::SLEEP) ||
+                         (this->enable_xml_poll_ && this->xml_dongle_startup_ && !this->stats_session_ready_) ||
                          (this->enable_xml_poll_ && this->xml_run_tablet_start_sequence_ &&
                           !this->xml_tablet_start_sequence_done_);
   if (xml_poll_active) {
@@ -3218,6 +3247,16 @@ void JuraComponent::reset_xml_poll_state_() {
   this->xml_command_probe_deadline_ms_ = 0;
   this->xml_command_probe_next_ms_ = 0;
   this->xml_command_probe_last_wait_reason_.clear();
+  this->stats_session_ready_ = !this->xml_dongle_startup_;
+  this->dongle_startup_state_ = DongleStartupState::IDLE;
+  this->dongle_startup_rx_buffer_.clear();
+  this->dongle_startup_deadline_ms_ = 0;
+  this->dongle_startup_next_action_ms_ = 0;
+  this->dongle_startup_next_retry_ms_ = 0;
+  this->dongle_startup_probe_attempt_ = 0;
+  this->dongle_startup_t1_attempt_ = 0;
+  this->dongle_startup_tr37_attempt_ = 0;
+  this->dongle_tr_payload_.clear();
 }
 
 void JuraComponent::process_xml_polling() {
@@ -3248,6 +3287,10 @@ void JuraComponent::process_xml_polling() {
   }
   if (this->db_transaction_owner_ == DbTransactionOwner::MACHINE_XML) {
     ESP_LOGD(TAG, "XML DB polling skipped while Machine-XML transaction is active");
+    return;
+  }
+  if (this->xml_dongle_startup_ && !this->stats_session_ready_) {
+    this->process_dongle_startup_(now);
     return;
   }
 
@@ -3535,6 +3578,7 @@ void JuraComponent::finish_xml_command_probe_step_(const std::string &command, u
     std::string decoded_or_ascii;
     if (!rx_line.data.empty() && this->is_printable_status_text_(rx_line.data)) {
       decoded_or_ascii = sanitize_text_for_api(rx_line.data);
+      this->update_dongle_events_from_line_(rx_line.data);
       ESP_LOGD(TAG, "xml_probe_ascii cmd=%s idx=%u ascii=\"%s\"", command.c_str(), static_cast<unsigned>(i),
                decoded_or_ascii.c_str());
       matched = this->xml_session_probe_expected_match_(command, rx_line.data);
@@ -3552,6 +3596,7 @@ void JuraComponent::finish_xml_command_probe_step_(const std::string &command, u
                    decoded_or_ascii.c_str());
           ESP_LOGD(TAG, "xml_probe_class cmd=%s idx=%u decoded_class=%s", command.c_str(),
                    static_cast<unsigned>(i), decoded_class);
+          this->update_dongle_events_from_line_(decoded.payload);
           if (std::strcmp(decoded_class, "tf_status") == 0) {
             saw_tf = true;
           }
@@ -3833,6 +3878,7 @@ void JuraComponent::finish_xml_session_probe_step_(const std::string &command, u
     if (!rx_line.data.empty() && this->is_printable_status_text_(rx_line.data)) {
       decoded_or_ascii = sanitize_text_for_api(rx_line.data);
       decoded_class = this->classify_xml_session_decoded_response_(rx_line.data);
+      this->update_dongle_events_from_line_(rx_line.data);
       ESP_LOGD(TAG, "xml_session_ascii variant=%s cmd=%s idx=%u ascii=\"%s\"",
                this->xml_session_probe_variant_.c_str(), command.c_str(), static_cast<unsigned>(i),
                decoded_or_ascii.c_str());
@@ -3855,6 +3901,7 @@ void JuraComponent::finish_xml_session_probe_step_(const std::string &command, u
           ESP_LOGD(TAG, "xml_session_class variant=%s cmd=%s idx=%u decoded_class=%s",
                    this->xml_session_probe_variant_.c_str(), command.c_str(), static_cast<unsigned>(i),
                    decoded_class);
+          this->update_dongle_events_from_line_(decoded.payload);
           if (std::strcmp(decoded_class, "tf_status") == 0) {
             saw_tf = true;
           }
@@ -3933,6 +3980,417 @@ void JuraComponent::finish_xml_session_probe_cycle_(uint32_t now, const char *re
   this->xml_state_ = XmlPollState::IDLE;
   this->xml_inflight_ = false;
   this->xml_last_command_.clear();
+}
+
+const char *JuraComponent::dongle_startup_state_name_(DongleStartupState state) const {
+  switch (state) {
+    case DongleStartupState::IDLE:
+      return "idle";
+    case DongleStartupState::START_CLEAR:
+      return "start_clear";
+    case DongleStartupState::PROBE_D1:
+      return "probe_d1";
+    case DongleStartupState::PROBE_TY:
+      return "probe_ty";
+    case DongleStartupState::SEND_T1:
+      return "send_t1";
+    case DongleStartupState::WAIT_T2:
+      return "wait_t2";
+    case DongleStartupState::SEND_T2:
+      return "send_t2";
+    case DongleStartupState::WAIT_T3:
+      return "wait_t3";
+    case DongleStartupState::SEND_T3:
+      return "send_t3";
+    case DongleStartupState::PREP_TR37:
+      return "prep_tr37";
+    case DongleStartupState::SEND_TR37:
+      return "send_tr37";
+    case DongleStartupState::WAIT_TR37:
+      return "wait_tr37";
+    case DongleStartupState::READY:
+      return "ready";
+    case DongleStartupState::FAILED:
+      return "failed";
+  }
+  return "unknown";
+}
+
+void JuraComponent::transition_dongle_startup_(DongleStartupState state, uint32_t now) {
+  if (this->dongle_startup_state_ != state || this->xml_dongle_startup_debug_) {
+    ESP_LOGD(TAG, "dongle_startup_state old=%s new=%s events=0x%02X",
+             this->dongle_startup_state_name_(this->dongle_startup_state_),
+             this->dongle_startup_state_name_(state), static_cast<unsigned>(this->dongle_events_));
+  }
+  this->dongle_startup_state_ = state;
+  this->dongle_startup_deadline_ms_ = 0;
+  this->dongle_startup_next_action_ms_ = now;
+}
+
+bool JuraComponent::send_dongle_startup_command_(const std::string &command, uint32_t now) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return false;
+  }
+  if (this->xml_dongle_startup_debug_) {
+    this->coffee_maker_->connection->reset_response_line_buffer();
+  }
+  this->coffee_maker_->connection->reset_db_rx_buffer();
+  std::string framed = command;
+  if (framed.size() < 2 || framed.substr(framed.size() - 2) != "\r\n") {
+    framed.append("\r\n");
+  }
+  ESP_LOGD(TAG, "dongle_startup_tx cmd=%s", command.c_str());
+  (void) now;
+  return this->coffee_maker_->connection->write_decoded(framed);
+}
+
+void JuraComponent::fail_dongle_startup_(uint32_t now, const char *reason) {
+  this->stats_session_ready_ = false;
+  this->dongle_startup_next_retry_ms_ = now + this->xml_poll_interval_ms_;
+  ESP_LOGD(TAG, "dongle_startup_failed reason=%s events=0x%02X next_retry_ms=%u",
+           reason != nullptr ? reason : "unknown", static_cast<unsigned>(this->dongle_events_),
+           static_cast<unsigned>(this->xml_poll_interval_ms_));
+  this->transition_dongle_startup_(DongleStartupState::FAILED, now);
+}
+
+void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
+  if (line.empty()) {
+    return;
+  }
+  std::string trimmed = line;
+  trim_in_place(trimmed);
+  if (trimmed.empty()) {
+    return;
+  }
+
+  uint32_t bit = 0;
+  std::string lower = to_lower_copy(trimmed);
+  if (lower.rfind("ty:", 0) == 0) {
+    bit = DONGLE_EVENT_TY;
+  } else if (lower.rfind("@t1", 0) == 0) {
+    bit = DONGLE_EVENT_T1;
+  } else if (trimmed.rfind("@T2", 0) == 0) {
+    bit = DONGLE_EVENT_T2;
+    uint16_t parsed_word = 0;
+    if (parse_t2_word_from_response(trimmed, parsed_word)) {
+      this->startup_t2_word_ = parsed_word;
+    }
+  } else if (trimmed.rfind("@T3", 0) == 0) {
+    bit = DONGLE_EVENT_T3;
+    this->dongle_machine_identity_ = trimmed;
+  } else if (lower.rfind("@tr", 0) == 0) {
+    bit = DONGLE_EVENT_TR;
+    this->dongle_tr_payload_ = trimmed;
+  } else if (lower.rfind("@tf:", 0) == 0) {
+    bit = DONGLE_EVENT_TF;
+  } else if (lower.rfind("@tg", 0) == 0 && this->xml_dongle_startup_debug_) {
+    ESP_LOGD(TAG, "dongle_event line=\"%s\" set=0x00 events=0x%02X class=maintenance_response",
+             sanitize_text_for_api(trimmed).c_str(), static_cast<unsigned>(this->dongle_events_));
+  }
+
+  if (bit == 0) {
+    return;
+  }
+
+  bool newly_set = (this->dongle_events_ & bit) == 0;
+  this->dongle_events_ |= bit;
+  if (this->xml_dongle_startup_ && (newly_set || this->xml_dongle_startup_debug_)) {
+    ESP_LOGD(TAG, "dongle_event line=\"%s\" set=0x%02X events=0x%02X",
+             sanitize_text_for_api(trimmed).c_str(), static_cast<unsigned>(bit),
+             static_cast<unsigned>(this->dongle_events_));
+  }
+}
+
+void JuraComponent::process_dongle_startup_rx_(uint32_t now) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return;
+  }
+  std::vector<uint8_t> buffer;
+  while (this->coffee_maker_->connection->read_decoded(buffer) && !buffer.empty()) {
+    size_t current_size = this->dongle_startup_rx_buffer_.size();
+    size_t remaining = current_size < kDongleStartupMaxRxBytes ? kDongleStartupMaxRxBytes - current_size : 0;
+    size_t count = std::min(remaining, buffer.size());
+    if (count > 0) {
+      this->dongle_startup_rx_buffer_.append(reinterpret_cast<const char *>(buffer.data()), count);
+    }
+    if (count < buffer.size()) {
+      ESP_LOGD(TAG, "dongle_startup_rx_truncated max_bytes=%u", static_cast<unsigned>(kDongleStartupMaxRxBytes));
+    }
+    buffer.clear();
+  }
+
+  if (this->dongle_startup_rx_buffer_.empty()) {
+    (void) now;
+    return;
+  }
+
+  std::vector<ProbeRxLine> lines = split_probe_rx_lines(this->dongle_startup_rx_buffer_);
+  std::string remainder;
+  for (const auto &rx_line : lines) {
+    if (!rx_line.complete) {
+      remainder = rx_line.data;
+      continue;
+    }
+    if (rx_line.data.empty()) {
+      continue;
+    }
+    ESP_LOGD(TAG, "dongle_startup_rx class=%s len=%u hex=\"%s\"",
+             classify_xml_probe_response_(rx_line.data, true), static_cast<unsigned>(rx_line.data.size()),
+             compact_hex_string(rx_line.data, rx_line.data.size()).c_str());
+    if (is_inner_transport_start(static_cast<uint8_t>(rx_line.data.front())) && this->xml_decode_inner_transport_) {
+      std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(rx_line.data);
+      if (!candidates.empty() && !candidates.front().payload.empty()) {
+        const auto &decoded = candidates.front();
+        ESP_LOGD(TAG, "dongle_startup_inner decoded=\"%s\" class=%s",
+                 transport_payload_log_text(decoded.payload).c_str(),
+                 classify_decoded_inner_response(decoded.payload));
+        if (to_lower_copy(decoded.payload).rfind("@tf:", 0) == 0) {
+          ESP_LOGD(TAG, "dongle_startup_not_stats class=tf_status decoded=\"%s\"",
+                   transport_payload_log_text(decoded.payload).c_str());
+          this->publish_tf_status_(decoded.payload);
+        }
+        this->update_dongle_events_from_line_(decoded.payload);
+      }
+      continue;
+    }
+    if (this->is_printable_status_text_(rx_line.data)) {
+      this->update_dongle_events_from_line_(rx_line.data);
+    }
+  }
+  this->dongle_startup_rx_buffer_ = remainder;
+}
+
+bool JuraComponent::process_dongle_startup_(uint32_t now) {
+  if (!this->xml_dongle_startup_) {
+    this->stats_session_ready_ = true;
+    return true;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return false;
+  }
+  if (this->dongle_startup_state_ != DongleStartupState::IDLE &&
+      this->dongle_startup_state_ != DongleStartupState::READY &&
+      this->dongle_startup_state_ != DongleStartupState::FAILED) {
+    this->process_dongle_startup_rx_(now);
+  }
+
+  switch (this->dongle_startup_state_) {
+    case DongleStartupState::IDLE:
+      if (this->dongle_startup_next_retry_ms_ != 0 && !time_reached(now, this->dongle_startup_next_retry_ms_)) {
+        return false;
+      }
+      this->transition_dongle_startup_(DongleStartupState::START_CLEAR, now);
+      return false;
+
+    case DongleStartupState::START_CLEAR: {
+      this->stats_session_ready_ = false;
+      this->dongle_events_ &= ~DONGLE_STARTUP_CLEAR_MASK;
+      this->dongle_startup_rx_buffer_.clear();
+      this->dongle_startup_probe_attempt_ = 0;
+      this->dongle_startup_t1_attempt_ = 0;
+      this->dongle_startup_tr37_attempt_ = 0;
+      this->startup_t2_word_ = 0;
+      this->update_dongle_events_from_line_(this->handshake_t2_response_);
+      this->update_dongle_events_from_line_(this->handshake_t3_response_);
+      if (this->coffee_maker_ != nullptr && this->coffee_maker_->connection != nullptr) {
+        this->coffee_maker_->connection->reset_response_line_buffer();
+        this->coffee_maker_->connection->reset_db_rx_buffer();
+        this->coffee_maker_->connection->drain_serial_input_nonblocking();
+      }
+      this->transition_dongle_startup_(DongleStartupState::PROBE_D1, now);
+      return false;
+    }
+
+    case DongleStartupState::PROBE_D1:
+      if (!time_reached(now, this->dongle_startup_next_action_ms_)) {
+        return false;
+      }
+      if (!this->send_dongle_startup_command_("@D1", now)) {
+        this->fail_dongle_startup_(now, "send_d1_failed");
+        return false;
+      }
+      this->transition_dongle_startup_(DongleStartupState::PROBE_TY, now);
+      this->dongle_startup_next_action_ms_ = now + kDongleStartupProbeDelayMs;
+      return false;
+
+    case DongleStartupState::PROBE_TY:
+      if ((this->dongle_events_ & DONGLE_EVENT_TY) != 0) {
+        this->transition_dongle_startup_(DongleStartupState::SEND_T1, now);
+        return false;
+      }
+      if (this->dongle_startup_deadline_ms_ == 0) {
+        if (!time_reached(now, this->dongle_startup_next_action_ms_)) {
+          return false;
+        }
+        if (this->dongle_startup_probe_attempt_ >= kDongleStartupMaxProbeAttempts) {
+          this->fail_dongle_startup_(now, "ty_timeout");
+          return false;
+        }
+        ++this->dongle_startup_probe_attempt_;
+        if (!this->send_dongle_startup_command_("TY:", now)) {
+          this->fail_dongle_startup_(now, "send_ty_failed");
+          return false;
+        }
+        this->dongle_startup_deadline_ms_ = now + kDongleStartupTimeoutMs;
+        ESP_LOGD(TAG, "dongle_startup_wait event=0x%02X timeout_ms=%u",
+                 static_cast<unsigned>(DONGLE_EVENT_TY), static_cast<unsigned>(kDongleStartupTimeoutMs));
+        return false;
+      }
+      if (time_reached(now, this->dongle_startup_deadline_ms_)) {
+        ESP_LOGD(TAG, "dongle_startup_retry state=PROBE_TY attempt=%u",
+                 static_cast<unsigned>(this->dongle_startup_probe_attempt_));
+        this->transition_dongle_startup_(DongleStartupState::PROBE_D1, now);
+      }
+      return false;
+
+    case DongleStartupState::SEND_T1:
+      if ((this->dongle_events_ & DONGLE_EVENT_T1) != 0) {
+        this->transition_dongle_startup_(DongleStartupState::WAIT_T2, now);
+        return false;
+      }
+      if (this->dongle_startup_deadline_ms_ == 0) {
+        if (this->dongle_startup_t1_attempt_ >= kDongleStartupMaxT1Attempts) {
+          this->fail_dongle_startup_(now, "t1_timeout");
+          return false;
+        }
+        ++this->dongle_startup_t1_attempt_;
+        if (!this->send_dongle_startup_command_("@T1", now)) {
+          this->fail_dongle_startup_(now, "send_t1_failed");
+          return false;
+        }
+        this->dongle_startup_deadline_ms_ = now + kDongleStartupTimeoutMs;
+        ESP_LOGD(TAG, "dongle_startup_wait event=0x%02X timeout_ms=%u",
+                 static_cast<unsigned>(DONGLE_EVENT_T1), static_cast<unsigned>(kDongleStartupTimeoutMs));
+        return false;
+      }
+      if (time_reached(now, this->dongle_startup_deadline_ms_)) {
+        ESP_LOGD(TAG, "dongle_startup_retry state=SEND_T1 attempt=%u",
+                 static_cast<unsigned>(this->dongle_startup_t1_attempt_));
+        this->dongle_startup_deadline_ms_ = 0;
+      }
+      return false;
+
+    case DongleStartupState::WAIT_T2:
+      if ((this->dongle_events_ & DONGLE_EVENT_T2) != 0) {
+        this->transition_dongle_startup_(DongleStartupState::SEND_T2, now);
+        return false;
+      }
+      if (this->dongle_startup_deadline_ms_ == 0) {
+        this->dongle_startup_deadline_ms_ = now + kDongleStartupTimeoutMs;
+        ESP_LOGD(TAG, "dongle_startup_wait event=0x%02X timeout_ms=%u",
+                 static_cast<unsigned>(DONGLE_EVENT_T2), static_cast<unsigned>(kDongleStartupTimeoutMs));
+      } else if (time_reached(now, this->dongle_startup_deadline_ms_)) {
+        this->fail_dongle_startup_(now, "t2_timeout");
+      }
+      return false;
+
+    case DongleStartupState::SEND_T2: {
+      if (this->startup_t2_word_ == 0) {
+        uint16_t parsed_word = 0;
+        if (parse_t2_word_from_response(this->handshake_t2_response_, parsed_word)) {
+          this->startup_t2_word_ = parsed_word;
+        }
+      }
+      if (this->startup_t2_word_ == 0) {
+        this->fail_dongle_startup_(now, "missing_t2_word");
+        return false;
+      }
+      char command[24];
+      std::snprintf(command, sizeof(command), "@t2:818811%04X0000", static_cast<unsigned>(this->startup_t2_word_));
+      if (!this->send_dongle_startup_command_(command, now)) {
+        this->fail_dongle_startup_(now, "send_t2_failed");
+        return false;
+      }
+      this->transition_dongle_startup_(DongleStartupState::WAIT_T3, now);
+      return false;
+    }
+
+    case DongleStartupState::WAIT_T3:
+      if ((this->dongle_events_ & DONGLE_EVENT_T3) != 0) {
+        this->transition_dongle_startup_(DongleStartupState::SEND_T3, now);
+        return false;
+      }
+      if (this->dongle_startup_deadline_ms_ == 0) {
+        this->dongle_startup_deadline_ms_ = now + kDongleStartupTimeoutMs;
+        ESP_LOGD(TAG, "dongle_startup_wait event=0x%02X timeout_ms=%u",
+                 static_cast<unsigned>(DONGLE_EVENT_T3), static_cast<unsigned>(kDongleStartupTimeoutMs));
+      } else if (time_reached(now, this->dongle_startup_deadline_ms_)) {
+        this->fail_dongle_startup_(now, "t3_timeout");
+      }
+      return false;
+
+    case DongleStartupState::SEND_T3:
+      if (!this->send_dongle_startup_command_("@t3", now)) {
+        this->fail_dongle_startup_(now, "send_t3_failed");
+        return false;
+      }
+      this->transition_dongle_startup_(DongleStartupState::PREP_TR37, now);
+      this->dongle_startup_next_action_ms_ = now + kDongleStartupProbeDelayMs;
+      return false;
+
+    case DongleStartupState::PREP_TR37:
+      if (!time_reached(now, this->dongle_startup_next_action_ms_)) {
+        return false;
+      }
+      this->dongle_events_ &= ~DONGLE_EVENT_TR;
+      this->dongle_tr_payload_.clear();
+      this->dongle_startup_tr37_attempt_ = 0;
+      this->transition_dongle_startup_(DongleStartupState::SEND_TR37, now);
+      return false;
+
+    case DongleStartupState::SEND_TR37:
+      if (this->dongle_startup_tr37_attempt_ >= kDongleStartupMaxTr37Attempts) {
+        this->fail_dongle_startup_(now, "tr37_timeout");
+        return false;
+      }
+      ++this->dongle_startup_tr37_attempt_;
+      if (!this->send_dongle_startup_command_("@TR:37", now)) {
+        this->fail_dongle_startup_(now, "send_tr37_failed");
+        return false;
+      }
+      this->dongle_startup_deadline_ms_ = now + kDongleStartupTimeoutMs;
+      ESP_LOGD(TAG, "dongle_startup_wait event=0x%02X timeout_ms=%u",
+               static_cast<unsigned>(DONGLE_EVENT_TR), static_cast<unsigned>(kDongleStartupTimeoutMs));
+      this->transition_dongle_startup_(DongleStartupState::WAIT_TR37, now);
+      this->dongle_startup_deadline_ms_ = now + kDongleStartupTimeoutMs;
+      return false;
+
+    case DongleStartupState::WAIT_TR37:
+      if ((this->dongle_events_ & DONGLE_EVENT_TR) != 0) {
+        if ((this->dongle_events_ & DONGLE_STARTUP_READY_MASK) == DONGLE_STARTUP_READY_MASK) {
+          this->transition_dongle_startup_(DongleStartupState::READY, now);
+          return false;
+        }
+        this->fail_dongle_startup_(now, "tr37_without_ready_bits");
+        return false;
+      }
+      if (time_reached(now, this->dongle_startup_deadline_ms_)) {
+        if (this->dongle_startup_tr37_attempt_ < kDongleStartupMaxTr37Attempts) {
+          ESP_LOGD(TAG, "dongle_startup_retry state=SEND_TR37 attempt=%u",
+                   static_cast<unsigned>(this->dongle_startup_tr37_attempt_));
+          this->transition_dongle_startup_(DongleStartupState::SEND_TR37, now);
+        } else {
+          this->fail_dongle_startup_(now, "tr37_timeout");
+        }
+      }
+      return false;
+
+    case DongleStartupState::READY:
+      if (!this->stats_session_ready_) {
+        this->stats_session_ready_ = true;
+        ESP_LOGD(TAG, "dongle_startup_ready events=0x%02X all_events=0x%02X",
+                 static_cast<unsigned>(this->dongle_events_ & DONGLE_STARTUP_READY_MASK),
+                 static_cast<unsigned>(this->dongle_events_));
+      }
+      return true;
+
+    case DongleStartupState::FAILED:
+      if (this->dongle_startup_next_retry_ms_ != 0 && time_reached(now, this->dongle_startup_next_retry_ms_)) {
+        this->transition_dongle_startup_(DongleStartupState::IDLE, now);
+      }
+      return false;
+  }
+  return false;
 }
 
 bool JuraComponent::process_xml_session_probe_(uint32_t now) {
@@ -4958,6 +5416,7 @@ bool JuraComponent::decode_stats_inner_transport_line_(const std::string &raw_li
   const char *decoded_class = classify_decoded_inner_response(decoded.payload);
   ESP_LOGD(TAG, "stats_inner_decoded cmd=%s decoded=\"%s\"", this->xml_last_command_.c_str(),
            transport_payload_log_text(decoded.payload).c_str());
+  this->update_dongle_events_from_line_(decoded.payload);
   if (std::strcmp(decoded_class, "tf_status") == 0) {
     std::string decoded_text = transport_payload_log_text(decoded.payload);
     this->publish_tf_status_(decoded.payload);
@@ -4979,6 +5438,7 @@ bool JuraComponent::decode_stats_inner_transport_line_(const std::string &raw_li
 bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
   std::string lower = to_lower_copy(line);
   trim_in_place(lower);
+  this->update_dongle_events_from_line_(line);
   bool parsed = false;
 
   if (lower.rfind("@t3", 0) == 0 || lower.rfind("@t0", 0) == 0) {

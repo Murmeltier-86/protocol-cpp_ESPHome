@@ -53,6 +53,8 @@ CONF_XML_COMMAND_PROBE = "xml_command_probe"
 CONF_XML_COMMAND_PROBE_WITH_TS_LOCK = "xml_command_probe_with_ts_lock"
 CONF_XML_SESSION_PROBE = "xml_session_probe"
 CONF_XML_SESSION_PROBE_VARIANT = "xml_session_probe_variant"
+CONF_XML_DONGLE_STARTUP = "xml_dongle_startup"
+CONF_XML_DONGLE_STARTUP_DEBUG = "xml_dongle_startup_debug"
 CONF_XML_RUN_TABLET_START_SEQUENCE = "xml_run_tablet_start_sequence"
 CONF_XML_TABLET_SEQUENCE_MODE = "xml_tablet_sequence_mode"
 CONF_XML_COUNTER_MAX = "xml_counter_max"
@@ -170,6 +172,8 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_XML_SESSION_PROBE_VARIANT, default="minimal"): cv.one_of(
                 "minimal", "dongle_full", "no_d1", lower=True
             ),
+            cv.Optional(CONF_XML_DONGLE_STARTUP, default=False): cv.boolean,
+            cv.Optional(CONF_XML_DONGLE_STARTUP_DEBUG, default=False): cv.boolean,
             cv.Optional(CONF_XML_RUN_TABLET_START_SEQUENCE, default=False): cv.boolean,
             cv.Optional(CONF_XML_TABLET_SEQUENCE_MODE, default="minimal"): cv.one_of(
                 "minimal", "minimal_tr37", lower=True
@@ -345,6 +349,8 @@ async def to_code(config):
     cg.add(var.set_xml_command_probe_with_ts_lock(config[CONF_XML_COMMAND_PROBE_WITH_TS_LOCK]))
     cg.add(var.set_xml_session_probe(config[CONF_XML_SESSION_PROBE]))
     cg.add(var.set_xml_session_probe_variant(config[CONF_XML_SESSION_PROBE_VARIANT]))
+    cg.add(var.set_xml_dongle_startup(config[CONF_XML_DONGLE_STARTUP]))
+    cg.add(var.set_xml_dongle_startup_debug(config[CONF_XML_DONGLE_STARTUP_DEBUG]))
     cg.add(var.set_xml_run_tablet_start_sequence(config[CONF_XML_RUN_TABLET_START_SEQUENCE]))
     cg.add(var.set_xml_tablet_sequence_mode(config[CONF_XML_TABLET_SEQUENCE_MODE]))
     cg.add(var.set_xml_counter_max(config[CONF_XML_COUNTER_MAX]))
