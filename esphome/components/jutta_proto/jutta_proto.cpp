@@ -4187,7 +4187,7 @@ bool JuraComponent::send_dongle_startup_command_(const std::string &command, uin
   return this->coffee_maker_->connection->write_decoded(framed);
 }
 
-bool JuraComponent::write_inner_uart0_command_(const std::string &command, uint32_t now) {
+bool JuraComponent::write_inner_uart0_command_(const std::string &command, uint32_t now, bool no_rx_flush) {
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     return false;
   }
@@ -4218,12 +4218,16 @@ bool JuraComponent::write_inner_uart0_command_(const std::string &command, uint3
              escape_control_text_for_log(roundtrip.payload).c_str(), YESNO(roundtrip_ok));
   }
 
+  if (no_rx_flush) {
+    return this->coffee_maker_->connection->write_decoded_no_flush(encoded);
+  }
   return this->coffee_maker_->connection->write_decoded(encoded);
 }
 
 void JuraComponent::fail_dongle_startup_(uint32_t now, const char *reason) {
   this->stats_session_ready_ = false;
   this->stats_inner_tx_required_ = false;
+  this->post_gate_tx_ready_event_ = true;
   this->dongle_startup_next_retry_ms_ = now + this->xml_poll_interval_ms_;
   ESP_LOGD(TAG, "dongle_startup_failed reason=%s events=0x%02X next_retry_ms=%u",
            reason != nullptr ? reason : "unknown", static_cast<unsigned>(this->dongle_events_),
@@ -4677,6 +4681,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       if (!this->stats_session_ready_) {
         this->stats_session_ready_ = true;
         this->stats_inner_tx_required_ = true;
+        this->post_gate_tx_ready_event_ = true;
         ESP_LOGD(TAG, "dongle_startup_ready events=0x%02X all_events=0x%02X",
                  static_cast<unsigned>(this->dongle_events_ & DONGLE_STARTUP_READY_MASK),
                  static_cast<unsigned>(this->dongle_events_));
@@ -4810,7 +4815,7 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
   switch (this->xml_state_) {
     case XmlPollState::TS_LOCK:
       if (!this->xml_inflight_) {
-        if (this->xml_wait_for_ts_ack_) {
+        if (this->stats_inner_tx_required_ || this->xml_wait_for_ts_ack_) {
           this->send_stats_ascii_command_("@TS:01", XmlPollState::WAIT_TS_LOCK, now);
         } else {
           this->send_stats_fire_and_forget_("@TS:01", XmlPollState::TR32_PAGE, now, kInterCmdGapMs);
@@ -4862,7 +4867,7 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
       return;
     case XmlPollState::TS_UNLOCK:
       if (!this->xml_inflight_) {
-        if (this->xml_wait_for_ts_ack_) {
+        if (this->stats_inner_tx_required_ || this->xml_wait_for_ts_ack_) {
           this->send_stats_ascii_command_("@TS:00", XmlPollState::WAIT_TS_UNLOCK, now);
         } else {
           this->send_stats_fire_and_forget_("@TS:00", XmlPollState::DONE, now, kInterCmdGapMs);
@@ -4884,8 +4889,15 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
       }
       if (this->xml_deadline_ms_ != 0 && static_cast<int32_t>(now - this->xml_deadline_ms_) >= 0) {
         if (this->stats_inner_tx_required_) {
+          this->post_gate_tx_ready_event_ = true;
+          uint32_t waited_ms = (this->xml_last_command_.rfind("@TR:32", 0) == 0 ||
+                                this->xml_last_command_.rfind("@TG:", 0) == 0)
+                                   ? kPostGateStatsTimeoutMs
+                                   : kPostGateControlTimeoutMs;
+          ESP_LOGD(TAG, "forward_post_gate_timeout cmd=%s waited_ms=%u", this->xml_last_command_.c_str(),
+                   static_cast<unsigned>(waited_ms));
           ESP_LOGD(TAG, "post_gate_timeout cmd=%s waited_ms=%u", this->xml_last_command_.c_str(),
-                   static_cast<unsigned>(kPostGateStatsTimeoutMs));
+                   static_cast<unsigned>(waited_ms));
         }
         ESP_LOGD(TAG, "stats_timeout cmd=%s", this->xml_last_command_.c_str());
         if (this->xml_state_ == XmlPollState::WAIT_TGC0) {
@@ -5068,9 +5080,8 @@ bool JuraComponent::write_stats_command_(const std::string &command, uint32_t no
   return this->coffee_maker_->connection->write_decoded(command + "\r\n");
 }
 
-bool JuraComponent::send_post_gate_command_(const std::string &command, const std::string &expected_prefix,
-                                            uint32_t timeout_ms, bool fire_and_forget, XmlPollState wait_state,
-                                            uint32_t now) {
+bool JuraComponent::forward_post_gate_app_command_(const std::string &command, const std::string &expected_prefix,
+                                                   uint32_t timeout_ms, XmlPollState wait_state, uint32_t now) {
   if (command.empty()) {
     this->transition_to_state_(wait_state, now);
     return false;
@@ -5079,16 +5090,21 @@ bool JuraComponent::send_post_gate_command_(const std::string &command, const st
     return false;
   }
   if (!this->stats_session_ready_ || !this->stats_inner_tx_required_) {
-    ESP_LOGE(TAG, "post_gate_error reason=session_not_ready cmd=%s", command.c_str());
+    ESP_LOGE(TAG, "forward_post_gate_error reason=session_not_ready cmd=%s", command.c_str());
     return false;
   }
   if (this->xml_inflight_) {
-    ESP_LOGD(TAG, "post_gate_tx_skip owner=stats cmd=%s reason=inflight", command.c_str());
+    ESP_LOGD(TAG, "forward_post_gate_wait_tx_ready event_0x200=WAIT cmd=%s reason=inflight", command.c_str());
+    this->xml_next_action_ms_ = now + kInterCmdGapMs;
+    return false;
+  }
+  if (!this->post_gate_tx_ready_event_) {
+    ESP_LOGD(TAG, "forward_post_gate_wait_tx_ready event_0x200=WAIT cmd=%s", command.c_str());
     this->xml_next_action_ms_ = now + kInterCmdGapMs;
     return false;
   }
   if (this->db_transaction_owner_ == DbTransactionOwner::MACHINE_XML) {
-    ESP_LOGD(TAG, "post_gate_tx_skip owner=stats cmd=%s reason=busy busy_owner=%s", command.c_str(),
+    ESP_LOGD(TAG, "forward_post_gate_wait_tx_ready event_0x200=WAIT cmd=%s reason=busy busy_owner=%s", command.c_str(),
              this->db_transaction_owner_name_(this->db_transaction_owner_));
     this->xml_next_action_ms_ = now + kInterCmdGapMs;
     return false;
@@ -5111,32 +5127,30 @@ bool JuraComponent::send_post_gate_command_(const std::string &command, const st
   this->xml_last_command_ = command;
   this->xml_expected_prefix_ = expected_prefix;
 
+  ESP_LOGD(TAG, "forward_post_gate_begin cmd=%s flags_equiv=0x90 param2=0", command.c_str());
+  ESP_LOGD(TAG, "forward_post_gate_wait_tx_ready event_0x200=SET cmd=%s", command.c_str());
+  this->post_gate_tx_ready_event_ = false;
+  ESP_LOGD(TAG, "forward_post_gate_clear_event event=0x200");
   ESP_LOGD(TAG, "post_gate_tx_begin owner=stats cmd=%s expected=%s timeout_ms=%u mode=inner_uart0",
            command.c_str(), expected_prefix.empty() ? "none" : expected_prefix.c_str(),
            static_cast<unsigned>(timeout_ms));
-  if (command == "@TS:01") {
-    ESP_LOGD(TAG, "stats_tx cmd=@TS:01 mode=inner_uart0 fire_and_forget=%s", YESNO(fire_and_forget));
-  } else if (command == "@TS:00") {
-    ESP_LOGD(TAG, "stats_tx cmd=@TS:00 mode=inner_uart0 fire_and_forget=%s", YESNO(fire_and_forget));
-  } else {
-    ESP_LOGD(TAG, "stats_tx cmd=%s mode=inner_uart0", command.c_str());
-  }
+  ESP_LOGD(TAG, "forward_post_gate_tx cmd=%s mode=inner_uart0", command.c_str());
+  ESP_LOGD(TAG, "stats_tx cmd=%s mode=inner_uart0", command.c_str());
 
-  if (!this->write_inner_uart0_command_(command, now)) {
+  if (!this->write_inner_uart0_command_(command, now, true)) {
     ESP_LOGE(TAG, "stats_error reason=inner_uart0_send_failed cmd=%s", command.c_str());
+    this->post_gate_tx_ready_event_ = true;
     this->end_xml_transaction_("stats_tx_failed");
     this->xml_last_command_.clear();
     this->xml_expected_prefix_.clear();
     return false;
   }
+  ESP_LOGD(TAG, "forward_post_gate_no_post_tx_flush cmd=%s", command.c_str());
 
   this->xml_state_ = wait_state;
-  this->xml_inflight_ = !fire_and_forget;
-  this->xml_deadline_ms_ = fire_and_forget ? 0 : now + timeout_ms;
+  this->xml_inflight_ = true;
+  this->xml_deadline_ms_ = now + timeout_ms;
   this->xml_next_action_ms_ = now + kXmlQuietMs;
-  if (fire_and_forget) {
-    this->transition_to_state_(wait_state, now, kInterCmdGapMs);
-  }
   return true;
 }
 
@@ -5153,7 +5167,7 @@ bool JuraComponent::send_stats_ascii_command_(const std::string &command, XmlPol
     uint32_t timeout_ms = (command.rfind("@TR:32", 0) == 0 || command.rfind("@TG:", 0) == 0)
                               ? kPostGateStatsTimeoutMs
                               : kPostGateControlTimeoutMs;
-    return this->send_post_gate_command_(command, expected_prefix, timeout_ms, false, wait_state, now);
+    return this->forward_post_gate_app_command_(command, expected_prefix, timeout_ms, wait_state, now);
   }
   if (this->db_transaction_owner_ == DbTransactionOwner::MACHINE_XML) {
     ESP_LOGD(TAG, "xml_tx_skip cmd=%s reason=busy busy_owner=%s", command.c_str(),
@@ -5208,8 +5222,8 @@ bool JuraComponent::send_stats_fire_and_forget_(const std::string &command, XmlP
     return false;
   }
   if (this->stats_session_ready_ && this->stats_inner_tx_required_) {
-    const std::string expected_prefix = expected_stats_prefix_for_command(command);
-    return this->send_post_gate_command_(command, expected_prefix, kPostGateControlTimeoutMs, true, next_state, now);
+    ESP_LOGE(TAG, "forward_post_gate_error reason=fire_and_forget_not_allowed cmd=%s", command.c_str());
+    return false;
   }
   if (this->db_transaction_owner_ == DbTransactionOwner::MACHINE_XML) {
     ESP_LOGD(TAG, "xml_tx_skip cmd=%s reason=busy busy_owner=%s", command.c_str(),
@@ -5499,6 +5513,7 @@ bool JuraComponent::read_stats_line_(std::string &line) {
       ESP_LOGD(TAG, "stats_rx cmd=%s len=%u first=0x%02X hex=\"%s\"", this->xml_last_command_.c_str(),
                static_cast<unsigned>(line.size()), static_cast<unsigned>(first), compact_hex_string(line).c_str());
       if (this->stats_inner_tx_required_) {
+        ESP_LOGD(TAG, "forward_post_gate_rx_raw hex=\"%s\"", compact_hex_string(line).c_str());
         ESP_LOGD(TAG, "post_gate_rx raw_hex=\"%s\"", compact_hex_string(line).c_str());
       }
       this->xml_stats_rx_logged_ = true;
@@ -5541,6 +5556,7 @@ bool JuraComponent::read_stats_line_(std::string &line) {
       ESP_LOGD(TAG, "stats_rx cmd=%s len=%u first=0x%02X hex=\"%s\"", this->xml_last_command_.c_str(),
                static_cast<unsigned>(line.size()), static_cast<unsigned>(first), compact_hex_string(line).c_str());
       if (this->stats_inner_tx_required_) {
+        ESP_LOGD(TAG, "forward_post_gate_rx_raw hex=\"%s\"", compact_hex_string(line).c_str());
         ESP_LOGD(TAG, "post_gate_rx raw_hex=\"%s\"", compact_hex_string(line).c_str());
       }
       this->xml_stats_rx_logged_ = true;
@@ -5580,6 +5596,8 @@ bool JuraComponent::finish_stats_rx_capture_(std::string &line, uint32_t now) {
            static_cast<unsigned>(duration), static_cast<unsigned>(line_based_len),
            compact_hex_string(this->xml_rx_line_, this->xml_rx_line_.size()).c_str());
   if (this->stats_inner_tx_required_) {
+    ESP_LOGD(TAG, "forward_post_gate_rx_raw hex=\"%s\"",
+             compact_hex_string(this->xml_rx_line_, this->xml_rx_line_.size()).c_str());
     ESP_LOGD(TAG, "post_gate_rx raw_hex=\"%s\"",
              compact_hex_string(this->xml_rx_line_, this->xml_rx_line_.size()).c_str());
   }
@@ -5869,6 +5887,7 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
   bool post_gate = this->stats_session_ready_ && this->stats_inner_tx_required_;
 
   if (post_gate) {
+    ESP_LOGD(TAG, "forward_post_gate_rx_decoded line=\"%s\"", sanitize_text_for_api(line).c_str());
     ESP_LOGD(TAG, "post_gate_rx_decoded line=\"%s\"", sanitize_text_for_api(line).c_str());
     if (!this->xml_expected_prefix_.empty()) {
       std::string expected = to_lower_copy(this->xml_expected_prefix_);
@@ -5883,6 +5902,8 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
         }
         return false;
       }
+      ESP_LOGD(TAG, "forward_post_gate_match cmd=%s response=\"%s\"", this->xml_last_command_.c_str(),
+               sanitize_text_for_api(line).c_str());
       ESP_LOGD(TAG, "post_gate_match cmd=%s matched=%s", this->xml_last_command_.c_str(),
                this->xml_expected_prefix_.c_str());
     }
@@ -5907,6 +5928,9 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
         ESP_LOGV(TAG, "stats_parse cmd=@TS:01 payload=lock_ack");
         this->xml_stats_locked_ = true;
         this->xml_inflight_ = false;
+        if (post_gate) {
+          this->post_gate_tx_ready_event_ = true;
+        }
         this->xml_deadline_ms_ = 0;
         this->transition_to_state_(XmlPollState::TR32_PAGE, now, kInterCmdGapMs);
         return true;
@@ -5932,6 +5956,9 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
           }
         }
         this->xml_inflight_ = false;
+        if (post_gate) {
+          this->post_gate_tx_ready_event_ = true;
+        }
         this->xml_deadline_ms_ = 0;
         if (!post_gate && this->xml_stats_consecutive_failures_ >= kStatsMaxConsecutiveFailures) {
           ESP_LOGD(TAG, "stats_reject cmd=@TR:32 reason=too_many_consecutive_failures count=%u",
@@ -5965,6 +5992,9 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
         }
         this->xml_stats_.clear();
         this->xml_inflight_ = false;
+        if (post_gate) {
+          this->post_gate_tx_ready_event_ = true;
+        }
         this->xml_deadline_ms_ = 0;
         this->transition_to_state_(XmlPollState::TGC0, now, kInterCmdGapMs);
         return parsed;
@@ -5990,6 +6020,9 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
         }
         this->xml_stats_.clear();
         this->xml_inflight_ = false;
+        if (post_gate) {
+          this->post_gate_tx_ready_event_ = true;
+        }
         this->xml_deadline_ms_ = 0;
         this->transition_to_state_(this->xml_stats_use_ts_lock_ ? XmlPollState::TS_UNLOCK : XmlPollState::DONE, now,
                                    kInterCmdGapMs);
@@ -6003,6 +6036,9 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
       ESP_LOGV(TAG, "stats_parse cmd=@TS:00 payload=unlock_ack raw='%s'", sanitize_text_for_api(line).c_str());
       this->xml_stats_locked_ = false;
       this->xml_inflight_ = false;
+      if (post_gate) {
+        this->post_gate_tx_ready_event_ = true;
+      }
       this->xml_deadline_ms_ = 0;
       this->transition_to_state_(XmlPollState::DONE, now);
       return true;
@@ -6031,6 +6067,9 @@ bool JuraComponent::handle_stats_binary_response_(uint32_t now) {
   this->xml_stats_reject_decoded_.clear();
   this->xml_cycle_failed_ = true;
   this->xml_inflight_ = false;
+  if (this->stats_inner_tx_required_) {
+    this->post_gate_tx_ready_event_ = true;
+  }
   this->xml_deadline_ms_ = 0;
   this->xml_rx_line_.clear();
   this->xml_stats_capture_start_ms_ = 0;
@@ -6433,6 +6472,7 @@ void JuraComponent::finish_stats_cycle_(uint32_t now, const char *reason) {
   const char *result = all_ok ? "success" : (any_ok ? "partial" : "failed");
   this->end_xml_transaction_(end_reason);
   this->xml_inflight_ = false;
+  this->post_gate_tx_ready_event_ = true;
   this->xml_stats_locked_ = false;
   this->xml_last_command_.clear();
   this->xml_expected_prefix_.clear();

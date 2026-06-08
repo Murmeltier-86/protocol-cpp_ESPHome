@@ -297,6 +297,10 @@ bool JuttaConnection::write_decoded(const std::vector<uint8_t>& data) {
     return write_decoded_unsafe(data);
 }
 
+bool JuttaConnection::write_decoded_no_flush(const std::vector<uint8_t>& data) {
+    return write_decoded_unsafe(data);
+}
+
 bool JuttaConnection::write_decoded(const std::string& data) {
     if (!this->wait_context_.active && !this->wait_string_context_.active) {
         flush_serial_input();

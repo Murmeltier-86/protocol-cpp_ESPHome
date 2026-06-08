@@ -365,7 +365,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void transition_dongle_startup_(DongleStartupState state, uint32_t now);
   bool process_dongle_startup_(uint32_t now);
   bool send_dongle_startup_command_(const std::string &command, uint32_t now, bool inner_uart0 = false);
-  bool write_inner_uart0_command_(const std::string &command, uint32_t now);
+  bool write_inner_uart0_command_(const std::string &command, uint32_t now, bool no_rx_flush = false);
   void fail_dongle_startup_(uint32_t now, const char *reason);
   void update_dongle_events_from_line_(const std::string &line);
   void process_dongle_startup_rx_(uint32_t now);
@@ -432,8 +432,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const char *xml_state_label_(XmlPollState state) const;
   void transition_to_state_(XmlPollState state, uint32_t now, uint32_t delay_ms = 0);
   bool write_stats_command_(const std::string &command, uint32_t now, bool fire_and_forget);
-  bool send_post_gate_command_(const std::string &command, const std::string &expected_prefix, uint32_t timeout_ms,
-                               bool fire_and_forget, XmlPollState wait_state, uint32_t now);
+  bool forward_post_gate_app_command_(const std::string &command, const std::string &expected_prefix,
+                                      uint32_t timeout_ms, XmlPollState wait_state, uint32_t now);
   bool send_stats_ascii_command_(const std::string &command, XmlPollState wait_state, uint32_t now);
   bool send_stats_fire_and_forget_(const std::string &command, XmlPollState next_state, uint32_t now,
                                    uint32_t settle_delay_ms);
@@ -534,6 +534,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t dongle_events_{0};
   bool stats_session_ready_{false};
   bool stats_inner_tx_required_{false};
+  bool post_gate_tx_ready_event_{true};
   uint16_t startup_t2_word_{0};
   std::string dongle_machine_identity_{};
   std::string dongle_tr_payload_{};

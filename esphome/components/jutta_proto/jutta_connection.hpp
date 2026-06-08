@@ -146,6 +146,12 @@ class JuttaConnection {
      **/
     bool write_decoded(const std::vector<uint8_t>& data);
     /**
+     * Writes decoded bytes without discarding already received UART data first.
+     * This is used for firmware-like transparent forwarding paths where the
+     * caller owns RX serialization and must not flush around TX.
+     **/
+    bool write_decoded_no_flush(const std::vector<uint8_t>& data);
+    /**
      * Encodes each character into 4 JUTTA bytes and writes them to the coffee maker.
      *
      * An example call could look like: write_decoded("TY:\r\n");
