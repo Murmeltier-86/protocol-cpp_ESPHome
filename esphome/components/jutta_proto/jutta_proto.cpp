@@ -308,12 +308,55 @@ uint8_t fw_nibble_transform(uint8_t nibble, uint8_t position, uint8_t key_hi, ui
   return fw_mod4(table_a[third] - pos - key_hi);
 }
 
+enum class InnerEscapeVariant {
+  CURRENT,
+  RAW,
+  MASK_7F,
+  XOR_20,
+  PASSTHROUGH,
+};
+
+const char *inner_escape_variant_name(InnerEscapeVariant variant) {
+  switch (variant) {
+    case InnerEscapeVariant::CURRENT:
+      return "current";
+    case InnerEscapeVariant::RAW:
+      return "esc_raw";
+    case InnerEscapeVariant::MASK_7F:
+      return "esc_mask_7f";
+    case InnerEscapeVariant::XOR_20:
+      return "esc_xor_20";
+    case InnerEscapeVariant::PASSTHROUGH:
+      return "esc_passthrough";
+  }
+  return "unknown";
+}
+
+bool inner_escape_variant_consumes_escape(InnerEscapeVariant variant) {
+  return variant != InnerEscapeVariant::RAW;
+}
+
+uint8_t inner_unescape_byte(uint8_t escaped, InnerEscapeVariant variant) {
+  switch (variant) {
+    case InnerEscapeVariant::CURRENT:
+    case InnerEscapeVariant::MASK_7F:
+      return escaped & 0x7F;
+    case InnerEscapeVariant::XOR_20:
+      return escaped ^ 0x20;
+    case InnerEscapeVariant::PASSTHROUGH:
+    case InnerEscapeVariant::RAW:
+      return escaped;
+  }
+  return escaped;
+}
+
 struct InnerTransportDecodeResult {
   bool ok{false};
   std::string payload{};
   std::string encoded_payload{};
   std::string reason{};
   const char *table_name{"unknown"};
+  const char *escape_name{"current"};
   uint8_t start{0};
   uint8_t key{0};
   bool key_escaped{false};
@@ -323,9 +366,12 @@ struct InnerTransportDecodeResult {
 };
 
 InnerTransportDecodeResult decode_inner_transport_with_tables(const std::string &frame, const uint8_t table_a[16],
-                                                              const uint8_t table_b[16], const char *table_name) {
+                                                              const uint8_t table_b[16], const char *table_name,
+                                                              InnerEscapeVariant escape_variant =
+                                                                  InnerEscapeVariant::CURRENT) {
   InnerTransportDecodeResult result;
   result.table_name = table_name;
+  result.escape_name = inner_escape_variant_name(escape_variant);
   result.start = frame.empty() ? 0 : static_cast<uint8_t>(frame.front());
   if (frame.size() < 2) {
     result.reason = "short_frame";
@@ -338,7 +384,7 @@ InnerTransportDecodeResult decode_inner_transport_with_tables(const std::string 
   }
 
   size_t index = 1;
-  if (static_cast<uint8_t>(frame[index]) == 0x1B) {
+  if (static_cast<uint8_t>(frame[index]) == 0x1B && inner_escape_variant_consumes_escape(escape_variant)) {
     result.key_escaped = true;
     result.esc_count += 1;
     ++index;
@@ -347,7 +393,12 @@ InnerTransportDecodeResult decode_inner_transport_with_tables(const std::string 
       return result;
     }
   }
-  uint8_t key = static_cast<uint8_t>(frame[index]) & 0x7F;
+  uint8_t key = static_cast<uint8_t>(frame[index]);
+  if (result.key_escaped) {
+    key = inner_unescape_byte(key, escape_variant);
+  } else if (escape_variant == InnerEscapeVariant::CURRENT) {
+    key &= 0x7F;
+  }
   result.key = key;
   uint8_t key_hi = (key >> 4) & 0x0F;
   uint8_t key_lo = key & 0x0F;
@@ -363,14 +414,14 @@ InnerTransportDecodeResult decode_inner_transport_with_tables(const std::string 
     if (encoded == '\r' || encoded == '\n') {
       break;
     }
-    if (encoded == 0x1B) {
+    if (encoded == 0x1B && inner_escape_variant_consumes_escape(escape_variant)) {
       result.esc_count += 1;
       ++index;
       if (index >= frame.size()) {
         result.reason = "truncated_escape";
         return result;
       }
-      encoded = static_cast<uint8_t>(frame[index]) & 0x7F;
+      encoded = inner_unescape_byte(static_cast<uint8_t>(frame[index]), escape_variant);
     }
 
     encoded_payload.push_back(static_cast<char>(encoded));
@@ -433,6 +484,34 @@ std::vector<InnerTransportDecodeResult> decode_inner_transport_candidates(const 
   for (size_t i = 0; i < count; ++i) {
     decoded_candidates.push_back(
         decode_inner_transport_with_tables(frame, candidates[i].a, candidates[i].b, candidates[i].name));
+  }
+  return decoded_candidates;
+}
+
+std::vector<InnerTransportDecodeResult> decode_inner_transport_variant_candidates(const std::string &frame,
+                                                                                 InnerEscapeVariant escape_variant) {
+  static constexpr uint8_t WIFI_A[16] = {1, 0, 3, 2, 15, 14, 8, 10, 6, 13, 7, 12, 11, 9, 5, 4};
+  static constexpr uint8_t WIFI_B[16] = {9, 12, 6, 11, 10, 15, 2, 14, 13, 0, 4, 3, 1, 8, 7, 5};
+  static constexpr uint8_t BLE2_A[16] = {14, 4, 3, 2, 1, 13, 8, 11, 6, 15, 12, 7, 10, 5, 0, 9};
+  static constexpr uint8_t BLE2_B[16] = {10, 6, 13, 12, 14, 11, 1, 9, 15, 7, 0, 5, 3, 2, 4, 8};
+  static constexpr uint8_t FW_PARAM0_A[16] = {13, 0, 4, 3, 1, 8, 7, 5, 1, 0, 3, 2, 15, 14, 8, 10};
+  static constexpr uint8_t FW_PARAM0_B[16] = {6, 7, 0, 12, 11, 5, 1, 3, 9, 12, 6, 11, 10, 15, 2, 14};
+
+  struct Candidate {
+    const char *name;
+    const uint8_t *a;
+    const uint8_t *b;
+  };
+
+  const Candidate candidates[] = {{"fw_param0", FW_PARAM0_A, FW_PARAM0_B},
+                                  {"wifi", WIFI_A, WIFI_B},
+                                  {"ble2", BLE2_A, BLE2_B}};
+
+  std::vector<InnerTransportDecodeResult> decoded_candidates;
+  decoded_candidates.reserve(sizeof(candidates) / sizeof(candidates[0]));
+  for (const auto &candidate : candidates) {
+    decoded_candidates.push_back(
+        decode_inner_transport_with_tables(frame, candidate.a, candidate.b, candidate.name, escape_variant));
   }
   return decoded_candidates;
 }
@@ -3452,15 +3531,34 @@ bool JuraComponent::decode_stats_inner_transport_line_(const std::string &raw_li
   }
   this->publish_raw_rx_(raw_line, "stats_inner_transport");
 
+  if (this->xml_inner_decode_trace_) {
+    const InnerEscapeVariant variants[] = {InnerEscapeVariant::CURRENT, InnerEscapeVariant::RAW,
+                                           InnerEscapeVariant::MASK_7F, InnerEscapeVariant::XOR_20,
+                                           InnerEscapeVariant::PASSTHROUGH};
+    for (const auto variant : variants) {
+      std::vector<InnerTransportDecodeResult> variant_candidates =
+          decode_inner_transport_variant_candidates(raw_line, variant);
+      for (const auto &candidate : variant_candidates) {
+        ESP_LOGD(TAG, "inner_variant cmd=%s esc=%s table=%s len=%u printable=%u%% starts_at=%s starts_tr=%s "
+                      "starts_tg=%s starts_ts=%s starts_ok=%s first_ascii=\"%s\"",
+                 this->xml_last_command_.c_str(), candidate.escape_name, candidate.table_name,
+                 static_cast<unsigned>(candidate.payload.size()), static_cast<unsigned>(candidate.printable_ratio),
+                 YESNO(payload_starts_with_at(candidate.payload)), YESNO(payload_starts_with_tr(candidate.payload)),
+                 YESNO(payload_starts_with_tg(candidate.payload)), YESNO(payload_starts_with_ts(candidate.payload)),
+                 YESNO(payload_starts_with_ok(candidate.payload)), printable_preview(candidate.payload, 32).c_str());
+      }
+    }
+  }
+
   InnerTransportDecodeResult decoded;
   decoded.reason = "no_candidate_matched";
   for (const auto &candidate : candidates) {
     if (this->xml_inner_decode_trace_) {
-      ESP_LOGD(TAG, "stats_inner_candidate cmd=%s table=%s ok=%s key=0x%02X key_escaped=%s payload_len=%u "
+      ESP_LOGD(TAG, "stats_inner_candidate cmd=%s esc=%s table=%s ok=%s key=0x%02X key_escaped=%s payload_len=%u "
                     "esc_count=%u pre_hex=\"%s\" decoded_hex=\"%s\" len=%u printable=%u%% starts_at=%s "
                     "starts_tr=%s starts_tg=%s starts_ts=%s starts_ok=%s first_hex=\"%s\" first_ascii=\"%s\" "
                     "reason=%s",
-               this->xml_last_command_.c_str(), candidate.table_name, YESNO(candidate.ok),
+               this->xml_last_command_.c_str(), candidate.escape_name, candidate.table_name, YESNO(candidate.ok),
                static_cast<unsigned>(candidate.key), YESNO(candidate.key_escaped),
                static_cast<unsigned>(candidate.payload_len), static_cast<unsigned>(candidate.esc_count),
                compact_hex_string(candidate.encoded_payload, 32).c_str(),
