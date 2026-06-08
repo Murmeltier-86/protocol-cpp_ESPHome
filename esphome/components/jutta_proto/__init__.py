@@ -30,6 +30,11 @@ CONF_MACHINE_TYPE = "machine_type"
 CONF_MACHINE_STATUS = "machine_status"
 CONF_MACHINE_ONLINE = "machine_online"
 CONF_MACHINE_READY = "machine_ready"
+CONF_TF_WELCOME = "tf_welcome"
+CONF_TF_COFFEE_READY = "tf_coffee_ready"
+CONF_TF_ENERGY_SAFE = "tf_energy_safe"
+CONF_TF_ACTIVE_RF_FILTER = "tf_active_rf_filter"
+CONF_TF_STATUS_BITS = "tf_status_bits"
 CONF_ENABLE_MACHINE_XML_POLL = "enable_machine_xml_poll"
 CONF_ENABLE_XML_POLL = "enable_xml_poll"
 CONF_XML_MAPPING_PATH = "xml_mapping_path"
@@ -136,6 +141,11 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_MACHINE_STATUS): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_MACHINE_ONLINE): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_MACHINE_READY): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_TF_WELCOME): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_TF_COFFEE_READY): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_TF_ENERGY_SAFE): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_TF_ACTIVE_RF_FILTER): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_TF_STATUS_BITS): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_ENABLE_MACHINE_XML_POLL): cv.boolean,
             cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
             cv.Optional(CONF_XML_MAPPING_PATH, default="embedded"): cv.string,
@@ -412,6 +422,26 @@ async def to_code(config):
     if CONF_MACHINE_READY in config:
         machine_ready_sensor = await binary_sensor.new_binary_sensor(config[CONF_MACHINE_READY])
         cg.add(var.set_machine_ready_sensor(machine_ready_sensor))
+
+    if CONF_TF_WELCOME in config:
+        tf_welcome_sensor = await binary_sensor.new_binary_sensor(config[CONF_TF_WELCOME])
+        cg.add(var.set_tf_welcome_sensor(tf_welcome_sensor))
+
+    if CONF_TF_COFFEE_READY in config:
+        tf_coffee_ready_sensor = await binary_sensor.new_binary_sensor(config[CONF_TF_COFFEE_READY])
+        cg.add(var.set_tf_coffee_ready_sensor(tf_coffee_ready_sensor))
+
+    if CONF_TF_ENERGY_SAFE in config:
+        tf_energy_safe_sensor = await binary_sensor.new_binary_sensor(config[CONF_TF_ENERGY_SAFE])
+        cg.add(var.set_tf_energy_safe_sensor(tf_energy_safe_sensor))
+
+    if CONF_TF_ACTIVE_RF_FILTER in config:
+        tf_active_rf_filter_sensor = await binary_sensor.new_binary_sensor(config[CONF_TF_ACTIVE_RF_FILTER])
+        cg.add(var.set_tf_active_rf_filter_sensor(tf_active_rf_filter_sensor))
+
+    if CONF_TF_STATUS_BITS in config:
+        tf_status_bits_sensor = await text_sensor.new_text_sensor(config[CONF_TF_STATUS_BITS])
+        cg.add(var.set_tf_status_bits_sensor(tf_status_bits_sensor))
 
     for xml_sensor in config.get(CONF_XML_SENSORS, []):
         sensor_conf = xml_sensor.copy()

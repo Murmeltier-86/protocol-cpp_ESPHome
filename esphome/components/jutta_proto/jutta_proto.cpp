@@ -419,7 +419,7 @@ const char *classify_decoded_inner_response(const std::string &line) {
     return "control_response";
   }
   if (lower.rfind("@tf", 0) == 0) {
-    return "tf_response";
+    return "tf_status";
   }
   return "unknown";
 }
@@ -1719,6 +1719,13 @@ void JuraComponent::handle_decoded_response_(const std::string &response, const 
     return;
   }
 
+  if (lowered.rfind("@tf:", 0) == 0) {
+    if (this->publish_tf_status_(response)) {
+      this->publish_last_command_result_("tf_status");
+    }
+    return;
+  }
+
   if (lowered.rfind("@h", 0) == 0 && lowered.find(":error") != std::string::npos) {
     this->publish_machine_status_(response);
     this->publish_last_command_result_(response);
@@ -1966,6 +1973,77 @@ void JuraComponent::publish_machine_ready_(bool ready) {
   if (this->machine_ready_sensor_ != nullptr) {
     this->machine_ready_sensor_->publish_state(ready);
   }
+}
+
+bool JuraComponent::publish_tf_status_(const std::string &response) {
+  std::string trimmed = response;
+  trim_in_place(trimmed);
+  std::string lower = to_lower_copy(trimmed);
+  if (lower.rfind("@tf:", 0) != 0) {
+    return false;
+  }
+
+  std::string payload = trimmed.substr(4);
+  if (payload.empty() || (payload.size() % 2) != 0) {
+    ESP_LOGD(TAG, "tf_status ignored decoded=\"%s\" reason=invalid_hex_length", sanitize_text_for_api(trimmed).c_str());
+    return false;
+  }
+
+  std::vector<uint8_t> data;
+  data.reserve(payload.size() / 2);
+  for (size_t i = 0; i < payload.size(); i += 2) {
+    if (!std::isxdigit(static_cast<unsigned char>(payload[i])) ||
+        !std::isxdigit(static_cast<unsigned char>(payload[i + 1]))) {
+      ESP_LOGD(TAG, "tf_status ignored decoded=\"%s\" reason=invalid_hex", sanitize_text_for_api(trimmed).c_str());
+      return false;
+    }
+    char byte_text[3] = {payload[i], payload[i + 1], '\0'};
+    data.push_back(static_cast<uint8_t>(std::strtoul(byte_text, nullptr, 16)));
+  }
+
+  std::vector<uint16_t> bits;
+  bits.reserve(data.size() * 8);
+  for (size_t bit = 0; bit < data.size() * 8; ++bit) {
+    const uint8_t mask = static_cast<uint8_t>(1U << (7U - (bit % 8U)));
+    if ((data[bit / 8U] & mask) != 0) {
+      bits.push_back(static_cast<uint16_t>(bit));
+    }
+  }
+
+  std::ostringstream bits_stream;
+  for (size_t i = 0; i < bits.size(); ++i) {
+    if (i != 0) {
+      bits_stream << ',';
+    }
+    bits_stream << bits[i];
+  }
+  const std::string bits_text = bits_stream.str();
+  ESP_LOGD(TAG, "tf_status decoded=\"%s\" bits=\"%s\"", sanitize_text_for_api(trimmed).c_str(), bits_text.c_str());
+
+  auto has_bit = [&data](size_t bit) -> bool {
+    if (bit >= data.size() * 8) {
+      return false;
+    }
+    const uint8_t mask = static_cast<uint8_t>(1U << (7U - (bit % 8U)));
+    return (data[bit / 8U] & mask) != 0;
+  };
+
+  if (this->tf_welcome_sensor_ != nullptr) {
+    this->tf_welcome_sensor_->publish_state(has_bit(11));
+  }
+  if (this->tf_coffee_ready_sensor_ != nullptr) {
+    this->tf_coffee_ready_sensor_->publish_state(has_bit(13));
+  }
+  if (this->tf_energy_safe_sensor_ != nullptr) {
+    this->tf_energy_safe_sensor_->publish_state(has_bit(36));
+  }
+  if (this->tf_active_rf_filter_sensor_ != nullptr) {
+    this->tf_active_rf_filter_sensor_->publish_state(has_bit(37));
+  }
+  if (this->tf_status_bits_sensor_ != nullptr) {
+    this->tf_status_bits_sensor_->publish_state(bits_text);
+  }
+  return true;
 }
 
 void JuraComponent::process_machine_data_query() {
@@ -3474,7 +3552,7 @@ void JuraComponent::finish_xml_command_probe_step_(const std::string &command, u
                    decoded_or_ascii.c_str());
           ESP_LOGD(TAG, "xml_probe_class cmd=%s idx=%u decoded_class=%s", command.c_str(),
                    static_cast<unsigned>(i), decoded_class);
-          if (std::strcmp(decoded_class, "tf_response") == 0) {
+          if (std::strcmp(decoded_class, "tf_status") == 0) {
             saw_tf = true;
           }
           matched = this->xml_session_probe_expected_match_(command, decoded.payload);
@@ -3494,7 +3572,7 @@ void JuraComponent::finish_xml_command_probe_step_(const std::string &command, u
     }
   }
   const char *result = saw_useful ? "useful_response"
-                                  : (saw_tf ? "tf_response" : (lines.empty() ? "timeout" : "unmatched_only"));
+                                  : (saw_tf ? "tf_status" : (lines.empty() ? "timeout" : "unmatched_only"));
   ESP_LOGD(TAG, "xml_probe_result cmd=%s result=%s lines=%u unmatched=%s", command.c_str(), result,
            static_cast<unsigned>(lines.size()), YESNO(saw_unmatched));
   this->xml_command_probe_rx_buffer_.clear();
@@ -3664,7 +3742,7 @@ std::string JuraComponent::xml_session_probe_format_command_(const char *command
 const char *JuraComponent::classify_xml_session_decoded_response_(const std::string &response) const {
   std::string lower = lower_trimmed_transport_payload(response);
   if (lower.rfind("@tf", 0) == 0) {
-    return "tf_response";
+    return "tf_status";
   }
   if (lower.rfind("@tr", 0) == 0) {
     return "stats_response";
@@ -3777,7 +3855,7 @@ void JuraComponent::finish_xml_session_probe_step_(const std::string &command, u
           ESP_LOGD(TAG, "xml_session_class variant=%s cmd=%s idx=%u decoded_class=%s",
                    this->xml_session_probe_variant_.c_str(), command.c_str(), static_cast<unsigned>(i),
                    decoded_class);
-          if (std::strcmp(decoded_class, "tf_response") == 0) {
+          if (std::strcmp(decoded_class, "tf_status") == 0) {
             saw_tf = true;
           }
           matched = this->xml_session_probe_expected_match_(command, decoded.payload);
@@ -3804,7 +3882,7 @@ void JuraComponent::finish_xml_session_probe_step_(const std::string &command, u
   }
 
   const char *result = saw_useful ? "useful_response"
-                                  : (saw_tf ? "tf_response" : (timed_out ? "timeout" : "unmatched_only"));
+                                  : (saw_tf ? "tf_status" : (timed_out ? "timeout" : "unmatched_only"));
   ESP_LOGD(TAG, "xml_session_result variant=%s cmd=%s result=%s lines=%u unmatched=%s",
            this->xml_session_probe_variant_.c_str(), command.c_str(), result, static_cast<unsigned>(lines.size()),
            YESNO(saw_unmatched));
@@ -4880,11 +4958,13 @@ bool JuraComponent::decode_stats_inner_transport_line_(const std::string &raw_li
   const char *decoded_class = classify_decoded_inner_response(decoded.payload);
   ESP_LOGD(TAG, "stats_inner_decoded cmd=%s decoded=\"%s\"", this->xml_last_command_.c_str(),
            transport_payload_log_text(decoded.payload).c_str());
-  if (std::strcmp(decoded_class, "tf_response") == 0) {
+  if (std::strcmp(decoded_class, "tf_status") == 0) {
     std::string decoded_text = transport_payload_log_text(decoded.payload);
-    ESP_LOGD(TAG, "stats_reject cmd=%s reason=tf_response decoded=\"%s\"", this->xml_last_command_.c_str(),
+    this->publish_tf_status_(decoded.payload);
+    ESP_LOGD(TAG, "stats_reject cmd=%s reason=not_stats decoded_class=tf_status decoded=\"%s\"",
+             this->xml_last_command_.c_str(),
              decoded_text.c_str());
-    this->xml_stats_reject_reason_ = "tf_response";
+    this->xml_stats_reject_reason_ = "not_stats";
     this->xml_stats_reject_decoded_ = decoded_text;
     this->xml_stats_binary_response_ = true;
     return false;

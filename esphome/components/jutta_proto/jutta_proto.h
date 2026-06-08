@@ -218,6 +218,13 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_machine_status_sensor(text_sensor::TextSensor *sensor) { this->machine_status_sensor_ = sensor; }
   void set_machine_online_sensor(binary_sensor::BinarySensor *sensor) { this->machine_online_sensor_ = sensor; }
   void set_machine_ready_sensor(binary_sensor::BinarySensor *sensor) { this->machine_ready_sensor_ = sensor; }
+  void set_tf_welcome_sensor(binary_sensor::BinarySensor *sensor) { this->tf_welcome_sensor_ = sensor; }
+  void set_tf_coffee_ready_sensor(binary_sensor::BinarySensor *sensor) { this->tf_coffee_ready_sensor_ = sensor; }
+  void set_tf_energy_safe_sensor(binary_sensor::BinarySensor *sensor) { this->tf_energy_safe_sensor_ = sensor; }
+  void set_tf_active_rf_filter_sensor(binary_sensor::BinarySensor *sensor) {
+    this->tf_active_rf_filter_sensor_ = sensor;
+  }
+  void set_tf_status_bits_sensor(text_sensor::TextSensor *sensor) { this->tf_status_bits_sensor_ = sensor; }
   void set_log_decoded_tx(bool enabled) { this->log_decoded_tx_ = enabled; }
   void set_log_encoded_uart(bool enabled) { this->log_encoded_uart_ = enabled; }
   void set_enable_machine_xml_poll(bool enabled) { this->enable_machine_xml_poll_ = enabled; }
@@ -296,6 +303,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void publish_machine_status_(const std::string &status);
   void publish_machine_online_(bool online);
   void publish_machine_ready_(bool ready);
+  bool publish_tf_status_(const std::string &response);
   bool decode_and_publish_status_(const std::string &response, const char *parser_branch);
   std::string format_decoded_status_(const std::vector<JuraDecodedField> &fields) const;
   bool is_printable_status_text_(const std::string &text) const;
@@ -455,6 +463,11 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   text_sensor::TextSensor *machine_status_sensor_{nullptr};
   binary_sensor::BinarySensor *machine_online_sensor_{nullptr};
   binary_sensor::BinarySensor *machine_ready_sensor_{nullptr};
+  binary_sensor::BinarySensor *tf_welcome_sensor_{nullptr};
+  binary_sensor::BinarySensor *tf_coffee_ready_sensor_{nullptr};
+  binary_sensor::BinarySensor *tf_energy_safe_sensor_{nullptr};
+  binary_sensor::BinarySensor *tf_active_rf_filter_sensor_{nullptr};
+  text_sensor::TextSensor *tf_status_bits_sensor_{nullptr};
   bool log_decoded_tx_{true};
   bool log_encoded_uart_{false};
   uint32_t machine_data_query_next_{0};
