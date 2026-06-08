@@ -301,6 +301,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     SEND_T2,
     WAIT_T3,
     SEND_T3,
+    WAIT_T0_AFTER_T3,
     WAIT_AFTER_T3,
     PREP_TR37,
     SEND_TR37,

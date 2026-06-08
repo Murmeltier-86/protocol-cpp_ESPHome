@@ -45,6 +45,7 @@ constexpr uint8_t kTr32BytesPerProduct = 2;
 constexpr uint8_t kStatsMaxConsecutiveFailures = 4;
 constexpr uint32_t kDongleStartupProbeDelayMs = 250;
 constexpr uint32_t kDongleStartupTimeoutMs = 1500;
+constexpr uint32_t kDongleStartupT0AfterT3TimeoutMs = 5000;
 constexpr uint32_t kDongleStartupT3QuietMs = 1000;
 constexpr uint32_t kDongleStartupMaxWaitAfterT3Ms = 5000;
 constexpr uint32_t kDongleStartupTr37TimeoutMs = 3000;
@@ -53,13 +54,14 @@ constexpr uint8_t kDongleStartupMaxProbeAttempts = 6;
 constexpr uint8_t kDongleStartupMaxT1Attempts = 6;
 constexpr uint8_t kDongleStartupMaxTr37Attempts = 3;
 constexpr uint32_t DONGLE_EVENT_TY = 0x01;
+constexpr uint32_t DONGLE_EVENT_T0 = 0x02;
 constexpr uint32_t DONGLE_EVENT_T1 = 0x04;
 constexpr uint32_t DONGLE_EVENT_T2 = 0x08;
 constexpr uint32_t DONGLE_EVENT_T3 = 0x10;
 constexpr uint32_t DONGLE_EVENT_TR = 0x40;
 constexpr uint32_t DONGLE_EVENT_TF = 0x80;
 constexpr uint32_t DONGLE_STARTUP_CLEAR_MASK =
-    DONGLE_EVENT_TY | DONGLE_EVENT_T1 | DONGLE_EVENT_T2 | DONGLE_EVENT_T3 | DONGLE_EVENT_TR;
+    DONGLE_EVENT_TY | DONGLE_EVENT_T0 | DONGLE_EVENT_T1 | DONGLE_EVENT_T2 | DONGLE_EVENT_T3 | DONGLE_EVENT_TR;
 constexpr uint32_t DONGLE_STARTUP_READY_MASK = DONGLE_EVENT_T2 | DONGLE_EVENT_T3 | DONGLE_EVENT_TR;
 constexpr uint32_t kSettingsRefreshMs = 600000;
 constexpr uint32_t kErrorPollIntervalMs = 5000;
@@ -842,7 +844,9 @@ std::vector<InnerTransportDecodeResult> decode_inner_transport_key_variant_candi
   keys.push_back({"key_low_high_nibbles", current_lo, current_hi, probe.unescaped_payload});
   if (!probe.unescaped_payload.empty()) {
     uint8_t next = static_cast<uint8_t>(probe.unescaped_payload.front());
-    keys.push_back({"key_byte_and_next_byte", probe.key & 0x0F, next & 0x0F, probe.unescaped_payload.substr(1)});
+    const uint8_t key_lo = static_cast<uint8_t>(probe.key & 0x0F);
+    const uint8_t next_lo = static_cast<uint8_t>(next & 0x0F);
+    keys.push_back({"key_byte_and_next_byte", key_lo, next_lo, probe.unescaped_payload.substr(1)});
   }
   if (has_t2_word) {
     uint8_t t2_low = static_cast<uint8_t>(t2_word & 0xFF);
@@ -4012,6 +4016,8 @@ const char *JuraComponent::dongle_startup_state_name_(DongleStartupState state) 
       return "wait_t3";
     case DongleStartupState::SEND_T3:
       return "send_t3";
+    case DongleStartupState::WAIT_T0_AFTER_T3:
+      return "wait_t0_after_t3";
     case DongleStartupState::WAIT_AFTER_T3:
       return "wait_after_t3";
     case DongleStartupState::PREP_TR37:
@@ -4079,6 +4085,8 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
   std::string lower = to_lower_copy(trimmed);
   if (lower.rfind("ty:", 0) == 0) {
     bit = DONGLE_EVENT_TY;
+  } else if (lower.rfind("@t0", 0) == 0) {
+    bit = DONGLE_EVENT_T0;
   } else if (lower.rfind("@t1", 0) == 0) {
     bit = DONGLE_EVENT_T1;
   } else if (trimmed.rfind("@T2", 0) == 0) {
@@ -4179,6 +4187,12 @@ void JuraComponent::process_dongle_startup_rx_(uint32_t now) {
     if (this->is_printable_status_text_(rx_line.data)) {
       this->update_dongle_events_from_line_(rx_line.data);
     }
+  }
+  if (remainder == "@t0") {
+    ESP_LOGD(TAG, "dongle_startup_rx class=ascii_at len=%u hex=\"%s\"",
+             static_cast<unsigned>(remainder.size()), compact_hex_string(remainder, remainder.size()).c_str());
+    this->update_dongle_events_from_line_(remainder);
+    remainder.clear();
   }
   this->dongle_startup_rx_buffer_ = remainder;
 }
@@ -4350,12 +4364,29 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       this->dongle_startup_t3_seen_during_quiet_ = false;
       this->dongle_startup_t3_seen_while_waiting_tr37_ = false;
       this->dongle_startup_quiet_then_prep_tr37_ = true;
-      this->transition_dongle_startup_(DongleStartupState::WAIT_AFTER_T3, now);
-      this->dongle_startup_quiet_start_ms_ = now;
-      this->dongle_startup_next_action_ms_ = now + kDongleStartupT3QuietMs;
-      this->dongle_startup_deadline_ms_ = now + kDongleStartupMaxWaitAfterT3Ms;
-      ESP_LOGD(TAG, "dongle_startup_wait_t3_quiet start events=0x%02X",
-               static_cast<unsigned>(this->dongle_events_));
+      this->transition_dongle_startup_(DongleStartupState::WAIT_T0_AFTER_T3, now);
+      this->dongle_startup_deadline_ms_ = now + kDongleStartupT0AfterT3TimeoutMs;
+      ESP_LOGD(TAG, "dongle_startup_wait event=0x%02X timeout_ms=%u",
+               static_cast<unsigned>(DONGLE_EVENT_T0), static_cast<unsigned>(kDongleStartupT0AfterT3TimeoutMs));
+      return false;
+
+    case DongleStartupState::WAIT_T0_AFTER_T3:
+      if ((this->dongle_events_ & DONGLE_EVENT_T0) != 0) {
+        ESP_LOGD(TAG, "dongle_startup_t0_after_t3_ok events=0x%02X",
+                 static_cast<unsigned>(this->dongle_events_));
+        this->dongle_startup_t3_seen_during_quiet_ = false;
+        this->dongle_startup_quiet_then_prep_tr37_ = true;
+        this->transition_dongle_startup_(DongleStartupState::WAIT_AFTER_T3, now);
+        this->dongle_startup_quiet_start_ms_ = now;
+        this->dongle_startup_next_action_ms_ = now + kDongleStartupT3QuietMs;
+        this->dongle_startup_deadline_ms_ = now + kDongleStartupMaxWaitAfterT3Ms;
+        ESP_LOGD(TAG, "dongle_startup_wait_t3_quiet start events=0x%02X",
+                 static_cast<unsigned>(this->dongle_events_));
+        return false;
+      }
+      if (this->dongle_startup_deadline_ms_ != 0 && time_reached(now, this->dongle_startup_deadline_ms_)) {
+        this->fail_dongle_startup_(now, "t0_after_t3_timeout");
+      }
       return false;
 
     case DongleStartupState::WAIT_AFTER_T3:
