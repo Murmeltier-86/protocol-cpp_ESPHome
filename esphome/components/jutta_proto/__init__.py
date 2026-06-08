@@ -57,6 +57,7 @@ CONF_XML_DONGLE_STARTUP = "xml_dongle_startup"
 CONF_XML_DONGLE_STARTUP_DEBUG = "xml_dongle_startup_debug"
 CONF_XML_DONGLE_STARTUP_MODE = "xml_dongle_startup_mode"
 CONF_XML_DONGLE_WAIT_T0_AFTER_T3 = "xml_dongle_wait_t0_after_t3"
+CONF_XML_DONGLE_INNER_TX_DEBUG = "xml_dongle_inner_tx_debug"
 CONF_XML_RUN_TABLET_START_SEQUENCE = "xml_run_tablet_start_sequence"
 CONF_XML_TABLET_SEQUENCE_MODE = "xml_tablet_sequence_mode"
 CONF_XML_COUNTER_MAX = "xml_counter_max"
@@ -180,6 +181,7 @@ CONFIG_SCHEMA = (
                 "full", "gate_only", lower=True
             ),
             cv.Optional(CONF_XML_DONGLE_WAIT_T0_AFTER_T3, default=False): cv.boolean,
+            cv.Optional(CONF_XML_DONGLE_INNER_TX_DEBUG, default=False): cv.boolean,
             cv.Optional(CONF_XML_RUN_TABLET_START_SEQUENCE, default=False): cv.boolean,
             cv.Optional(CONF_XML_TABLET_SEQUENCE_MODE, default="minimal"): cv.one_of(
                 "minimal", "minimal_tr37", lower=True
@@ -359,6 +361,7 @@ async def to_code(config):
     cg.add(var.set_xml_dongle_startup_debug(config[CONF_XML_DONGLE_STARTUP_DEBUG]))
     cg.add(var.set_xml_dongle_startup_mode(config[CONF_XML_DONGLE_STARTUP_MODE]))
     cg.add(var.set_xml_dongle_wait_t0_after_t3(config[CONF_XML_DONGLE_WAIT_T0_AFTER_T3]))
+    cg.add(var.set_xml_dongle_inner_tx_debug(config[CONF_XML_DONGLE_INNER_TX_DEBUG]))
     cg.add(var.set_xml_run_tablet_start_sequence(config[CONF_XML_RUN_TABLET_START_SEQUENCE]))
     cg.add(var.set_xml_tablet_sequence_mode(config[CONF_XML_TABLET_SEQUENCE_MODE]))
     cg.add(var.set_xml_counter_max(config[CONF_XML_COUNTER_MAX]))

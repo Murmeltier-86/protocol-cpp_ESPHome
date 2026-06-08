@@ -247,6 +247,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_dongle_startup_debug(bool enabled) { this->xml_dongle_startup_debug_ = enabled; }
   void set_xml_dongle_startup_mode(const std::string &mode) { this->xml_dongle_startup_mode_ = mode; }
   void set_xml_dongle_wait_t0_after_t3(bool enabled) { this->xml_dongle_wait_t0_after_t3_ = enabled; }
+  void set_xml_dongle_inner_tx_debug(bool enabled) { this->xml_dongle_inner_tx_debug_ = enabled; }
   void set_xml_run_tablet_start_sequence(bool enabled) { this->xml_run_tablet_start_sequence_ = enabled; }
   void set_xml_tablet_sequence_mode(const std::string &mode) { this->xml_tablet_sequence_mode_ = mode; }
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
@@ -362,7 +363,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const char *dongle_startup_state_name_(DongleStartupState state) const;
   void transition_dongle_startup_(DongleStartupState state, uint32_t now);
   bool process_dongle_startup_(uint32_t now);
-  bool send_dongle_startup_command_(const std::string &command, uint32_t now);
+  bool send_dongle_startup_command_(const std::string &command, uint32_t now, bool inner_uart0 = false);
   void fail_dongle_startup_(uint32_t now, const char *reason);
   void update_dongle_events_from_line_(const std::string &line);
   void process_dongle_startup_rx_(uint32_t now);
@@ -523,6 +524,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_dongle_startup_debug_{false};
   std::string xml_dongle_startup_mode_{"full"};
   bool xml_dongle_wait_t0_after_t3_{false};
+  bool xml_dongle_inner_tx_debug_{false};
   uint32_t dongle_events_{0};
   bool stats_session_ready_{false};
   uint16_t startup_t2_word_{0};
@@ -540,6 +542,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool dongle_startup_t3_seen_during_quiet_{false};
   bool dongle_startup_t3_seen_while_waiting_tr37_{false};
   bool dongle_startup_quiet_then_prep_tr37_{true};
+  uint8_t dongle_inner_tx_key_counter_{0x42};
   bool xml_run_tablet_start_sequence_{false};
   std::string xml_tablet_sequence_mode_{"minimal"};
   bool xml_tablet_start_sequence_done_{false};

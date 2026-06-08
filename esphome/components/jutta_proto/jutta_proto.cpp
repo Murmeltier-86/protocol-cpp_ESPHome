@@ -64,6 +64,10 @@ constexpr uint32_t DONGLE_EVENT_TF = 0x80;
 constexpr uint32_t DONGLE_STARTUP_CLEAR_MASK =
     DONGLE_EVENT_TY | DONGLE_EVENT_T0 | DONGLE_EVENT_T1 | DONGLE_EVENT_T2 | DONGLE_EVENT_T3 | DONGLE_EVENT_TR;
 constexpr uint32_t DONGLE_STARTUP_READY_MASK = DONGLE_EVENT_T2 | DONGLE_EVENT_T3 | DONGLE_EVENT_TR;
+constexpr uint8_t INNER_UART_MODE0_A[16] = {0x08, 0x0E, 0x0C, 0x04, 0x03, 0x0D, 0x0A, 0x0B,
+                                            0x00, 0x0F, 0x06, 0x07, 0x02, 0x05, 0x01, 0x09};
+constexpr uint8_t INNER_UART_MODE0_B[16] = {0x04, 0x0B, 0x0D, 0x0A, 0x00, 0x07, 0x0F, 0x05,
+                                            0x09, 0x08, 0x03, 0x01, 0x0E, 0x02, 0x0C, 0x06};
 constexpr uint32_t kSettingsRefreshMs = 600000;
 constexpr uint32_t kErrorPollIntervalMs = 5000;
 constexpr uint32_t kCommandTimeoutMs = 1500;
@@ -126,6 +130,29 @@ std::string sanitize_text_for_api(const std::string &input) {
   return out;
 }
 
+std::string escape_control_text_for_log(const std::string &input) {
+  std::string out;
+  out.reserve(input.size() + 8);
+  constexpr char kHex[] = "0123456789ABCDEF";
+  for (unsigned char c : input) {
+    if (c == '\r') {
+      out.append("\\r");
+    } else if (c == '\n') {
+      out.append("\\n");
+    } else if (c == '\t') {
+      out.append("\\t");
+    } else if (c >= 0x20 && c <= 0x7E) {
+      out.push_back(static_cast<char>(c));
+    } else {
+      out.push_back('\\');
+      out.push_back('x');
+      out.push_back(kHex[(c >> 4) & 0x0F]);
+      out.push_back(kHex[c & 0x0F]);
+    }
+  }
+  return out;
+}
+
 bool has_binary_bytes(const std::string &input) {
   for (unsigned char c : input) {
     if (c == '\r' || c == '\n' || c == '\t') {
@@ -140,6 +167,10 @@ bool has_binary_bytes(const std::string &input) {
 
 bool is_inner_transport_start(uint8_t byte) {
   return byte == '&' || byte == '*' || byte == '+';
+}
+
+bool is_inner_transport_reserved_byte(uint8_t byte) {
+  return byte == '\n' || byte == '\r' || byte == '*' || byte == '+' || byte == '&' || byte == 0x1B || byte == 0x00;
 }
 
 std::string compact_hex_string(const std::string &value, size_t max_bytes = 64) {
@@ -563,6 +594,57 @@ uint8_t fw_nibble_transform(uint8_t nibble, uint8_t position, uint8_t key_hi, ui
   int second = fw_mod4((fw_mod8(pos_hi) + table_a[first] + key_lo) - pos - key_hi);
   int third = fw_mod4((table_b[second] + key_hi + pos) - key_lo - fw_mod8(pos_hi));
   return fw_mod4(table_a[third] - pos - key_hi);
+}
+
+bool find_inner_encoded_nibble_uart_mode0(uint8_t plain_nibble, uint8_t position, uint8_t key_hi, uint8_t key_lo,
+                                          uint8_t &encoded_nibble) {
+  for (uint8_t candidate = 0; candidate < 16; ++candidate) {
+    if (fw_nibble_transform(candidate, position, key_hi, key_lo, INNER_UART_MODE0_A, INNER_UART_MODE0_B) ==
+        (plain_nibble & 0x0F)) {
+      encoded_nibble = candidate;
+      return true;
+    }
+  }
+  return false;
+}
+
+void append_inner_transport_escaped_byte(std::vector<uint8_t> &encoded, uint8_t byte) {
+  if (is_inner_transport_reserved_byte(byte)) {
+    encoded.push_back(0x1B);
+    encoded.push_back(byte | 0x80);
+  } else {
+    encoded.push_back(byte);
+  }
+}
+
+bool encode_inner_transport_uart_mode0(const std::string &plain, uint8_t key, std::vector<uint8_t> &encoded) {
+  encoded.clear();
+  encoded.reserve(plain.size() + 8);
+  encoded.push_back('&');
+  append_inner_transport_escaped_byte(encoded, key);
+
+  uint8_t key_hi = static_cast<uint8_t>((key >> 4) & 0x0F);
+  uint8_t key_lo = static_cast<uint8_t>(key & 0x0F);
+  uint8_t position = 0;
+  for (unsigned char plain_byte : plain) {
+    uint8_t hi = 0;
+    uint8_t lo = 0;
+    if (!find_inner_encoded_nibble_uart_mode0(static_cast<uint8_t>((plain_byte >> 4) & 0x0F), position, key_hi,
+                                              key_lo, hi)) {
+      return false;
+    }
+    uint8_t next_position = static_cast<uint8_t>(position + 1);
+    if (!find_inner_encoded_nibble_uart_mode0(static_cast<uint8_t>(plain_byte & 0x0F), next_position, key_hi, key_lo,
+                                              lo)) {
+      return false;
+    }
+    append_inner_transport_escaped_byte(encoded, static_cast<uint8_t>((hi << 4) | lo));
+    position = static_cast<uint8_t>(position + 2);
+  }
+
+  encoded.push_back('\r');
+  encoded.push_back('\n');
+  return true;
 }
 
 enum class InnerEscapeVariant {
@@ -1470,6 +1552,7 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML dongle startup debug: %s", YESNO(this->xml_dongle_startup_debug_));
   ESP_LOGCONFIG(TAG, "  XML dongle startup mode: %s", this->xml_dongle_startup_mode_.c_str());
   ESP_LOGCONFIG(TAG, "  XML dongle wait @t0 after @t3: %s", YESNO(this->xml_dongle_wait_t0_after_t3_));
+  ESP_LOGCONFIG(TAG, "  XML dongle inner TX debug: %s", YESNO(this->xml_dongle_inner_tx_debug_));
   ESP_LOGCONFIG(TAG, "  XML tablet start sequence: %s", YESNO(this->xml_run_tablet_start_sequence_));
   ESP_LOGCONFIG(TAG, "  XML tablet sequence mode: %s", this->xml_tablet_sequence_mode_.c_str());
   ESP_LOGCONFIG(TAG, "  XML counter max: %u", static_cast<unsigned>(this->xml_counter_max_));
@@ -4049,8 +4132,12 @@ void JuraComponent::transition_dongle_startup_(DongleStartupState state, uint32_
   this->dongle_startup_next_action_ms_ = now;
 }
 
-bool JuraComponent::send_dongle_startup_command_(const std::string &command, uint32_t now) {
+bool JuraComponent::send_dongle_startup_command_(const std::string &command, uint32_t now, bool inner_uart0) {
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return false;
+  }
+  if (this->xml_dongle_startup_mode_ == "full" && command == "@TR:37" && !inner_uart0) {
+    ESP_LOGE(TAG, "dongle_startup_error reason=tr37_plaintext_not_allowed_in_full_mode");
     return false;
   }
   if (this->xml_dongle_startup_debug_) {
@@ -4061,8 +4148,33 @@ bool JuraComponent::send_dongle_startup_command_(const std::string &command, uin
   if (framed.size() < 2 || framed.substr(framed.size() - 2) != "\r\n") {
     framed.append("\r\n");
   }
-  ESP_LOGD(TAG, "dongle_startup_tx cmd=%s", command.c_str());
-  (void) now;
+  if (inner_uart0) {
+    std::vector<uint8_t> encoded;
+    uint8_t key = static_cast<uint8_t>((now >> 4) ^ (now >> 12) ^ this->dongle_inner_tx_key_counter_ ^
+                                       static_cast<uint8_t>(command.size() * 31U));
+    this->dongle_inner_tx_key_counter_ = static_cast<uint8_t>(this->dongle_inner_tx_key_counter_ + 0x37U);
+    if (!encode_inner_transport_uart_mode0(framed, key, encoded)) {
+      ESP_LOGE(TAG, "dongle_startup_error reason=inner_uart0_encode_failed cmd=%s", command.c_str());
+      return false;
+    }
+
+    std::string encoded_text(encoded.begin(), encoded.end());
+    if (this->xml_dongle_inner_tx_debug_) {
+      ESP_LOGD(TAG, "inner_tx_plain cmd=\"%s\" plain_hex=\"%s\"", command.c_str(),
+               compact_hex_string(framed, framed.size()).c_str());
+      ESP_LOGD(TAG, "inner_tx_encoded cmd=\"%s\" hex=\"%s\"", command.c_str(),
+               compact_hex_string(encoded_text, encoded_text.size()).c_str());
+      InnerTransportDecodeResult roundtrip =
+          decode_inner_transport_with_tables(encoded_text, INNER_UART_MODE0_A, INNER_UART_MODE0_B, "uart_mode0");
+      bool roundtrip_ok = roundtrip.payload == framed;
+      ESP_LOGD(TAG, "inner_tx_roundtrip cmd=\"%s\" decoded=\"%s\" ok=%s", command.c_str(),
+               escape_control_text_for_log(roundtrip.payload).c_str(), YESNO(roundtrip_ok));
+    }
+    ESP_LOGD(TAG, "dongle_startup_tx cmd=%s mode=inner_uart0", command.c_str());
+    return this->coffee_maker_->connection->write_decoded(encoded);
+  }
+
+  ESP_LOGD(TAG, "dongle_startup_tx cmd=%s mode=plaintext", command.c_str());
   return this->coffee_maker_->connection->write_decoded(framed);
 }
 
@@ -4374,7 +4486,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       return false;
 
     case DongleStartupState::SEND_T3:
-      if (!this->send_dongle_startup_command_("@t3", now)) {
+      if (!this->send_dongle_startup_command_("@t3", now, this->xml_dongle_startup_mode_ == "full")) {
         this->fail_dongle_startup_(now, "send_t3_failed");
         return false;
       }
@@ -4461,7 +4573,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       }
       ++this->dongle_startup_tr37_attempt_;
       this->dongle_startup_rx_buffer_.clear();
-      if (!this->send_dongle_startup_command_("@TR:37", now)) {
+      if (!this->send_dongle_startup_command_("@TR:37", now, this->xml_dongle_startup_mode_ == "full")) {
         this->fail_dongle_startup_(now, "send_tr37_failed");
         return false;
       }
