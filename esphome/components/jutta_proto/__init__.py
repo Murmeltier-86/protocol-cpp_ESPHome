@@ -40,6 +40,7 @@ CONF_XML_WAIT_FOR_TS_ACK = "xml_wait_for_ts_ack"
 CONF_XML_DEBUG_COMPACT = "xml_debug_compact"
 CONF_XML_DECODE_INNER_TRANSPORT = "xml_decode_inner_transport"
 CONF_XML_INNER_DECODE_TRACE = "xml_inner_decode_trace"
+CONF_XML_BINARY_PROBE = "xml_binary_probe"
 CONF_XML_RUN_TABLET_START_SEQUENCE = "xml_run_tablet_start_sequence"
 CONF_XML_TABLET_SEQUENCE_MODE = "xml_tablet_sequence_mode"
 CONF_XML_COUNTER_MAX = "xml_counter_max"
@@ -142,6 +143,7 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_XML_DEBUG_COMPACT, default=True): cv.boolean,
             cv.Optional(CONF_XML_DECODE_INNER_TRANSPORT, default=True): cv.boolean,
             cv.Optional(CONF_XML_INNER_DECODE_TRACE, default=False): cv.boolean,
+            cv.Optional(CONF_XML_BINARY_PROBE, default=False): cv.boolean,
             cv.Optional(CONF_XML_RUN_TABLET_START_SEQUENCE, default=False): cv.boolean,
             cv.Optional(CONF_XML_TABLET_SEQUENCE_MODE, default="minimal"): cv.one_of(
                 "minimal", "minimal_tr37", lower=True
@@ -309,6 +311,7 @@ async def to_code(config):
     cg.add(var.set_xml_debug_compact(config[CONF_XML_DEBUG_COMPACT]))
     cg.add(var.set_xml_decode_inner_transport(config[CONF_XML_DECODE_INNER_TRANSPORT]))
     cg.add(var.set_xml_inner_decode_trace(config[CONF_XML_INNER_DECODE_TRACE]))
+    cg.add(var.set_xml_binary_probe(config[CONF_XML_BINARY_PROBE]))
     cg.add(var.set_xml_run_tablet_start_sequence(config[CONF_XML_RUN_TABLET_START_SEQUENCE]))
     cg.add(var.set_xml_tablet_sequence_mode(config[CONF_XML_TABLET_SEQUENCE_MODE]))
     cg.add(var.set_xml_counter_max(config[CONF_XML_COUNTER_MAX]))

@@ -116,6 +116,10 @@ bool has_binary_bytes(const std::string &input) {
   return false;
 }
 
+bool is_inner_transport_start(uint8_t byte) {
+  return byte == '&' || byte == '*' || byte == '+';
+}
+
 std::string compact_hex_string(const std::string &value, size_t max_bytes = 64) {
   std::ostringstream stream;
   size_t count = std::min(value.size(), max_bytes);
@@ -132,6 +136,143 @@ std::string compact_hex_string(const std::string &value, size_t max_bytes = 64) 
   return stream.str();
 }
 
+std::string format_uint8_list(const std::string &value, size_t max_items = 24) {
+  std::ostringstream stream;
+  size_t count = std::min(value.size(), max_items);
+  for (size_t i = 0; i < count; ++i) {
+    if (i > 0) {
+      stream << ',';
+    }
+    stream << static_cast<unsigned>(static_cast<uint8_t>(value[i]));
+  }
+  if (value.size() > max_items) {
+    stream << ",...";
+  }
+  return stream.str();
+}
+
+std::string format_u16_pairs(const std::string &value, bool big_endian, size_t max_pairs = 12) {
+  std::ostringstream stream;
+  size_t pair_count = std::min(value.size() / 2, max_pairs);
+  for (size_t i = 0; i < pair_count; ++i) {
+    if (i > 0) {
+      stream << ',';
+    }
+    uint8_t first = static_cast<uint8_t>(value[i * 2]);
+    uint8_t second = static_cast<uint8_t>(value[i * 2 + 1]);
+    uint16_t number = big_endian ? static_cast<uint16_t>((first << 8) | second)
+                                 : static_cast<uint16_t>((second << 8) | first);
+    stream << static_cast<unsigned>(number);
+  }
+  if (value.size() / 2 > max_pairs) {
+    stream << ",...";
+  }
+  if ((value.size() & 1U) != 0U) {
+    if (pair_count > 0) {
+      stream << ',';
+    }
+    stream << "odd:" << static_cast<unsigned>(static_cast<uint8_t>(value.back()));
+  }
+  return stream.str();
+}
+
+std::string format_nibble_dump(const std::string &value, size_t max_bytes = 24) {
+  static constexpr char HEX[] = "0123456789ABCDEF";
+  std::string out;
+  size_t count = std::min(value.size(), max_bytes);
+  out.reserve(count * 4 + 4);
+  for (size_t i = 0; i < count; ++i) {
+    if (i > 0) {
+      out.push_back(' ');
+    }
+    uint8_t byte = static_cast<uint8_t>(value[i]);
+    out.push_back(HEX[(byte >> 4) & 0x0F]);
+    out.push_back('/');
+    out.push_back(HEX[byte & 0x0F]);
+  }
+  if (value.size() > max_bytes) {
+    out.append(" ...");
+  }
+  return out;
+}
+
+std::string format_bcd_like(const std::string &value, size_t max_bytes = 24) {
+  static constexpr char HEX[] = "0123456789ABCDEF";
+  std::string out;
+  size_t count = std::min(value.size(), max_bytes);
+  out.reserve(count * 3 + 4);
+  for (size_t i = 0; i < count; ++i) {
+    if (i > 0) {
+      out.push_back(' ');
+    }
+    uint8_t byte = static_cast<uint8_t>(value[i]);
+    uint8_t hi = (byte >> 4) & 0x0F;
+    uint8_t lo = byte & 0x0F;
+    out.push_back(hi <= 9 ? static_cast<char>('0' + hi) : HEX[hi]);
+    out.push_back(lo <= 9 ? static_cast<char>('0' + lo) : HEX[lo]);
+  }
+  if (value.size() > max_bytes) {
+    out.append(" ...");
+  }
+  return out;
+}
+
+struct InnerBinaryProbePayload {
+  uint8_t key{0};
+  bool key_escaped{false};
+  size_t esc_count{0};
+  std::string raw_payload{};
+  std::string unescaped_payload{};
+  std::string reason{};
+};
+
+InnerBinaryProbePayload extract_current_inner_binary_payload(const std::string &frame) {
+  InnerBinaryProbePayload result;
+  if (frame.size() < 2 || !is_inner_transport_start(static_cast<uint8_t>(frame.front()))) {
+    result.reason = "unsupported_frame";
+    return result;
+  }
+
+  size_t index = 1;
+  if (static_cast<uint8_t>(frame[index]) == 0x1B) {
+    result.key_escaped = true;
+    result.esc_count += 1;
+    ++index;
+    if (index >= frame.size()) {
+      result.reason = "truncated_key_escape";
+      return result;
+    }
+  }
+  result.key = static_cast<uint8_t>(frame[index]) & 0x7F;
+  ++index;
+
+  result.raw_payload.reserve(frame.size());
+  result.unescaped_payload.reserve(frame.size());
+  while (index < frame.size()) {
+    uint8_t byte = static_cast<uint8_t>(frame[index]);
+    if (byte == '\r' || byte == '\n') {
+      break;
+    }
+    result.raw_payload.push_back(static_cast<char>(byte));
+    if (byte == 0x1B) {
+      result.esc_count += 1;
+      ++index;
+      if (index >= frame.size()) {
+        result.reason = "truncated_payload_escape";
+        return result;
+      }
+      uint8_t escaped = static_cast<uint8_t>(frame[index]);
+      result.raw_payload.push_back(static_cast<char>(escaped));
+      result.unescaped_payload.push_back(static_cast<char>(escaped & 0x7F));
+      ++index;
+      continue;
+    }
+    result.unescaped_payload.push_back(static_cast<char>(byte));
+    ++index;
+  }
+  return result;
+}
+
 bool extract_crlf_line(std::string &buffer, std::string &line) {
   auto terminator = buffer.find("\r\n");
   if (terminator == std::string::npos) {
@@ -145,10 +286,6 @@ bool extract_crlf_line(std::string &buffer, std::string &line) {
 size_t first_raw_crlf_len(const std::string &buffer) {
   auto terminator = buffer.find("\r\n");
   return terminator == std::string::npos ? 0 : terminator;
-}
-
-bool is_inner_transport_start(uint8_t byte) {
-  return byte == '&' || byte == '*' || byte == '+';
 }
 
 std::vector<std::string> split_inner_transport_frames(const std::string &buffer) {
@@ -1076,6 +1213,7 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML compact debug: %s", YESNO(this->xml_debug_compact_));
   ESP_LOGCONFIG(TAG, "  XML inner transport decode: %s", YESNO(this->xml_decode_inner_transport_));
   ESP_LOGCONFIG(TAG, "  XML inner decode trace: %s", YESNO(this->xml_inner_decode_trace_));
+  ESP_LOGCONFIG(TAG, "  XML binary probe: %s", YESNO(this->xml_binary_probe_));
   ESP_LOGCONFIG(TAG, "  XML tablet start sequence: %s", YESNO(this->xml_run_tablet_start_sequence_));
   ESP_LOGCONFIG(TAG, "  XML tablet sequence mode: %s", this->xml_tablet_sequence_mode_.c_str());
   ESP_LOGCONFIG(TAG, "  XML counter max: %u", static_cast<unsigned>(this->xml_counter_max_));
@@ -1995,6 +2133,9 @@ void JuraComponent::start_new_xml_cycle_(uint32_t now) {
   this->xml_inflight_ = false;
   this->xml_last_command_.clear();
   this->xml_tr32_page_ = 0;
+  this->xml_binary_probe_prev_tr32_payload_.clear();
+  this->xml_binary_probe_prev_tr32_page_ = 0;
+  this->xml_binary_probe_has_prev_tr32_ = false;
   this->xml_stats_locked_ = false;
   this->xml_cycle_failed_ = false;
   this->xml_stats_consecutive_failures_ = 0;
@@ -2717,6 +2858,9 @@ void JuraComponent::reset_xml_poll_state_() {
   this->xml_stats_rx_logged_ = false;
   this->xml_stats_binary_response_ = false;
   this->xml_tr32_page_ = 0;
+  this->xml_binary_probe_prev_tr32_payload_.clear();
+  this->xml_binary_probe_prev_tr32_page_ = 0;
+  this->xml_binary_probe_has_prev_tr32_ = false;
   this->xml_stats_locked_ = false;
   this->xml_cycle_failed_ = false;
   this->xml_tablet_start_sequence_done_ = false;
@@ -3482,15 +3626,18 @@ bool JuraComponent::finish_stats_rx_capture_(std::string &line, uint32_t now) {
                YESNO(!matches_known_repeated_tr32_frame(frame)));
     }
     saw_inner_frame = true;
-    std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(frame);
-    for (const auto &candidate : candidates) {
-      bool plausible_tr = payload_starts_with_tr(candidate.payload) && candidate.payload.size() >= 16;
-      bool plausible_tg = payload_starts_with_tg(candidate.payload) && candidate.payload.size() >= 8;
-      ESP_LOGD(TAG, "stats_rx_capture_candidate cmd=%s frame=%u table=%s len=%u plausible_tr=%s plausible_tg=%s "
-                    "printable=%u%% first_ascii=\"%s\"",
-               this->xml_last_command_.c_str(), static_cast<unsigned>(i), candidate.table_name,
-               static_cast<unsigned>(candidate.payload.size()), YESNO(plausible_tr), YESNO(plausible_tg),
-               static_cast<unsigned>(candidate.printable_ratio), printable_preview(candidate.payload, 32).c_str());
+    this->log_stats_binary_probe_(frame);
+    if (this->xml_inner_decode_trace_) {
+      std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(frame);
+      for (const auto &candidate : candidates) {
+        bool plausible_tr = payload_starts_with_tr(candidate.payload) && candidate.payload.size() >= 16;
+        bool plausible_tg = payload_starts_with_tg(candidate.payload) && candidate.payload.size() >= 8;
+        ESP_LOGD(TAG, "stats_rx_capture_candidate cmd=%s frame=%u table=%s len=%u plausible_tr=%s plausible_tg=%s "
+                      "printable=%u%% first_ascii=\"%s\"",
+                 this->xml_last_command_.c_str(), static_cast<unsigned>(i), candidate.table_name,
+                 static_cast<unsigned>(candidate.payload.size()), YESNO(plausible_tr), YESNO(plausible_tg),
+                 static_cast<unsigned>(candidate.printable_ratio), printable_preview(candidate.payload, 32).c_str());
+      }
     }
 
     std::string decoded_line;
@@ -3506,6 +3653,65 @@ bool JuraComponent::finish_stats_rx_capture_(std::string &line, uint32_t now) {
   this->xml_stats_reject_reason_ = saw_inner_frame ? "inner_decode_not_ascii" : "unexpected_binary";
   this->xml_stats_binary_response_ = true;
   return false;
+}
+
+void JuraComponent::log_stats_binary_probe_(const std::string &frame) {
+  if (!this->xml_binary_probe_) {
+    return;
+  }
+  bool is_tr32 = this->xml_last_command_.rfind("@TR:32", 0) == 0;
+  bool is_tg43 = this->xml_last_command_.rfind("@TG:43", 0) == 0;
+  bool is_tgc0 = this->xml_last_command_.rfind("@TG:C0", 0) == 0;
+  if (!is_tr32 && !is_tg43 && !is_tgc0) {
+    return;
+  }
+
+  InnerBinaryProbePayload probe = extract_current_inner_binary_payload(frame);
+  if (!probe.reason.empty()) {
+    ESP_LOGD(TAG, "stats_binary_probe cmd=%s raw_len=%u reason=%s raw_hex=\"%s\"",
+             this->xml_last_command_.c_str(), static_cast<unsigned>(frame.size()), probe.reason.c_str(),
+             compact_hex_string(frame, frame.size()).c_str());
+    return;
+  }
+
+  ESP_LOGD(TAG,
+           "stats_binary_probe cmd=%s raw_len=%u key_byte=0x%02X key_escaped=%s payload_len=%u esc_count=%u "
+           "raw_hex=\"%s\" raw_payload=\"%s\" payload_unesc=\"%s\" u16be=\"%s\" u16le=\"%s\" bytes=\"%s\"",
+           this->xml_last_command_.c_str(), static_cast<unsigned>(frame.size()), static_cast<unsigned>(probe.key),
+           YESNO(probe.key_escaped), static_cast<unsigned>(probe.unescaped_payload.size()),
+           static_cast<unsigned>(probe.esc_count),
+           compact_hex_string(frame, frame.size()).c_str(),
+           compact_hex_string(probe.raw_payload, probe.raw_payload.size()).c_str(),
+           compact_hex_string(probe.unescaped_payload, probe.unescaped_payload.size()).c_str(),
+           format_u16_pairs(probe.unescaped_payload, true).c_str(),
+           format_u16_pairs(probe.unescaped_payload, false).c_str(),
+           format_uint8_list(probe.unescaped_payload).c_str());
+  ESP_LOGD(TAG, "stats_binary_nibbles cmd=%s bcd=\"%s\" nibbles=\"%s\"", this->xml_last_command_.c_str(),
+           format_bcd_like(probe.unescaped_payload).c_str(), format_nibble_dump(probe.unescaped_payload).c_str());
+
+  if (is_tr32) {
+    uint8_t page = this->xml_tr32_page_;
+    if (this->xml_binary_probe_has_prev_tr32_ && page <= 0x03) {
+      const std::string &previous = this->xml_binary_probe_prev_tr32_payload_;
+      size_t max_len = std::max(previous.size(), probe.unescaped_payload.size());
+      size_t min_len = std::min(previous.size(), probe.unescaped_payload.size());
+      size_t changed = max_len - min_len;
+      size_t same_prefix = 0;
+      for (size_t i = 0; i < min_len; ++i) {
+        if (previous[i] != probe.unescaped_payload[i]) {
+          ++changed;
+        } else if (same_prefix == i) {
+          ++same_prefix;
+        }
+      }
+      ESP_LOGD(TAG, "stats_binary_page_diff page=%02X prev_page=%02X changed_bytes=%u same_prefix=%u",
+               static_cast<unsigned>(page), static_cast<unsigned>(this->xml_binary_probe_prev_tr32_page_),
+               static_cast<unsigned>(changed), static_cast<unsigned>(same_prefix));
+    }
+    this->xml_binary_probe_prev_tr32_payload_ = probe.unescaped_payload;
+    this->xml_binary_probe_prev_tr32_page_ = page;
+    this->xml_binary_probe_has_prev_tr32_ = true;
+  }
 }
 
 bool JuraComponent::decode_stats_inner_transport_line_(const std::string &raw_line, std::string &decoded_line) {

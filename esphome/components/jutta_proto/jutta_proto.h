@@ -228,6 +228,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_debug_compact(bool enabled) { this->xml_debug_compact_ = enabled; }
   void set_xml_decode_inner_transport(bool enabled) { this->xml_decode_inner_transport_ = enabled; }
   void set_xml_inner_decode_trace(bool enabled) { this->xml_inner_decode_trace_ = enabled; }
+  void set_xml_binary_probe(bool enabled) { this->xml_binary_probe_ = enabled; }
   void set_xml_run_tablet_start_sequence(bool enabled) { this->xml_run_tablet_start_sequence_ = enabled; }
   void set_xml_tablet_sequence_mode(const std::string &mode) { this->xml_tablet_sequence_mode_ = mode; }
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
@@ -356,6 +357,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const char *tablet_sequence_state_name_(TabletSeqState state) const;
   bool read_stats_line_(std::string &line);
   bool finish_stats_rx_capture_(std::string &line, uint32_t now);
+  void log_stats_binary_probe_(const std::string &frame);
   bool handle_stats_line_(const std::string &line, uint32_t now);
   bool decode_stats_inner_transport_line_(const std::string &raw_line, std::string &decoded_line);
   bool handle_stats_binary_response_(uint32_t now);
@@ -421,6 +423,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_debug_compact_{true};
   bool xml_decode_inner_transport_{true};
   bool xml_inner_decode_trace_{false};
+  bool xml_binary_probe_{false};
   bool xml_run_tablet_start_sequence_{false};
   std::string xml_tablet_sequence_mode_{"minimal"};
   bool xml_tablet_start_sequence_done_{false};
@@ -449,6 +452,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_stats_rx_logged_{false};
   bool xml_stats_binary_response_{false};
   uint8_t xml_tr32_page_{0};
+  std::string xml_binary_probe_prev_tr32_payload_{};
+  uint8_t xml_binary_probe_prev_tr32_page_{0};
+  bool xml_binary_probe_has_prev_tr32_{false};
   bool xml_stats_locked_{false};
   bool xml_cycle_failed_{false};
   uint8_t xml_stats_consecutive_failures_{0};
