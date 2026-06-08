@@ -45,6 +45,9 @@ constexpr uint8_t kTr32BytesPerProduct = 2;
 constexpr uint8_t kStatsMaxConsecutiveFailures = 4;
 constexpr uint32_t kDongleStartupProbeDelayMs = 250;
 constexpr uint32_t kDongleStartupTimeoutMs = 1500;
+constexpr uint32_t kDongleStartupT3QuietMs = 1000;
+constexpr uint32_t kDongleStartupMaxWaitAfterT3Ms = 5000;
+constexpr uint32_t kDongleStartupTr37TimeoutMs = 3000;
 constexpr size_t kDongleStartupMaxRxBytes = 512;
 constexpr uint8_t kDongleStartupMaxProbeAttempts = 6;
 constexpr uint8_t kDongleStartupMaxT1Attempts = 6;
@@ -1688,6 +1691,9 @@ void JuraComponent::restart_handshake(const char *reason) {
   this->dongle_startup_rx_buffer_.clear();
   this->dongle_startup_deadline_ms_ = 0;
   this->dongle_startup_next_action_ms_ = 0;
+  this->dongle_startup_quiet_start_ms_ = 0;
+  this->dongle_startup_t3_seen_during_quiet_ = false;
+  this->dongle_startup_t3_seen_while_waiting_tr37_ = false;
   this->reset_xml_poll_state_();
 }
 
@@ -3250,13 +3256,17 @@ void JuraComponent::reset_xml_poll_state_() {
   this->stats_session_ready_ = !this->xml_dongle_startup_;
   this->dongle_startup_state_ = DongleStartupState::IDLE;
   this->dongle_startup_rx_buffer_.clear();
-  this->dongle_startup_deadline_ms_ = 0;
-  this->dongle_startup_next_action_ms_ = 0;
-  this->dongle_startup_next_retry_ms_ = 0;
-  this->dongle_startup_probe_attempt_ = 0;
-  this->dongle_startup_t1_attempt_ = 0;
-  this->dongle_startup_tr37_attempt_ = 0;
-  this->dongle_tr_payload_.clear();
+      this->dongle_startup_deadline_ms_ = 0;
+      this->dongle_startup_next_action_ms_ = 0;
+      this->dongle_startup_next_retry_ms_ = 0;
+      this->dongle_startup_quiet_start_ms_ = 0;
+      this->dongle_startup_probe_attempt_ = 0;
+      this->dongle_startup_t1_attempt_ = 0;
+      this->dongle_startup_tr37_attempt_ = 0;
+      this->dongle_startup_t3_seen_during_quiet_ = false;
+      this->dongle_startup_t3_seen_while_waiting_tr37_ = false;
+      this->dongle_startup_quiet_then_prep_tr37_ = true;
+      this->dongle_tr_payload_.clear();
 }
 
 void JuraComponent::process_xml_polling() {
@@ -4002,6 +4012,8 @@ const char *JuraComponent::dongle_startup_state_name_(DongleStartupState state) 
       return "wait_t3";
     case DongleStartupState::SEND_T3:
       return "send_t3";
+    case DongleStartupState::WAIT_AFTER_T3:
+      return "wait_after_t3";
     case DongleStartupState::PREP_TR37:
       return "prep_tr37";
     case DongleStartupState::SEND_TR37:
@@ -4078,11 +4090,22 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
   } else if (trimmed.rfind("@T3", 0) == 0) {
     bit = DONGLE_EVENT_T3;
     this->dongle_machine_identity_ = trimmed;
+    if (this->dongle_startup_state_ == DongleStartupState::WAIT_AFTER_T3) {
+      this->dongle_startup_t3_seen_during_quiet_ = true;
+    } else if (this->dongle_startup_state_ == DongleStartupState::WAIT_TR37) {
+      this->dongle_startup_t3_seen_while_waiting_tr37_ = true;
+      ESP_LOGD(TAG, "dongle_startup_rx_unmatched cmd=@TR:37 decoded_or_ascii=\"%s\"",
+               sanitize_text_for_api(trimmed).c_str());
+    }
   } else if (lower.rfind("@tr", 0) == 0) {
     bit = DONGLE_EVENT_TR;
     this->dongle_tr_payload_ = trimmed;
   } else if (lower.rfind("@tf:", 0) == 0) {
     bit = DONGLE_EVENT_TF;
+    if (this->dongle_startup_state_ == DongleStartupState::WAIT_TR37) {
+      ESP_LOGD(TAG, "dongle_startup_not_stats class=tf_status decoded=\"%s\"",
+               sanitize_text_for_api(trimmed).c_str());
+    }
   } else if (lower.rfind("@tg", 0) == 0 && this->xml_dongle_startup_debug_) {
     ESP_LOGD(TAG, "dongle_event line=\"%s\" set=0x00 events=0x%02X class=maintenance_response",
              sanitize_text_for_api(trimmed).c_str(), static_cast<unsigned>(this->dongle_events_));
@@ -4324,8 +4347,42 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         this->fail_dongle_startup_(now, "send_t3_failed");
         return false;
       }
-      this->transition_dongle_startup_(DongleStartupState::PREP_TR37, now);
-      this->dongle_startup_next_action_ms_ = now + kDongleStartupProbeDelayMs;
+      this->dongle_startup_t3_seen_during_quiet_ = false;
+      this->dongle_startup_t3_seen_while_waiting_tr37_ = false;
+      this->dongle_startup_quiet_then_prep_tr37_ = true;
+      this->transition_dongle_startup_(DongleStartupState::WAIT_AFTER_T3, now);
+      this->dongle_startup_quiet_start_ms_ = now;
+      this->dongle_startup_next_action_ms_ = now + kDongleStartupT3QuietMs;
+      this->dongle_startup_deadline_ms_ = now + kDongleStartupMaxWaitAfterT3Ms;
+      ESP_LOGD(TAG, "dongle_startup_wait_t3_quiet start events=0x%02X",
+               static_cast<unsigned>(this->dongle_events_));
+      return false;
+
+    case DongleStartupState::WAIT_AFTER_T3:
+      if (this->dongle_startup_t3_seen_during_quiet_) {
+        this->dongle_startup_t3_seen_during_quiet_ = false;
+        this->dongle_startup_next_action_ms_ = now + kDongleStartupT3QuietMs;
+        ESP_LOGD(TAG, "dongle_startup_t3_seen_during_quiet restart_quiet_timer");
+      }
+      if (time_reached(now, this->dongle_startup_next_action_ms_)) {
+        if (this->coffee_maker_ != nullptr && this->coffee_maker_->connection != nullptr) {
+          this->coffee_maker_->connection->reset_response_line_buffer();
+          this->coffee_maker_->connection->reset_db_rx_buffer();
+          this->coffee_maker_->connection->drain_serial_input_nonblocking();
+        }
+        this->dongle_startup_rx_buffer_.clear();
+        ESP_LOGD(TAG, "dongle_startup_t3_quiet_ok elapsed_ms=%u",
+                 static_cast<unsigned>(now - this->dongle_startup_quiet_start_ms_));
+        if (this->dongle_startup_quiet_then_prep_tr37_) {
+          this->transition_dongle_startup_(DongleStartupState::PREP_TR37, now);
+        } else {
+          this->transition_dongle_startup_(DongleStartupState::SEND_TR37, now);
+        }
+        return false;
+      }
+      if (this->dongle_startup_deadline_ms_ != 0 && time_reached(now, this->dongle_startup_deadline_ms_)) {
+        this->fail_dongle_startup_(now, "t3_quiet_timeout");
+      }
       return false;
 
     case DongleStartupState::PREP_TR37:
@@ -4335,6 +4392,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       this->dongle_events_ &= ~DONGLE_EVENT_TR;
       this->dongle_tr_payload_.clear();
       this->dongle_startup_tr37_attempt_ = 0;
+      this->dongle_startup_t3_seen_while_waiting_tr37_ = false;
       this->transition_dongle_startup_(DongleStartupState::SEND_TR37, now);
       return false;
 
@@ -4344,15 +4402,16 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         return false;
       }
       ++this->dongle_startup_tr37_attempt_;
+      this->dongle_startup_rx_buffer_.clear();
       if (!this->send_dongle_startup_command_("@TR:37", now)) {
         this->fail_dongle_startup_(now, "send_tr37_failed");
         return false;
       }
-      this->dongle_startup_deadline_ms_ = now + kDongleStartupTimeoutMs;
+      this->dongle_startup_deadline_ms_ = now + kDongleStartupTr37TimeoutMs;
       ESP_LOGD(TAG, "dongle_startup_wait event=0x%02X timeout_ms=%u",
-               static_cast<unsigned>(DONGLE_EVENT_TR), static_cast<unsigned>(kDongleStartupTimeoutMs));
+               static_cast<unsigned>(DONGLE_EVENT_TR), static_cast<unsigned>(kDongleStartupTr37TimeoutMs));
       this->transition_dongle_startup_(DongleStartupState::WAIT_TR37, now);
-      this->dongle_startup_deadline_ms_ = now + kDongleStartupTimeoutMs;
+      this->dongle_startup_deadline_ms_ = now + kDongleStartupTr37TimeoutMs;
       return false;
 
     case DongleStartupState::WAIT_TR37:
@@ -4368,7 +4427,19 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         if (this->dongle_startup_tr37_attempt_ < kDongleStartupMaxTr37Attempts) {
           ESP_LOGD(TAG, "dongle_startup_retry state=SEND_TR37 attempt=%u",
                    static_cast<unsigned>(this->dongle_startup_tr37_attempt_));
-          this->transition_dongle_startup_(DongleStartupState::SEND_TR37, now);
+          if (this->dongle_startup_t3_seen_while_waiting_tr37_) {
+            this->dongle_startup_t3_seen_while_waiting_tr37_ = false;
+            this->dongle_startup_t3_seen_during_quiet_ = false;
+            this->dongle_startup_quiet_then_prep_tr37_ = false;
+            this->transition_dongle_startup_(DongleStartupState::WAIT_AFTER_T3, now);
+            this->dongle_startup_quiet_start_ms_ = now;
+            this->dongle_startup_next_action_ms_ = now + kDongleStartupT3QuietMs;
+            this->dongle_startup_deadline_ms_ = now + kDongleStartupMaxWaitAfterT3Ms;
+            ESP_LOGD(TAG, "dongle_startup_wait_t3_quiet start events=0x%02X",
+                     static_cast<unsigned>(this->dongle_events_));
+          } else {
+            this->transition_dongle_startup_(DongleStartupState::SEND_TR37, now);
+          }
         } else {
           this->fail_dongle_startup_(now, "tr37_timeout");
         }

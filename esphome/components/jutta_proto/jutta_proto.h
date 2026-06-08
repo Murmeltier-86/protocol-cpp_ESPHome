@@ -301,6 +301,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     SEND_T2,
     WAIT_T3,
     SEND_T3,
+    WAIT_AFTER_T3,
     PREP_TR37,
     SEND_TR37,
     WAIT_TR37,
@@ -527,9 +528,13 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t dongle_startup_deadline_ms_{0};
   uint32_t dongle_startup_next_action_ms_{0};
   uint32_t dongle_startup_next_retry_ms_{0};
+  uint32_t dongle_startup_quiet_start_ms_{0};
   uint8_t dongle_startup_probe_attempt_{0};
   uint8_t dongle_startup_t1_attempt_{0};
   uint8_t dongle_startup_tr37_attempt_{0};
+  bool dongle_startup_t3_seen_during_quiet_{false};
+  bool dongle_startup_t3_seen_while_waiting_tr37_{false};
+  bool dongle_startup_quiet_then_prep_tr37_{true};
   bool xml_run_tablet_start_sequence_{false};
   std::string xml_tablet_sequence_mode_{"minimal"};
   bool xml_tablet_start_sequence_done_{false};
