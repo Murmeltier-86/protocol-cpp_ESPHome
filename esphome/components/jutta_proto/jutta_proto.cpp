@@ -1322,6 +1322,7 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML binary probe: %s", YESNO(this->xml_binary_probe_));
   ESP_LOGCONFIG(TAG, "  XML key probe: %s", YESNO(this->xml_key_probe_));
   ESP_LOGCONFIG(TAG, "  XML deep debug: %s", YESNO(this->xml_deep_debug_));
+  ESP_LOGCONFIG(TAG, "  XML transport selftest: %s", YESNO(this->xml_transport_selftest_));
   ESP_LOGCONFIG(TAG, "  XML tablet start sequence: %s", YESNO(this->xml_run_tablet_start_sequence_));
   ESP_LOGCONFIG(TAG, "  XML tablet sequence mode: %s", this->xml_tablet_sequence_mode_.c_str());
   ESP_LOGCONFIG(TAG, "  XML counter max: %u", static_cast<unsigned>(this->xml_counter_max_));
@@ -2250,6 +2251,10 @@ void JuraComponent::start_new_xml_cycle_(uint32_t now) {
   this->xml_retry_count_.fill(0);
   this->xml_invalid_len_seen_.fill(false);
   this->xml_last_invalid_len_.fill(0);
+  this->transport_selftest_state_ = TransportSelftestState::IDLE;
+  this->transport_selftest_rx_buffer_.clear();
+  this->transport_selftest_current_cmd_.clear();
+  this->transport_selftest_deadline_ms_ = 0;
 }
 
 size_t JuraComponent::xml_command_index_(XmlPollState state) const {
@@ -3015,6 +3020,157 @@ void JuraComponent::process_xml_polling() {
   this->handle_xml_state_machine_(now);
 }
 
+const char *JuraComponent::transport_selftest_state_name_(TransportSelftestState state) const {
+  switch (state) {
+    case TransportSelftestState::IDLE:
+      return "idle";
+    case TransportSelftestState::STATS_SEND_TY:
+      return "stats_send_ty";
+    case TransportSelftestState::STATS_WAIT_TY:
+      return "stats_wait_ty";
+    case TransportSelftestState::NORMAL_SEND_TY:
+      return "normal_send_ty";
+    case TransportSelftestState::NORMAL_WAIT_TY:
+      return "normal_wait_ty";
+    case TransportSelftestState::DONE:
+      return "done";
+  }
+  return "unknown";
+}
+
+void JuraComponent::start_transport_selftest_(uint32_t now) {
+  this->transport_selftest_state_ = TransportSelftestState::STATS_SEND_TY;
+  this->transport_selftest_rx_buffer_.clear();
+  this->transport_selftest_current_cmd_.clear();
+  this->transport_selftest_deadline_ms_ = 0;
+  ESP_LOGD(TAG, "transport_selftest_start");
+  ESP_LOGD(TAG, "transport_selftest_skip cmd=@T1 reason=session_unsafe");
+  (void) now;
+}
+
+void JuraComponent::send_transport_selftest_command_(const char *path, const std::string &command, uint32_t now) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    this->transport_selftest_state_ = TransportSelftestState::DONE;
+    return;
+  }
+  auto *connection = this->coffee_maker_->connection.get();
+  connection->reset_response_line_buffer();
+  connection->reset_db_rx_buffer();
+  connection->drain_serial_input_nonblocking();
+
+  std::string wire_command = command + "\r\n";
+  std::vector<uint8_t> encoded = jutta_proto::JuttaConnection::encode_decoded_bytes(wire_command);
+  std::string encoded_bytes(encoded.begin(), encoded.end());
+  ESP_LOGD(TAG, "transport_selftest_tx_encoded path=%s cmd=%s hex=\"%s\"", path, command.c_str(),
+           compact_hex_string(encoded_bytes, encoded_bytes.size()).c_str());
+  ESP_LOGD(TAG, "transport_selftest_tx path=%s cmd=%s", path, command.c_str());
+
+  this->transport_selftest_rx_buffer_.clear();
+  this->transport_selftest_current_cmd_ = command;
+  if (!connection->write_decoded(wire_command)) {
+    ESP_LOGD(TAG, "transport_selftest_result path=%s cmd=%s expected=\"ty:\" ok=NO reason=tx_failed", path,
+             command.c_str());
+    this->transport_selftest_state_ = TransportSelftestState::DONE;
+    return;
+  }
+  this->transport_selftest_deadline_ms_ = now + kStatsRxCaptureWindowMs;
+}
+
+void JuraComponent::finish_transport_selftest_step_(const char *path, const std::string &command, const char *expected,
+                                                    bool timeout, uint32_t now) {
+  std::string sanitized = sanitize_text_for_api(this->transport_selftest_rx_buffer_);
+  ESP_LOGD(TAG, "transport_selftest_rx path=%s raw_hex=\"%s\" ascii=\"%s\"", path,
+           compact_hex_string(this->transport_selftest_rx_buffer_, this->transport_selftest_rx_buffer_.size()).c_str(),
+           sanitized.c_str());
+
+  std::string lower = to_lower_copy(this->transport_selftest_rx_buffer_);
+  trim_in_place(lower);
+  std::string expected_lower = to_lower_copy(expected != nullptr ? expected : "");
+  bool ok = !timeout && !expected_lower.empty() && lower.rfind(expected_lower, 0) == 0;
+  ESP_LOGD(TAG, "transport_selftest_result path=%s cmd=%s expected=\"%s\" ok=%s", path, command.c_str(),
+           expected != nullptr ? expected : "", YESNO(ok));
+  this->transport_selftest_rx_buffer_.clear();
+  this->transport_selftest_current_cmd_.clear();
+  this->transport_selftest_deadline_ms_ = 0;
+  (void) now;
+}
+
+bool JuraComponent::process_transport_selftest_(uint32_t now) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return true;
+  }
+  auto *connection = this->coffee_maker_->connection.get();
+  if (this->transport_selftest_state_ == TransportSelftestState::IDLE) {
+    this->start_transport_selftest_(now);
+    return true;
+  }
+
+  switch (this->transport_selftest_state_) {
+    case TransportSelftestState::STATS_SEND_TY:
+      this->send_transport_selftest_command_("stats", "TY:", now);
+      if (this->transport_selftest_state_ != TransportSelftestState::DONE) {
+        this->transport_selftest_state_ = TransportSelftestState::STATS_WAIT_TY;
+      }
+      return true;
+    case TransportSelftestState::STATS_WAIT_TY: {
+      std::vector<uint8_t> buffer;
+      if (connection->read_decoded(buffer) && !buffer.empty()) {
+        size_t current_size = this->transport_selftest_rx_buffer_.size();
+        size_t remaining = current_size < kTabletSeqMaxRxBytes ? kTabletSeqMaxRxBytes - current_size : 0;
+        size_t count = std::min(remaining, buffer.size());
+        if (count > 0) {
+          this->transport_selftest_rx_buffer_.append(reinterpret_cast<const char *>(buffer.data()), count);
+        }
+        if (count < buffer.size()) {
+          ESP_LOGD(TAG, "transport_selftest_rx_truncated path=stats max_bytes=%u",
+                   static_cast<unsigned>(kTabletSeqMaxRxBytes));
+        }
+      }
+      if (this->transport_selftest_rx_buffer_.find("\r\n") != std::string::npos ||
+          (this->transport_selftest_deadline_ms_ != 0 && time_reached(now, this->transport_selftest_deadline_ms_))) {
+        bool timeout = this->transport_selftest_rx_buffer_.empty() ||
+                       (this->transport_selftest_deadline_ms_ != 0 &&
+                        time_reached(now, this->transport_selftest_deadline_ms_) &&
+                        this->transport_selftest_rx_buffer_.find("\r\n") == std::string::npos);
+        this->finish_transport_selftest_step_("stats", "TY:", "ty:", timeout, now);
+        this->transport_selftest_state_ = TransportSelftestState::NORMAL_SEND_TY;
+      }
+      return true;
+    }
+    case TransportSelftestState::NORMAL_SEND_TY:
+      this->send_transport_selftest_command_("normal", "TY:", now);
+      if (this->transport_selftest_state_ != TransportSelftestState::DONE) {
+        this->transport_selftest_state_ = TransportSelftestState::NORMAL_WAIT_TY;
+      }
+      return true;
+    case TransportSelftestState::NORMAL_WAIT_TY: {
+      std::string line;
+      if (connection->read_line_until(line)) {
+        this->transport_selftest_rx_buffer_ = line;
+        this->finish_transport_selftest_step_("normal", "TY:", "ty:", false, now);
+        this->transport_selftest_state_ = TransportSelftestState::DONE;
+        return true;
+      }
+      if (this->transport_selftest_deadline_ms_ != 0 && time_reached(now, this->transport_selftest_deadline_ms_)) {
+        this->finish_transport_selftest_step_("normal", "TY:", "ty:", true, now);
+        this->transport_selftest_state_ = TransportSelftestState::DONE;
+      }
+      return true;
+    }
+    case TransportSelftestState::DONE:
+      ESP_LOGD(TAG, "transport_selftest_done next_retry_ms=%u", static_cast<unsigned>(this->xml_poll_interval_ms_));
+      this->transport_selftest_state_ = TransportSelftestState::IDLE;
+      this->xml_next_poll_ = now + this->xml_poll_interval_ms_;
+      this->xml_state_ = XmlPollState::IDLE;
+      this->xml_inflight_ = false;
+      this->xml_last_command_.clear();
+      return true;
+    case TransportSelftestState::IDLE:
+    default:
+      return true;
+  }
+}
+
 
 void JuraComponent::handle_xml_state_machine_(uint32_t now) {
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
@@ -3029,6 +3185,10 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
 
   if (this->xml_state_ == XmlPollState::IDLE) {
     if (this->xml_next_poll_ != 0 && !time_reached(now, this->xml_next_poll_)) {
+      return;
+    }
+    if (this->xml_transport_selftest_) {
+      this->process_transport_selftest_(now);
       return;
     }
     bool has_mapping = this->xml_state_has_mapping_(XmlPollState::TR32_PAGE) ||

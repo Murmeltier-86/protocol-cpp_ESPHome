@@ -1028,6 +1028,16 @@ std::string JuttaConnection::vec_to_string(const std::vector<uint8_t>& data) {
     return sstream.str();
 }
 
+std::vector<uint8_t> JuttaConnection::encode_decoded_bytes(const std::string& data) {
+    std::vector<uint8_t> encoded;
+    encoded.reserve(data.size() * 4);
+    for (unsigned char byte : data) {
+        auto frame = encode(static_cast<uint8_t>(byte));
+        encoded.insert(encoded.end(), frame.begin(), frame.end());
+    }
+    return encoded;
+}
+
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto
 //---------------------------------------------------------------------------

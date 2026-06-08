@@ -186,6 +186,7 @@ class JuttaConnection {
      * Converts the given binary vector to a string and returns it.
      **/
     static std::string vec_to_string(const std::vector<uint8_t>& data);
+    static std::vector<uint8_t> encode_decoded_bytes(const std::string& data);
 
  private:
     void emit_response_(const std::string& response, const char* parser_branch) const;

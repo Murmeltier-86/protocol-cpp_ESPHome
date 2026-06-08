@@ -231,6 +231,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_binary_probe(bool enabled) { this->xml_binary_probe_ = enabled; }
   void set_xml_key_probe(bool enabled) { this->xml_key_probe_ = enabled; }
   void set_xml_deep_debug(bool enabled) { this->xml_deep_debug_ = enabled; }
+  void set_xml_transport_selftest(bool enabled) { this->xml_transport_selftest_ = enabled; }
   void set_xml_run_tablet_start_sequence(bool enabled) { this->xml_run_tablet_start_sequence_ = enabled; }
   void set_xml_tablet_sequence_mode(const std::string &mode) { this->xml_tablet_sequence_mode_ = mode; }
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
@@ -267,6 +268,14 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     DONE,
     FAILED
   };
+  enum class TransportSelftestState {
+    IDLE,
+    STATS_SEND_TY,
+    STATS_WAIT_TY,
+    NORMAL_SEND_TY,
+    NORMAL_WAIT_TY,
+    DONE
+  };
 
   static const char *handshake_stage_name(HandshakeStage stage);
 
@@ -287,6 +296,12 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void process_machine_data_query();
   void publish_machine_data_(const std::string &response);
   void process_xml_polling();
+  bool process_transport_selftest_(uint32_t now);
+  void start_transport_selftest_(uint32_t now);
+  void send_transport_selftest_command_(const char *path, const std::string &command, uint32_t now);
+  void finish_transport_selftest_step_(const char *path, const std::string &command, const char *expected,
+                                       bool timeout, uint32_t now);
+  const char *transport_selftest_state_name_(TransportSelftestState state) const;
   bool ensure_xml_mapping_loaded_();
   void log_xml_mapping_status_(bool force = false);
   void ensure_xml_sensors_created_();
@@ -429,6 +444,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_binary_probe_{false};
   bool xml_key_probe_{false};
   bool xml_deep_debug_{false};
+  bool xml_transport_selftest_{false};
   bool xml_run_tablet_start_sequence_{false};
   std::string xml_tablet_sequence_mode_{"minimal"};
   bool xml_tablet_start_sequence_done_{false};
@@ -437,6 +453,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string tablet_seq_current_cmd_{};
   uint32_t tablet_seq_deadline_ms_{0};
   bool tablet_seq_tx_failed_{false};
+  TransportSelftestState transport_selftest_state_{TransportSelftestState::IDLE};
+  std::string transport_selftest_rx_buffer_{};
+  std::string transport_selftest_current_cmd_{};
+  uint32_t transport_selftest_deadline_ms_{0};
   uint32_t xml_counter_max_{20000};
   uint32_t xml_poll_interval_ms_{30000};
   uint32_t xml_startup_delay_ms_{10000};
