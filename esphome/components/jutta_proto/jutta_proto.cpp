@@ -153,10 +153,17 @@ bool is_inner_transport_start(uint8_t byte) {
 
 std::vector<std::string> split_inner_transport_frames(const std::string &buffer) {
   std::vector<std::string> frames;
-  size_t frame_start = 0;
+  size_t frame_start = std::string::npos;
   bool escaped = false;
   for (size_t i = 0; i < buffer.size(); ++i) {
     uint8_t byte = static_cast<uint8_t>(buffer[i]);
+    if (frame_start == std::string::npos) {
+      if (is_inner_transport_start(byte)) {
+        frame_start = i;
+        escaped = false;
+      }
+      continue;
+    }
     if (escaped) {
       escaped = false;
       continue;
@@ -165,20 +172,16 @@ std::vector<std::string> split_inner_transport_frames(const std::string &buffer)
       escaped = true;
       continue;
     }
-    if (i > frame_start && is_inner_transport_start(byte)) {
-      frames.push_back(buffer.substr(frame_start, i - frame_start));
-      frame_start = i;
-      continue;
-    }
     if (byte == '\r' && i + 1 < buffer.size() && static_cast<uint8_t>(buffer[i + 1]) == '\n') {
       if (i > frame_start) {
         frames.push_back(buffer.substr(frame_start, i - frame_start));
       }
-      frame_start = i + 2;
+      frame_start = std::string::npos;
+      escaped = false;
       ++i;
     }
   }
-  if (frame_start < buffer.size()) {
+  if (frame_start != std::string::npos && frame_start < buffer.size()) {
     frames.push_back(buffer.substr(frame_start));
   }
   return frames;
