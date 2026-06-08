@@ -1216,6 +1216,9 @@ void JuraComponent::setup() {
   ESP_LOGI(TAG, "Starting handshake with coffee maker...");
 
   this->reset_xml_poll_state_();
+  if (this->xml_command_probe_) {
+    ESP_LOGI(TAG, "xml_command_probe_enabled with_ts_lock=%s", YESNO(this->xml_command_probe_with_ts_lock_));
+  }
   if (this->enable_xml_poll_) {
     this->ensure_xml_mapping_loaded_();
     this->ensure_xml_sensors_created_();
@@ -1872,7 +1875,8 @@ void JuraComponent::process_machine_data_query() {
     return;
   }
   bool xml_poll_active = this->xml_inflight_ || this->db_transaction_owner_ == DbTransactionOwner::XML_POLL ||
-                         (this->enable_xml_poll_ && (this->xml_transport_selftest_ || this->xml_command_probe_)) ||
+                         this->xml_command_probe_ ||
+                         (this->enable_xml_poll_ && this->xml_transport_selftest_) ||
                          (this->enable_xml_poll_ && this->xml_state_ != XmlPollState::IDLE &&
                           this->xml_state_ != XmlPollState::SLEEP) ||
                          (this->enable_xml_poll_ && this->xml_run_tablet_start_sequence_ &&
@@ -1927,6 +1931,8 @@ bool JuraComponent::request_machine_xml_(std::string &xml) {
     return false;
   }
   bool xml_poll_active = this->xml_inflight_ || this->db_transaction_owner_ == DbTransactionOwner::XML_POLL ||
+                         this->xml_command_probe_ ||
+                         (this->enable_xml_poll_ && this->xml_transport_selftest_) ||
                          (this->enable_xml_poll_ && this->xml_state_ != XmlPollState::IDLE &&
                           this->xml_state_ != XmlPollState::SLEEP) ||
                          (this->enable_xml_poll_ && this->xml_run_tablet_start_sequence_ &&
@@ -2263,6 +2269,8 @@ void JuraComponent::start_new_xml_cycle_(uint32_t now) {
   this->xml_command_probe_rx_buffer_.clear();
   this->xml_command_probe_current_cmd_.clear();
   this->xml_command_probe_deadline_ms_ = 0;
+  this->xml_command_probe_next_ms_ = 0;
+  this->xml_command_probe_last_wait_reason_.clear();
 }
 
 size_t JuraComponent::xml_command_index_(XmlPollState state) const {
@@ -3003,9 +3011,21 @@ void JuraComponent::reset_xml_poll_state_() {
   this->xml_counter_candidate_count_.fill(0);
   this->xml_tgc0_timeout_streak_ = 0;
   this->xml_skip_tgc0_ = false;
+  this->xml_command_probe_state_ = XmlCommandProbeState::IDLE;
+  this->xml_command_probe_index_ = 0;
+  this->xml_command_probe_rx_buffer_.clear();
+  this->xml_command_probe_current_cmd_.clear();
+  this->xml_command_probe_deadline_ms_ = 0;
+  this->xml_command_probe_next_ms_ = 0;
+  this->xml_command_probe_last_wait_reason_.clear();
 }
 
 void JuraComponent::process_xml_polling() {
+  uint32_t now = esphome::millis();
+  if (this->xml_command_probe_) {
+    this->process_xml_command_probe_scheduler_(now);
+    return;
+  }
   if (!this->enable_xml_poll_) {
     return;
   }
@@ -3027,8 +3047,52 @@ void JuraComponent::process_xml_polling() {
     return;
   }
 
-  uint32_t now = esphome::millis();
   this->handle_xml_state_machine_(now);
+}
+
+void JuraComponent::log_xml_command_probe_wait_(const char *reason, const char *owner) {
+  std::string key = reason != nullptr ? reason : "unknown";
+  if (owner != nullptr && owner[0] != '\0') {
+    key.append(":");
+    key.append(owner);
+  }
+  if (key == this->xml_command_probe_last_wait_reason_) {
+    return;
+  }
+  this->xml_command_probe_last_wait_reason_ = key;
+  if (owner != nullptr && owner[0] != '\0') {
+    ESP_LOGD(TAG, "xml_command_probe_wait reason=%s owner=%s", reason, owner);
+  } else {
+    ESP_LOGD(TAG, "xml_command_probe_wait reason=%s", reason);
+  }
+}
+
+void JuraComponent::process_xml_command_probe_scheduler_(uint32_t now) {
+  if (this->handshake_stage_ != HandshakeStage::DONE) {
+    this->log_xml_command_probe_wait_("handshake_not_done");
+    return;
+  }
+  if (!this->is_ready()) {
+    this->log_xml_command_probe_wait_("machine_not_ready");
+    return;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    this->log_xml_command_probe_wait_("controller_not_ready");
+    return;
+  }
+  if (this->is_busy()) {
+    this->log_xml_command_probe_wait_("uart_busy", "coffee_maker");
+    return;
+  }
+  if (this->db_transaction_owner_ != DbTransactionOwner::NONE) {
+    this->log_xml_command_probe_wait_("uart_busy", this->db_transaction_owner_name_(this->db_transaction_owner_));
+    return;
+  }
+  if (this->xml_command_probe_next_ms_ != 0 && !time_reached(now, this->xml_command_probe_next_ms_)) {
+    return;
+  }
+  this->xml_command_probe_last_wait_reason_.clear();
+  this->process_xml_command_probe_(now);
 }
 
 const char *JuraComponent::transport_selftest_state_name_(TransportSelftestState state) const {
@@ -3193,14 +3257,14 @@ void JuraComponent::start_xml_command_probe_(uint32_t now) {
 }
 
 size_t JuraComponent::xml_command_probe_command_count_() const {
-  return this->xml_command_probe_with_ts_lock_ ? 7U : 6U;
+  return this->xml_command_probe_with_ts_lock_ ? 7U : 5U;
 }
 
 const char *JuraComponent::xml_command_probe_command_(size_t index) const {
   static constexpr const char *LOCKED_COMMANDS[] = {"@TS:01", "@TR:37", "@TR:32,00", "@TR:32,01",
                                                     "@TG:43", "@TG:C0", "@TS:00"};
   static constexpr const char *UNLOCKED_COMMANDS[] = {"@TR:37", "@TR:32,00", "@TR:32,01",
-                                                      "@TG:43", "@TG:C0", "@TS:00"};
+                                                      "@TG:43", "@TG:C0"};
   if (this->xml_command_probe_with_ts_lock_) {
     return index < (sizeof(LOCKED_COMMANDS) / sizeof(LOCKED_COMMANDS[0])) ? LOCKED_COMMANDS[index] : nullptr;
   }
@@ -3313,7 +3377,7 @@ bool JuraComponent::process_xml_command_probe_(uint32_t now) {
       ESP_LOGD(TAG, "xml_probe_done next_retry_ms=300000");
       this->xml_command_probe_state_ = XmlCommandProbeState::IDLE;
       this->xml_command_probe_index_ = 0;
-      this->xml_next_poll_ = now + 300000U;
+      this->xml_command_probe_next_ms_ = now + 300000U;
       this->xml_state_ = XmlPollState::IDLE;
       this->xml_inflight_ = false;
       this->xml_last_command_.clear();

@@ -299,6 +299,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void process_machine_data_query();
   void publish_machine_data_(const std::string &response);
   void process_xml_polling();
+  void process_xml_command_probe_scheduler_(uint32_t now);
+  void log_xml_command_probe_wait_(const char *reason, const char *owner = nullptr);
   bool process_transport_selftest_(uint32_t now);
   void start_transport_selftest_(uint32_t now);
   void send_transport_selftest_command_(const char *path, const std::string &command, uint32_t now);
@@ -474,6 +476,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string xml_command_probe_rx_buffer_{};
   std::string xml_command_probe_current_cmd_{};
   uint32_t xml_command_probe_deadline_ms_{0};
+  uint32_t xml_command_probe_next_ms_{0};
+  std::string xml_command_probe_last_wait_reason_{};
   uint32_t xml_counter_max_{20000};
   uint32_t xml_poll_interval_ms_{30000};
   uint32_t xml_startup_delay_ms_{10000};
