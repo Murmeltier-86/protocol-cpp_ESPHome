@@ -42,6 +42,7 @@ CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
 CONF_XML_STARTUP_DELAY_MS = "xml_startup_delay_ms"
 CONF_XML_PUBLISH_UNSTABLE = "xml_publish_unstable"
 CONF_XML_WAIT_FOR_TS_ACK = "xml_wait_for_ts_ack"
+CONF_XML_STATS_USE_TS_LOCK = "xml_stats_use_ts_lock"
 CONF_XML_DEBUG_COMPACT = "xml_debug_compact"
 CONF_XML_DECODE_INNER_TRANSPORT = "xml_decode_inner_transport"
 CONF_XML_INNER_DECODE_TRACE = "xml_inner_decode_trace"
@@ -162,6 +163,7 @@ CONFIG_SCHEMA = (
             ),
             cv.Optional(CONF_XML_PUBLISH_UNSTABLE, default=False): cv.boolean,
             cv.Optional(CONF_XML_WAIT_FOR_TS_ACK, default=False): cv.boolean,
+            cv.Optional(CONF_XML_STATS_USE_TS_LOCK, default=False): cv.boolean,
             cv.Optional(CONF_XML_DEBUG_COMPACT, default=True): cv.boolean,
             cv.Optional(CONF_XML_DECODE_INNER_TRANSPORT, default=True): cv.boolean,
             cv.Optional(CONF_XML_INNER_DECODE_TRACE, default=False): cv.boolean,
@@ -346,6 +348,7 @@ async def to_code(config):
     cg.add(var.set_enable_machine_xml_poll(config.get(CONF_ENABLE_MACHINE_XML_POLL, machine_xml_default)))
     cg.add(var.set_xml_publish_unstable(config[CONF_XML_PUBLISH_UNSTABLE]))
     cg.add(var.set_xml_wait_for_ts_ack(config[CONF_XML_WAIT_FOR_TS_ACK]))
+    cg.add(var.set_xml_stats_use_ts_lock(config[CONF_XML_STATS_USE_TS_LOCK]))
     cg.add(var.set_xml_debug_compact(config[CONF_XML_DEBUG_COMPACT]))
     cg.add(var.set_xml_decode_inner_transport(config[CONF_XML_DECODE_INNER_TRANSPORT]))
     cg.add(var.set_xml_inner_decode_trace(config[CONF_XML_INNER_DECODE_TRACE]))

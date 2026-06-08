@@ -232,6 +232,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_publish_unstable(bool enabled) { this->xml_publish_unstable_ = enabled; }
   void set_xml_counter_max(uint32_t max_value) { this->xml_counter_max_ = max_value; }
   void set_xml_wait_for_ts_ack(bool enabled) { this->xml_wait_for_ts_ack_ = enabled; }
+  void set_xml_stats_use_ts_lock(bool enabled) { this->xml_stats_use_ts_lock_ = enabled; }
   void set_xml_debug_compact(bool enabled) { this->xml_debug_compact_ = enabled; }
   void set_xml_decode_inner_transport(bool enabled) { this->xml_decode_inner_transport_ = enabled; }
   void set_xml_inner_decode_trace(bool enabled) { this->xml_inner_decode_trace_ = enabled; }
@@ -431,6 +432,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const char *xml_state_label_(XmlPollState state) const;
   void transition_to_state_(XmlPollState state, uint32_t now, uint32_t delay_ms = 0);
   bool write_stats_command_(const std::string &command, uint32_t now, bool fire_and_forget);
+  bool send_post_gate_command_(const std::string &command, const std::string &expected_prefix, uint32_t timeout_ms,
+                               bool fire_and_forget, XmlPollState wait_state, uint32_t now);
   bool send_stats_ascii_command_(const std::string &command, XmlPollState wait_state, uint32_t now);
   bool send_stats_fire_and_forget_(const std::string &command, XmlPollState next_state, uint32_t now,
                                    uint32_t settle_delay_ms);
@@ -511,6 +514,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool enable_xml_poll_{false};
   bool xml_publish_unstable_{false};
   bool xml_wait_for_ts_ack_{false};
+  bool xml_stats_use_ts_lock_{false};
   bool xml_debug_compact_{true};
   bool xml_decode_inner_transport_{true};
   bool xml_inner_decode_trace_{false};
@@ -587,6 +591,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   DbTransactionOwner db_transaction_owner_{DbTransactionOwner::NONE};
   std::string xml_transaction_cmd_{};
   std::string xml_last_command_{};
+  std::string xml_expected_prefix_{};
   std::string xml_rx_line_{};
   uint32_t xml_stats_capture_start_ms_{0};
   std::string xml_stats_reject_reason_{};
@@ -600,6 +605,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_stats_locked_{false};
   bool xml_cycle_failed_{false};
   uint8_t xml_stats_consecutive_failures_{0};
+  uint8_t xml_tr32_pages_ok_{0};
+  bool xml_tg43_ok_{false};
+  bool xml_tgc0_ok_{false};
   std::vector<uint8_t> xml_rx_buffer_{};
   bool xml_mapping_logged_{false};
   bool xml_mapping_loaded_{false};
