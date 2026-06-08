@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <iomanip>
 #include <limits>
@@ -243,7 +244,10 @@ InnerBinaryProbePayload extract_current_inner_binary_payload(const std::string &
       return result;
     }
   }
-  result.key = static_cast<uint8_t>(frame[index]) & 0x7F;
+  result.key = static_cast<uint8_t>(frame[index]);
+  if (result.key_escaped) {
+    result.key &= 0x7F;
+  }
   ++index;
 
   result.raw_payload.reserve(frame.size());
@@ -324,7 +328,7 @@ std::vector<std::string> split_inner_transport_frames(const std::string &buffer)
   return frames;
 }
 
-bool is_stats_ascii_response(const std::string &line) {
+std::string lower_trimmed_transport_payload(const std::string &line) {
   std::string lower = line;
   while (!lower.empty() && (lower.back() == '\r' || lower.back() == '\n' || lower.back() == ' ' ||
                             lower.back() == '\t')) {
@@ -332,8 +336,38 @@ bool is_stats_ascii_response(const std::string &line) {
   }
   std::transform(lower.begin(), lower.end(), lower.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return lower.rfind("@tr", 0) == 0 || lower.rfind("@tg", 0) == 0 || lower.rfind("@ts", 0) == 0 ||
-         lower.rfind("ok", 0) == 0;
+  return lower;
+}
+
+std::string transport_payload_log_text(const std::string &line) {
+  std::string trimmed = line;
+  while (!trimmed.empty() && (trimmed.back() == '\r' || trimmed.back() == '\n' || trimmed.back() == ' ' ||
+                             trimmed.back() == '\t')) {
+    trimmed.pop_back();
+  }
+  return sanitize_text_for_api(trimmed);
+}
+
+const char *classify_decoded_inner_response(const std::string &line) {
+  std::string lower = lower_trimmed_transport_payload(line);
+  if (lower.rfind("@tr", 0) == 0) {
+    return "tr_response";
+  }
+  if (lower.rfind("@tg", 0) == 0) {
+    return "tg_response";
+  }
+  if (lower.rfind("@ts", 0) == 0 || lower.rfind("ok", 0) == 0) {
+    return "control_response";
+  }
+  if (lower.rfind("@tf", 0) == 0) {
+    return "tf_response";
+  }
+  return "unknown";
+}
+
+bool is_stats_ascii_response(const std::string &line) {
+  const char *decoded_class = classify_decoded_inner_response(line);
+  return std::strcmp(decoded_class, "unknown") != 0;
 }
 
 bool is_printable_transport_payload(const std::string &line) {
@@ -421,6 +455,12 @@ bool payload_starts_with_ok(const std::string &line) {
   std::transform(lower.begin(), lower.end(), lower.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   return lower == "ok";
+}
+bool payload_starts_with_tf(const std::string &line) {
+  std::string lower = line.substr(0, std::min<size_t>(3, line.size()));
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return lower == "@tf";
 }
 
 uint8_t fw_mod8(int value) {
@@ -534,8 +574,6 @@ InnerTransportDecodeResult decode_inner_transport_with_tables(const std::string 
   uint8_t key = static_cast<uint8_t>(frame[index]);
   if (result.key_escaped) {
     key = inner_unescape_byte(key, escape_variant);
-  } else if (escape_variant == InnerEscapeVariant::CURRENT) {
-    key &= 0x7F;
   }
   result.key = key;
   uint8_t key_hi = (key >> 4) & 0x0F;
@@ -587,12 +625,14 @@ InnerTransportDecodeResult decode_inner_transport_with_tables(const std::string 
 std::vector<InnerTransportDecodeResult> decode_inner_transport_candidates(const std::string &frame) {
   // Tables are the 16-byte substitution pairs used by FUN_40101408. The WiFi
   // and BLE2 pairs are also present verbatim in the Android transport layer.
+  static constexpr uint8_t UART_MODE0_A[16] = {0x08, 0x0E, 0x0C, 0x04, 0x03, 0x0D, 0x0A, 0x0B,
+                                               0x00, 0x0F, 0x06, 0x07, 0x02, 0x05, 0x01, 0x09};
+  static constexpr uint8_t UART_MODE0_B[16] = {0x04, 0x0B, 0x0D, 0x0A, 0x00, 0x07, 0x0F, 0x05,
+                                               0x09, 0x08, 0x03, 0x01, 0x0E, 0x02, 0x0C, 0x06};
   static constexpr uint8_t WIFI_A[16] = {1, 0, 3, 2, 15, 14, 8, 10, 6, 13, 7, 12, 11, 9, 5, 4};
   static constexpr uint8_t WIFI_B[16] = {9, 12, 6, 11, 10, 15, 2, 14, 13, 0, 4, 3, 1, 8, 7, 5};
   static constexpr uint8_t BLE2_A[16] = {14, 4, 3, 2, 1, 13, 8, 11, 6, 15, 12, 7, 10, 5, 0, 9};
   static constexpr uint8_t BLE2_B[16] = {10, 6, 13, 12, 14, 11, 1, 9, 15, 7, 0, 5, 3, 2, 4, 8};
-  static constexpr uint8_t FW_PARAM0_A[16] = {13, 0, 4, 3, 1, 8, 7, 5, 1, 0, 3, 2, 15, 14, 8, 10};
-  static constexpr uint8_t FW_PARAM0_B[16] = {6, 7, 0, 12, 11, 5, 1, 3, 9, 12, 6, 11, 10, 15, 2, 14};
 
   struct Candidate {
     const char *name;
@@ -601,10 +641,10 @@ std::vector<InnerTransportDecodeResult> decode_inner_transport_candidates(const 
   };
 
   uint8_t start = frame.empty() ? 0 : static_cast<uint8_t>(frame.front());
-  const Candidate amp_candidates[] = {{"fw_param0", FW_PARAM0_A, FW_PARAM0_B},
+  const Candidate amp_candidates[] = {{"uart_mode0", UART_MODE0_A, UART_MODE0_B},
                                       {"wifi", WIFI_A, WIFI_B},
                                       {"ble2", BLE2_A, BLE2_B}};
-  const Candidate star_candidates[] = {{"wifi", WIFI_A, WIFI_B}, {"fw_param0", FW_PARAM0_A, FW_PARAM0_B}};
+  const Candidate star_candidates[] = {{"wifi", WIFI_A, WIFI_B}, {"uart_mode0", UART_MODE0_A, UART_MODE0_B}};
   const Candidate plus_candidates[] = {{"ble2", BLE2_A, BLE2_B}, {"wifi", WIFI_A, WIFI_B}};
 
   const Candidate *candidates = amp_candidates;
@@ -628,12 +668,14 @@ std::vector<InnerTransportDecodeResult> decode_inner_transport_candidates(const 
 
 std::vector<InnerTransportDecodeResult> decode_inner_transport_variant_candidates(const std::string &frame,
                                                                                  InnerEscapeVariant escape_variant) {
+  static constexpr uint8_t UART_MODE0_A[16] = {0x08, 0x0E, 0x0C, 0x04, 0x03, 0x0D, 0x0A, 0x0B,
+                                               0x00, 0x0F, 0x06, 0x07, 0x02, 0x05, 0x01, 0x09};
+  static constexpr uint8_t UART_MODE0_B[16] = {0x04, 0x0B, 0x0D, 0x0A, 0x00, 0x07, 0x0F, 0x05,
+                                               0x09, 0x08, 0x03, 0x01, 0x0E, 0x02, 0x0C, 0x06};
   static constexpr uint8_t WIFI_A[16] = {1, 0, 3, 2, 15, 14, 8, 10, 6, 13, 7, 12, 11, 9, 5, 4};
   static constexpr uint8_t WIFI_B[16] = {9, 12, 6, 11, 10, 15, 2, 14, 13, 0, 4, 3, 1, 8, 7, 5};
   static constexpr uint8_t BLE2_A[16] = {14, 4, 3, 2, 1, 13, 8, 11, 6, 15, 12, 7, 10, 5, 0, 9};
   static constexpr uint8_t BLE2_B[16] = {10, 6, 13, 12, 14, 11, 1, 9, 15, 7, 0, 5, 3, 2, 4, 8};
-  static constexpr uint8_t FW_PARAM0_A[16] = {13, 0, 4, 3, 1, 8, 7, 5, 1, 0, 3, 2, 15, 14, 8, 10};
-  static constexpr uint8_t FW_PARAM0_B[16] = {6, 7, 0, 12, 11, 5, 1, 3, 9, 12, 6, 11, 10, 15, 2, 14};
 
   struct Candidate {
     const char *name;
@@ -641,7 +683,7 @@ std::vector<InnerTransportDecodeResult> decode_inner_transport_variant_candidate
     const uint8_t *b;
   };
 
-  const Candidate candidates[] = {{"fw_param0", FW_PARAM0_A, FW_PARAM0_B},
+  const Candidate candidates[] = {{"uart_mode0", UART_MODE0_A, UART_MODE0_B},
                                   {"wifi", WIFI_A, WIFI_B},
                                   {"ble2", BLE2_A, BLE2_B}};
 
@@ -689,12 +731,14 @@ InnerTransportDecodeResult decode_inner_payload_with_key(const std::string &enco
 
 std::vector<InnerTransportDecodeResult> decode_inner_transport_key_variant_candidates(
     const InnerBinaryProbePayload &probe, bool has_t2_word, uint16_t t2_word) {
+  static constexpr uint8_t UART_MODE0_A[16] = {0x08, 0x0E, 0x0C, 0x04, 0x03, 0x0D, 0x0A, 0x0B,
+                                               0x00, 0x0F, 0x06, 0x07, 0x02, 0x05, 0x01, 0x09};
+  static constexpr uint8_t UART_MODE0_B[16] = {0x04, 0x0B, 0x0D, 0x0A, 0x00, 0x07, 0x0F, 0x05,
+                                               0x09, 0x08, 0x03, 0x01, 0x0E, 0x02, 0x0C, 0x06};
   static constexpr uint8_t WIFI_A[16] = {1, 0, 3, 2, 15, 14, 8, 10, 6, 13, 7, 12, 11, 9, 5, 4};
   static constexpr uint8_t WIFI_B[16] = {9, 12, 6, 11, 10, 15, 2, 14, 13, 0, 4, 3, 1, 8, 7, 5};
   static constexpr uint8_t BLE2_A[16] = {14, 4, 3, 2, 1, 13, 8, 11, 6, 15, 12, 7, 10, 5, 0, 9};
   static constexpr uint8_t BLE2_B[16] = {10, 6, 13, 12, 14, 11, 1, 9, 15, 7, 0, 5, 3, 2, 4, 8};
-  static constexpr uint8_t FW_PARAM0_A[16] = {13, 0, 4, 3, 1, 8, 7, 5, 1, 0, 3, 2, 15, 14, 8, 10};
-  static constexpr uint8_t FW_PARAM0_B[16] = {6, 7, 0, 12, 11, 5, 1, 3, 9, 12, 6, 11, 10, 15, 2, 14};
 
   struct TableCandidate {
     const char *name;
@@ -708,7 +752,7 @@ std::vector<InnerTransportDecodeResult> decode_inner_transport_key_variant_candi
     std::string payload;
   };
 
-  const TableCandidate tables[] = {{"fw_param0", FW_PARAM0_A, FW_PARAM0_B},
+  const TableCandidate tables[] = {{"uart_mode0", UART_MODE0_A, UART_MODE0_B},
                                    {"wifi", WIFI_A, WIFI_B},
                                    {"ble2", BLE2_A, BLE2_B}};
 
@@ -2984,6 +3028,7 @@ void JuraComponent::reset_xml_poll_state_() {
   this->xml_rx_line_.clear();
   this->xml_stats_capture_start_ms_ = 0;
   this->xml_stats_reject_reason_.clear();
+  this->xml_stats_reject_decoded_.clear();
   this->xml_stats_rx_logged_ = false;
   this->xml_stats_binary_response_ = false;
   this->xml_tr32_page_ = 0;
@@ -3323,6 +3368,19 @@ void JuraComponent::finish_xml_command_probe_step_(const std::string &command, u
   if (!this->xml_command_probe_rx_buffer_.empty() && this->is_printable_status_text_(this->xml_command_probe_rx_buffer_)) {
     ESP_LOGD(TAG, "xml_probe_ascii cmd=%s ascii=\"%s\"", command.c_str(),
              sanitize_text_for_api(this->xml_command_probe_rx_buffer_).c_str());
+  }
+  if (!this->xml_command_probe_rx_buffer_.empty() &&
+      static_cast<uint8_t>(this->xml_command_probe_rx_buffer_.front()) == 0x26 &&
+      this->xml_decode_inner_transport_) {
+    std::vector<InnerTransportDecodeResult> candidates =
+        decode_inner_transport_candidates(this->xml_command_probe_rx_buffer_);
+    if (!candidates.empty() && !candidates.front().payload.empty()) {
+      const auto &decoded = candidates.front();
+      const char *decoded_class = classify_decoded_inner_response(decoded.payload);
+      ESP_LOGD(TAG, "xml_probe_inner cmd=%s decoded=\"%s\"", command.c_str(),
+               transport_payload_log_text(decoded.payload).c_str());
+      ESP_LOGD(TAG, "xml_probe_class cmd=%s decoded_class=%s", command.c_str(), decoded_class);
+    }
   }
   this->xml_command_probe_rx_buffer_.clear();
   this->xml_command_probe_current_cmd_.clear();
@@ -3701,6 +3759,7 @@ bool JuraComponent::send_stats_ascii_command_(const std::string &command, XmlPol
   this->xml_stats_rx_logged_ = false;
   this->xml_stats_binary_response_ = false;
   this->xml_stats_reject_reason_.clear();
+  this->xml_stats_reject_decoded_.clear();
   ESP_LOGD(TAG, "stats_tx cmd=%s", command.c_str());
   if (command == "@TS:00") {
     ESP_LOGD(TAG, "stats_unlock_sent fire_and_forget=false");
@@ -3751,6 +3810,7 @@ bool JuraComponent::send_stats_fire_and_forget_(const std::string &command, XmlP
   this->xml_stats_rx_logged_ = false;
   this->xml_stats_binary_response_ = false;
   this->xml_stats_reject_reason_.clear();
+  this->xml_stats_reject_decoded_.clear();
 
   ESP_LOGD(TAG, "stats_tx cmd=%s", command.c_str());
   if (command == "@TS:01") {
@@ -4131,11 +4191,16 @@ bool JuraComponent::finish_stats_rx_capture_(std::string &line, uint32_t now) {
       this->xml_stats_capture_start_ms_ = 0;
       return true;
     }
+    if (this->xml_stats_binary_response_) {
+      return false;
+    }
   }
 
-  this->publish_raw_rx_(this->xml_rx_line_, saw_inner_frame ? "stats_inner_transport_capture" : "stats_binary_capture");
-  this->xml_stats_reject_reason_ = saw_inner_frame ? "inner_decode_not_ascii" : "unexpected_binary";
-  this->xml_stats_binary_response_ = true;
+  if (!this->xml_stats_binary_response_) {
+    this->publish_raw_rx_(this->xml_rx_line_, saw_inner_frame ? "stats_inner_transport_capture" : "stats_binary_capture");
+    this->xml_stats_reject_reason_ = saw_inner_frame ? "inner_decode_not_ascii" : "unexpected_binary";
+    this->xml_stats_binary_response_ = true;
+  }
   return false;
 }
 
@@ -4223,7 +4288,9 @@ bool JuraComponent::probe_stats_inner_key_variants_(const std::string &frame, st
              YESNO(payload_starts_with_at(candidate.payload)), YESNO(payload_starts_with_tr(candidate.payload)),
              YESNO(payload_starts_with_tg(candidate.payload)), YESNO(payload_starts_with_ts(candidate.payload)),
              YESNO(payload_starts_with_ok(candidate.payload)), printable_preview(candidate.payload, 32).c_str());
-    if (candidate.ok) {
+    bool parser_response = payload_starts_with_tr(candidate.payload) || payload_starts_with_tg(candidate.payload) ||
+                           payload_starts_with_ts(candidate.payload) || payload_starts_with_ok(candidate.payload);
+    if (candidate.ok && parser_response) {
       decoded_line = candidate.payload;
       ESP_LOGD(TAG, "stats_inner_decode cmd=%s ok=true variant=%s table=%s len=%u publish=false ascii=\"%s\"",
                this->xml_last_command_.c_str(), candidate.key_variant_name, candidate.table_name,
@@ -4324,6 +4391,19 @@ bool JuraComponent::decode_stats_inner_transport_line_(const std::string &raw_li
              this->xml_last_command_.c_str(), decoded.table_name, static_cast<unsigned>(decoded.payload.size()),
              compact_hex_string(decoded.payload).c_str());
     this->xml_stats_reject_reason_ = "inner_decode_not_ascii";
+    this->xml_stats_binary_response_ = true;
+    return false;
+  }
+
+  const char *decoded_class = classify_decoded_inner_response(decoded.payload);
+  ESP_LOGD(TAG, "stats_inner_decoded cmd=%s decoded=\"%s\"", this->xml_last_command_.c_str(),
+           transport_payload_log_text(decoded.payload).c_str());
+  if (std::strcmp(decoded_class, "tf_response") == 0) {
+    std::string decoded_text = transport_payload_log_text(decoded.payload);
+    ESP_LOGD(TAG, "stats_reject cmd=%s reason=tf_response decoded=\"%s\"", this->xml_last_command_.c_str(),
+             decoded_text.c_str());
+    this->xml_stats_reject_reason_ = "tf_response";
+    this->xml_stats_reject_decoded_ = decoded_text;
     this->xml_stats_binary_response_ = true;
     return false;
   }
@@ -4460,9 +4540,15 @@ bool JuraComponent::handle_stats_binary_response_(uint32_t now) {
   }
 
   const char *reason = this->xml_stats_reject_reason_.empty() ? "unexpected_binary" : this->xml_stats_reject_reason_.c_str();
-  ESP_LOGD(TAG, "stats_reject cmd=%s reason=%s", this->xml_last_command_.c_str(), reason);
+  if (!this->xml_stats_reject_decoded_.empty()) {
+    ESP_LOGD(TAG, "stats_reject cmd=%s reason=%s decoded=\"%s\"", this->xml_last_command_.c_str(), reason,
+             this->xml_stats_reject_decoded_.c_str());
+  } else {
+    ESP_LOGD(TAG, "stats_reject cmd=%s reason=%s", this->xml_last_command_.c_str(), reason);
+  }
   this->xml_stats_binary_response_ = false;
   this->xml_stats_reject_reason_.clear();
+  this->xml_stats_reject_decoded_.clear();
   this->xml_cycle_failed_ = true;
   this->xml_inflight_ = false;
   this->xml_deadline_ms_ = 0;

@@ -495,6 +495,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string xml_rx_line_{};
   uint32_t xml_stats_capture_start_ms_{0};
   std::string xml_stats_reject_reason_{};
+  std::string xml_stats_reject_decoded_{};
   bool xml_stats_rx_logged_{false};
   bool xml_stats_binary_response_{false};
   uint8_t xml_tr32_page_{0};
