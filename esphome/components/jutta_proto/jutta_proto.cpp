@@ -5642,16 +5642,46 @@ bool JuraComponent::finish_stats_rx_capture_(std::string &line, uint32_t now) {
       }
     }
 
-    std::string decoded_line;
-    if (this->decode_stats_inner_transport_line_(frame, decoded_line, capture_has_complete_inner_frame)) {
-      line = decoded_line;
-      this->xml_rx_line_.clear();
-      this->xml_stats_capture_start_ms_ = 0;
-      return true;
-    }
-    if (this->xml_stats_binary_response_) {
-      return false;
-    }
+      std::string decoded_line;
+      if (this->decode_stats_inner_transport_line_(frame, decoded_line, capture_has_complete_inner_frame)) {
+        std::string decoded_lower = to_lower_copy(decoded_line);
+        trim_in_place(decoded_lower);
+
+        bool matches_current_command = false;
+
+        if (this->xml_last_command_.rfind("@TR:32,", 0) == 0 && this->xml_last_command_.size() >= 9) {
+          std::string page_text = this->xml_last_command_.substr(7, 2);
+          std::string expected = "@tr:32," + to_lower_copy(page_text);
+          matches_current_command = decoded_lower.rfind(expected, 0) == 0 || decoded_lower.rfind("@tr:00", 0) == 0;
+        } else if (!this->xml_expected_prefix_.empty()) {
+          std::string expected = to_lower_copy(this->xml_expected_prefix_);
+          trim_in_place(expected);
+          matches_current_command = decoded_lower.rfind(expected, 0) == 0;
+        } else {
+          matches_current_command = is_stats_ascii_response(decoded_lower);
+        }
+
+        if (matches_current_command) {
+          line = decoded_line;
+          this->xml_rx_line_.clear();
+          this->xml_stats_capture_start_ms_ = 0;
+          return true;
+        }
+
+        ESP_LOGD(TAG, "stats_rx_frame_ignored cmd=%s index=%u reason=unmatched decoded=\"%s\"",
+                 this->xml_last_command_.c_str(), static_cast<unsigned>(i),
+                 sanitize_text_for_api(decoded_line).c_str());
+        continue;
+      }
+
+      ESP_LOGD(TAG, "stats_rx_frame_ignored cmd=%s index=%u reason=%s",
+               this->xml_last_command_.c_str(), static_cast<unsigned>(i),
+               this->xml_stats_reject_reason_.empty() ? "decode_failed" : this->xml_stats_reject_reason_.c_str());
+
+      this->xml_stats_binary_response_ = false;
+      this->xml_stats_reject_reason_.clear();
+      this->xml_stats_reject_decoded_.clear();
+      continue;
   }
 
   if (!this->xml_stats_binary_response_) {
@@ -5836,32 +5866,29 @@ bool JuraComponent::decode_stats_inner_transport_line_(const std::string &raw_li
     }
   }
 
-  if (!decoded.ok) {
-    std::string reason = decoded.reason.empty() ? "inner_decode_failed" : decoded.reason;
-    ESP_LOGD(TAG, "stats_inner_decode cmd=%s ok=false reason=%s table=%s", this->xml_last_command_.c_str(),
-             reason.c_str(), decoded.table_name);
-    this->xml_stats_reject_reason_ = reason;
-    this->xml_stats_binary_response_ = true;
-    return false;
-  }
+    if (!decoded.ok) {
+      std::string reason = decoded.reason.empty() ? "inner_decode_failed" : decoded.reason;
+      ESP_LOGD(TAG, "stats_inner_decode cmd=%s ok=false reason=%s table=%s", this->xml_last_command_.c_str(),
+               reason.c_str(), decoded.table_name);
+      this->xml_stats_reject_reason_ = reason;
+      return false;
+    }
 
-  if (!frame_complete) {
-    ESP_LOGD(TAG, "stats_inner_decoded_partial cmd=%s decoded=\"%s\"", this->xml_last_command_.c_str(),
-             transport_payload_log_text(decoded.payload).c_str());
-    this->xml_stats_reject_reason_ = "binary_26_incomplete";
-    this->xml_stats_reject_decoded_ = transport_payload_log_text(decoded.payload);
-    this->xml_stats_binary_response_ = true;
-    return false;
-  }
+    if (!frame_complete) {
+      ESP_LOGD(TAG, "stats_inner_decoded_partial cmd=%s decoded=\"%s\"", this->xml_last_command_.c_str(),
+               transport_payload_log_text(decoded.payload).c_str());
+      this->xml_stats_reject_reason_ = "binary_26_incomplete";
+      this->xml_stats_reject_decoded_ = transport_payload_log_text(decoded.payload);
+      return false;
+    }
 
-  if (!is_printable_transport_payload(decoded.payload) || !is_stats_ascii_response(decoded.payload)) {
-    ESP_LOGD(TAG, "stats_inner_decode cmd=%s ok=false reason=inner_decode_not_ascii table=%s len=%u hex=\"%s\"",
-             this->xml_last_command_.c_str(), decoded.table_name, static_cast<unsigned>(decoded.payload.size()),
-             compact_hex_string(decoded.payload).c_str());
-    this->xml_stats_reject_reason_ = "inner_decode_not_ascii";
-    this->xml_stats_binary_response_ = true;
-    return false;
-  }
+    if (!is_printable_transport_payload(decoded.payload) || !is_stats_ascii_response(decoded.payload)) {
+      ESP_LOGD(TAG, "stats_inner_decode cmd=%s ok=false reason=inner_decode_not_ascii table=%s len=%u hex=\"%s\"",
+               this->xml_last_command_.c_str(), decoded.table_name, static_cast<unsigned>(decoded.payload.size()),
+               compact_hex_string(decoded.payload).c_str());
+      this->xml_stats_reject_reason_ = "inner_decode_not_ascii";
+      return false;
+    }
 
   const char *decoded_class = classify_decoded_inner_response(decoded.payload);
   ESP_LOGD(TAG, "stats_inner_decoded cmd=%s decoded=\"%s\"", this->xml_last_command_.c_str(),
@@ -6349,12 +6376,18 @@ bool JuraComponent::parse_tr32_page_line_(const std::string &line, uint8_t expec
     size_t byte_offset = slot * kTr32BytesPerProduct;
     uint16_t value = (static_cast<uint16_t>(bytes[byte_offset]) << 8U) | bytes[byte_offset + 1];
     uint8_t product_index = page * kTr32ProductsPerPage + slot;
-    if (value > this->xml_counter_max_) {
-      ESP_LOGD(TAG, "stats_reject cmd=@TR:32 page=%02X slot=%u reason=counter_out_of_range value=%u max=%u",
-               static_cast<unsigned>(page), static_cast<unsigned>(slot), static_cast<unsigned>(value),
-               static_cast<unsigned>(this->xml_counter_max_));
-      continue;
-    }
+      if (value == 0xFFFF) {
+        ESP_LOGD(TAG, "stats_slot_ignored cmd=@TR:32 page=%02X slot=%u reason=ffff_unavailable",
+                 static_cast<unsigned>(page), static_cast<unsigned>(slot));
+        continue;
+      }
+
+      if (value > this->xml_counter_max_) {
+        ESP_LOGD(TAG, "stats_slot_ignored cmd=@TR:32 page=%02X slot=%u reason=counter_out_of_range value=%u max=%u",
+                 static_cast<unsigned>(page), static_cast<unsigned>(slot), static_cast<unsigned>(value),
+                 static_cast<unsigned>(this->xml_counter_max_));
+        continue;
+      }
     std::string label;
     std::string field = this->product_counter_field_name_(product_index, label);
     any = this->stage_xml_stat_value_(field, label, static_cast<double>(value), XmlSensorKind::Counter, "@TR:32") || any;
