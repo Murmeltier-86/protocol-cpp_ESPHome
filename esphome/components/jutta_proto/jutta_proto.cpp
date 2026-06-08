@@ -484,7 +484,9 @@ bool is_stats_ascii_response(const std::string &line) {
 }
 
 std::string expected_stats_prefix_for_command(const std::string &command) {
-  std::string lower = to_lower_copy(command);
+  std::string lower = command;
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   if (lower.rfind("@tr:32", 0) == 0) {
     return "@tr:32";
   }
