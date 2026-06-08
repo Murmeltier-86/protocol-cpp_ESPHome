@@ -3345,6 +3345,7 @@ void JuraComponent::reset_xml_poll_state_() {
   this->xml_command_probe_next_ms_ = 0;
   this->xml_command_probe_last_wait_reason_.clear();
   this->stats_session_ready_ = !this->xml_dongle_startup_;
+  this->stats_inner_tx_required_ = false;
   this->dongle_startup_state_ = DongleStartupState::IDLE;
   this->dongle_startup_rx_buffer_.clear();
       this->dongle_startup_deadline_ms_ = 0;
@@ -4149,37 +4150,51 @@ bool JuraComponent::send_dongle_startup_command_(const std::string &command, uin
     framed.append("\r\n");
   }
   if (inner_uart0) {
-    std::vector<uint8_t> encoded;
-    uint8_t key = static_cast<uint8_t>((now >> 4) ^ (now >> 12) ^ this->dongle_inner_tx_key_counter_ ^
-                                       static_cast<uint8_t>(command.size() * 31U));
-    this->dongle_inner_tx_key_counter_ = static_cast<uint8_t>(this->dongle_inner_tx_key_counter_ + 0x37U);
-    if (!encode_inner_transport_uart_mode0(framed, key, encoded)) {
-      ESP_LOGE(TAG, "dongle_startup_error reason=inner_uart0_encode_failed cmd=%s", command.c_str());
-      return false;
-    }
-
-    std::string encoded_text(encoded.begin(), encoded.end());
-    if (this->xml_dongle_inner_tx_debug_) {
-      ESP_LOGD(TAG, "inner_tx_plain cmd=\"%s\" plain_hex=\"%s\"", command.c_str(),
-               compact_hex_string(framed, framed.size()).c_str());
-      ESP_LOGD(TAG, "inner_tx_encoded cmd=\"%s\" hex=\"%s\"", command.c_str(),
-               compact_hex_string(encoded_text, encoded_text.size()).c_str());
-      InnerTransportDecodeResult roundtrip =
-          decode_inner_transport_with_tables(encoded_text, INNER_UART_MODE0_A, INNER_UART_MODE0_B, "uart_mode0");
-      bool roundtrip_ok = roundtrip.payload == framed;
-      ESP_LOGD(TAG, "inner_tx_roundtrip cmd=\"%s\" decoded=\"%s\" ok=%s", command.c_str(),
-               escape_control_text_for_log(roundtrip.payload).c_str(), YESNO(roundtrip_ok));
-    }
     ESP_LOGD(TAG, "dongle_startup_tx cmd=%s mode=inner_uart0", command.c_str());
-    return this->coffee_maker_->connection->write_decoded(encoded);
+    return this->write_inner_uart0_command_(command, now);
   }
 
   ESP_LOGD(TAG, "dongle_startup_tx cmd=%s mode=plaintext", command.c_str());
   return this->coffee_maker_->connection->write_decoded(framed);
 }
 
+bool JuraComponent::write_inner_uart0_command_(const std::string &command, uint32_t now) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return false;
+  }
+  std::string framed = command;
+  if (framed.size() < 2 || framed.substr(framed.size() - 2) != "\r\n") {
+    framed.append("\r\n");
+  }
+
+  std::vector<uint8_t> encoded;
+  uint8_t key = static_cast<uint8_t>((now >> 4) ^ (now >> 12) ^ this->dongle_inner_tx_key_counter_ ^
+                                     static_cast<uint8_t>(command.size() * 31U));
+  this->dongle_inner_tx_key_counter_ = static_cast<uint8_t>(this->dongle_inner_tx_key_counter_ + 0x37U);
+  if (!encode_inner_transport_uart_mode0(framed, key, encoded)) {
+    ESP_LOGE(TAG, "inner_tx_error reason=inner_uart0_encode_failed cmd=%s", command.c_str());
+    return false;
+  }
+
+  std::string encoded_text(encoded.begin(), encoded.end());
+  if (this->xml_dongle_inner_tx_debug_) {
+    ESP_LOGD(TAG, "inner_tx_plain cmd=\"%s\" plain_hex=\"%s\"", command.c_str(),
+             compact_hex_string(framed, framed.size()).c_str());
+    ESP_LOGD(TAG, "inner_tx_encoded cmd=\"%s\" hex=\"%s\"", command.c_str(),
+             compact_hex_string(encoded_text, encoded_text.size()).c_str());
+    InnerTransportDecodeResult roundtrip =
+        decode_inner_transport_with_tables(encoded_text, INNER_UART_MODE0_A, INNER_UART_MODE0_B, "uart_mode0");
+    bool roundtrip_ok = roundtrip.payload == framed;
+    ESP_LOGD(TAG, "inner_tx_roundtrip cmd=\"%s\" decoded=\"%s\" ok=%s", command.c_str(),
+             escape_control_text_for_log(roundtrip.payload).c_str(), YESNO(roundtrip_ok));
+  }
+
+  return this->coffee_maker_->connection->write_decoded(encoded);
+}
+
 void JuraComponent::fail_dongle_startup_(uint32_t now, const char *reason) {
   this->stats_session_ready_ = false;
+  this->stats_inner_tx_required_ = false;
   this->dongle_startup_next_retry_ms_ = now + this->xml_poll_interval_ms_;
   ESP_LOGD(TAG, "dongle_startup_failed reason=%s events=0x%02X next_retry_ms=%u",
            reason != nullptr ? reason : "unknown", static_cast<unsigned>(this->dongle_events_),
@@ -4316,6 +4331,7 @@ void JuraComponent::process_dongle_startup_rx_(uint32_t now) {
 bool JuraComponent::process_dongle_startup_(uint32_t now) {
   if (!this->xml_dongle_startup_) {
     this->stats_session_ready_ = true;
+    this->stats_inner_tx_required_ = false;
     return true;
   }
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
@@ -4337,6 +4353,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
 
     case DongleStartupState::START_CLEAR: {
       this->stats_session_ready_ = false;
+      this->stats_inner_tx_required_ = false;
       this->dongle_events_ &= ~DONGLE_STARTUP_CLEAR_MASK;
       this->dongle_startup_rx_buffer_.clear();
       this->dongle_startup_probe_attempt_ = 0;
@@ -4630,6 +4647,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
     case DongleStartupState::READY:
       if (!this->stats_session_ready_) {
         this->stats_session_ready_ = true;
+        this->stats_inner_tx_required_ = true;
         ESP_LOGD(TAG, "dongle_startup_ready events=0x%02X all_events=0x%02X",
                  static_cast<unsigned>(this->dongle_events_ & DONGLE_STARTUP_READY_MASK),
                  static_cast<unsigned>(this->dongle_events_));
@@ -4985,6 +5003,31 @@ void JuraComponent::transition_to_state_(XmlPollState state, uint32_t now, uint3
   }
 }
 
+bool JuraComponent::write_stats_command_(const std::string &command, uint32_t now, bool fire_and_forget) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return false;
+  }
+
+  if (this->stats_inner_tx_required_) {
+    ESP_LOGD(TAG, "stats_tx cmd=%s mode=inner_uart0%s", command.c_str(),
+             fire_and_forget ? " fire_and_forget=true" : "");
+    if (!this->write_inner_uart0_command_(command, now)) {
+      ESP_LOGE(TAG, "stats_error reason=inner_uart0_send_failed cmd=%s", command.c_str());
+      return false;
+    }
+    return true;
+  }
+
+  bool stats_family = command.rfind("@TR", 0) == 0 || command.rfind("@TG", 0) == 0 || command.rfind("@TS", 0) == 0;
+  if (this->xml_dongle_startup_ && this->stats_session_ready_ && stats_family) {
+    ESP_LOGE(TAG, "stats_error reason=plaintext_stats_not_allowed_after_dongle_ready cmd=%s", command.c_str());
+    return false;
+  }
+
+  ESP_LOGD(TAG, "stats_tx cmd=%s mode=plaintext%s", command.c_str(), fire_and_forget ? " fire_and_forget=true" : "");
+  return this->coffee_maker_->connection->write_decoded(command + "\r\n");
+}
+
 bool JuraComponent::send_stats_ascii_command_(const std::string &command, XmlPollState wait_state, uint32_t now) {
   if (command.empty()) {
     this->transition_to_state_(wait_state, now);
@@ -5019,13 +5062,15 @@ bool JuraComponent::send_stats_ascii_command_(const std::string &command, XmlPol
   this->xml_stats_binary_response_ = false;
   this->xml_stats_reject_reason_.clear();
   this->xml_stats_reject_decoded_.clear();
-  ESP_LOGD(TAG, "stats_tx cmd=%s", command.c_str());
   if (command == "@TS:00") {
     ESP_LOGD(TAG, "stats_unlock_sent fire_and_forget=false");
   } else if (command == "@TS:01") {
     ESP_LOGD(TAG, "stats_lock_sent fire_and_forget=false");
   }
-  connection->write_decoded(command + "\r\n");
+  if (!this->write_stats_command_(command, now, false)) {
+    this->end_xml_transaction_("stats_tx_failed");
+    return false;
+  }
   this->xml_inflight_ = true;
   this->xml_last_command_ = command;
   this->xml_deadline_ms_ = now + kXmlRxTimeoutMs;
@@ -5071,7 +5116,6 @@ bool JuraComponent::send_stats_fire_and_forget_(const std::string &command, XmlP
   this->xml_stats_reject_reason_.clear();
   this->xml_stats_reject_decoded_.clear();
 
-  ESP_LOGD(TAG, "stats_tx cmd=%s", command.c_str());
   if (command == "@TS:01") {
     this->xml_stats_locked_ = true;
     ESP_LOGD(TAG, "stats_lock_sent fire_and_forget=true");
@@ -5081,7 +5125,10 @@ bool JuraComponent::send_stats_fire_and_forget_(const std::string &command, XmlP
     ESP_LOGD(TAG, "stats_unlock_sent fire_and_forget=true");
   }
 
-  connection->write_decoded(command + "\r\n");
+  if (!this->write_stats_command_(command, now, true)) {
+    this->end_xml_transaction_("stats_tx_failed");
+    return false;
+  }
   this->xml_inflight_ = false;
   this->xml_last_command_ = command;
   this->xml_deadline_ms_ = 0;

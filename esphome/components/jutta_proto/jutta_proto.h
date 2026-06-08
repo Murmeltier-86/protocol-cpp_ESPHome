@@ -364,6 +364,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void transition_dongle_startup_(DongleStartupState state, uint32_t now);
   bool process_dongle_startup_(uint32_t now);
   bool send_dongle_startup_command_(const std::string &command, uint32_t now, bool inner_uart0 = false);
+  bool write_inner_uart0_command_(const std::string &command, uint32_t now);
   void fail_dongle_startup_(uint32_t now, const char *reason);
   void update_dongle_events_from_line_(const std::string &line);
   void process_dongle_startup_rx_(uint32_t now);
@@ -429,6 +430,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const char *xml_state_command_(XmlPollState state) const;
   const char *xml_state_label_(XmlPollState state) const;
   void transition_to_state_(XmlPollState state, uint32_t now, uint32_t delay_ms = 0);
+  bool write_stats_command_(const std::string &command, uint32_t now, bool fire_and_forget);
   bool send_stats_ascii_command_(const std::string &command, XmlPollState wait_state, uint32_t now);
   bool send_stats_fire_and_forget_(const std::string &command, XmlPollState next_state, uint32_t now,
                                    uint32_t settle_delay_ms);
@@ -527,6 +529,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_dongle_inner_tx_debug_{false};
   uint32_t dongle_events_{0};
   bool stats_session_ready_{false};
+  bool stats_inner_tx_required_{false};
   uint16_t startup_t2_word_{0};
   std::string dongle_machine_identity_{};
   std::string dongle_tr_payload_{};
