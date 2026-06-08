@@ -310,6 +310,39 @@ bool has_unescaped_inner_transport_cr(const std::string &buffer) {
   return false;
 }
 
+struct ProbeRxLine {
+  std::string data{};
+  bool complete{false};
+};
+
+std::vector<ProbeRxLine> split_probe_rx_lines(const std::string &buffer) {
+  std::vector<ProbeRxLine> lines;
+  size_t line_start = 0;
+  bool escaped = false;
+  for (size_t i = 0; i < buffer.size(); ++i) {
+    uint8_t byte = static_cast<uint8_t>(buffer[i]);
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (byte == 0x1B) {
+      escaped = true;
+      continue;
+    }
+    if (byte == '\r') {
+      lines.push_back({buffer.substr(line_start, i - line_start), true});
+      if (i + 1 < buffer.size() && static_cast<uint8_t>(buffer[i + 1]) == '\n') {
+        ++i;
+      }
+      line_start = i + 1;
+    }
+  }
+  if (line_start < buffer.size()) {
+    lines.push_back({buffer.substr(line_start), false});
+  }
+  return lines;
+}
+
 std::vector<std::string> split_inner_transport_frames(const std::string &buffer) {
   std::vector<std::string> frames;
   size_t frame_start = std::string::npos;
@@ -355,6 +388,14 @@ std::string lower_trimmed_transport_payload(const std::string &line) {
   std::transform(lower.begin(), lower.end(), lower.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   return lower;
+}
+
+bool payload_starts_with_ci(const std::string &line, const std::string &prefix) {
+  std::string lower = lower_trimmed_transport_payload(line);
+  std::string expected = prefix;
+  std::transform(expected.begin(), expected.end(), expected.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return lower.rfind(expected, 0) == 0;
 }
 
 std::string transport_payload_log_text(const std::string &line) {
@@ -1283,6 +1324,9 @@ void JuraComponent::setup() {
   }
   if (this->xml_session_probe_) {
     ESP_LOGI(TAG, "xml_session_probe_enabled variant=%s", this->xml_session_probe_variant_.c_str());
+    if (this->xml_session_probe_variant_ == "dongle_full") {
+      ESP_LOGW(TAG, "xml_session_probe variant=dongle_full is experimental and may disturb the machine session");
+    }
   }
   if (this->enable_xml_poll_) {
     this->ensure_xml_mapping_loaded_();
@@ -3353,9 +3397,9 @@ const char *JuraComponent::xml_command_probe_command_(size_t index) const {
   return index < (sizeof(UNLOCKED_COMMANDS) / sizeof(UNLOCKED_COMMANDS[0])) ? UNLOCKED_COMMANDS[index] : nullptr;
 }
 
-const char *JuraComponent::classify_xml_probe_response_(const std::string &response) const {
+const char *JuraComponent::classify_xml_probe_response_(const std::string &response, bool line_complete) const {
   if (response.empty()) {
-    return "timeout";
+    return line_complete ? "crlf_only" : "timeout";
   }
   uint8_t first = static_cast<uint8_t>(response.front());
   std::string lower = to_lower_copy(response);
@@ -3366,16 +3410,13 @@ const char *JuraComponent::classify_xml_probe_response_(const std::string &respo
   if (lower.rfind("ty:", 0) == 0) {
     return "ascii_ty";
   }
-  if (lower.rfind("ok", 0) == 0) {
-    return "ascii_ok";
-  }
   if (first == 0x26) {
-    if (!has_unescaped_inner_transport_cr(response)) {
+    if (!line_complete && !has_unescaped_inner_transport_cr(response)) {
       return "binary_26_incomplete";
     }
     return "binary_26";
   }
-  return "binary_other";
+  return "unknown";
 }
 
 void JuraComponent::send_xml_command_probe_command_(const std::string &command, uint32_t now) {
@@ -3401,33 +3442,61 @@ void JuraComponent::send_xml_command_probe_command_(const std::string &command, 
 }
 
 void JuraComponent::finish_xml_command_probe_step_(const std::string &command, uint32_t now) {
-  const char *response_class = classify_xml_probe_response_(this->xml_command_probe_rx_buffer_);
-  ESP_LOGD(TAG, "xml_probe_rx cmd=%s class=%s len=%u hex=\"%s\"", command.c_str(), response_class,
-           static_cast<unsigned>(this->xml_command_probe_rx_buffer_.size()),
-           compact_hex_string(this->xml_command_probe_rx_buffer_, this->xml_command_probe_rx_buffer_.size()).c_str());
-  if (!this->xml_command_probe_rx_buffer_.empty() && this->is_printable_status_text_(this->xml_command_probe_rx_buffer_)) {
-    ESP_LOGD(TAG, "xml_probe_ascii cmd=%s ascii=\"%s\"", command.c_str(),
-             sanitize_text_for_api(this->xml_command_probe_rx_buffer_).c_str());
-  }
-  if (!this->xml_command_probe_rx_buffer_.empty() &&
-      static_cast<uint8_t>(this->xml_command_probe_rx_buffer_.front()) == 0x26 &&
-      this->xml_decode_inner_transport_) {
-    bool complete_inner_frame = has_unescaped_inner_transport_cr(this->xml_command_probe_rx_buffer_);
-    std::vector<InnerTransportDecodeResult> candidates =
-        decode_inner_transport_candidates(this->xml_command_probe_rx_buffer_);
-    if (!candidates.empty() && !candidates.front().payload.empty()) {
-      const auto &decoded = candidates.front();
-      const char *decoded_class = classify_decoded_inner_response(decoded.payload);
-      if (complete_inner_frame) {
-        ESP_LOGD(TAG, "xml_probe_inner cmd=%s decoded=\"%s\"", command.c_str(),
-                 transport_payload_log_text(decoded.payload).c_str());
-        ESP_LOGD(TAG, "xml_probe_class cmd=%s decoded_class=%s", command.c_str(), decoded_class);
-      } else {
-        ESP_LOGD(TAG, "xml_probe_inner_partial cmd=%s decoded=\"%s\"", command.c_str(),
-                 transport_payload_log_text(decoded.payload).c_str());
+  std::vector<ProbeRxLine> lines = split_probe_rx_lines(this->xml_command_probe_rx_buffer_);
+  bool saw_useful = false;
+  bool saw_tf = false;
+  bool saw_unmatched = false;
+  for (size_t i = 0; i < lines.size(); ++i) {
+    const auto &rx_line = lines[i];
+    const char *response_class = classify_xml_probe_response_(rx_line.data, rx_line.complete);
+    ESP_LOGD(TAG, "xml_probe_rx_line cmd=%s idx=%u class=%s hex=\"%s\"", command.c_str(),
+             static_cast<unsigned>(i), response_class,
+             compact_hex_string(rx_line.data, rx_line.data.size()).c_str());
+
+    bool matched = false;
+    std::string decoded_or_ascii;
+    if (!rx_line.data.empty() && this->is_printable_status_text_(rx_line.data)) {
+      decoded_or_ascii = sanitize_text_for_api(rx_line.data);
+      ESP_LOGD(TAG, "xml_probe_ascii cmd=%s idx=%u ascii=\"%s\"", command.c_str(), static_cast<unsigned>(i),
+               decoded_or_ascii.c_str());
+      matched = this->xml_session_probe_expected_match_(command, rx_line.data);
+    }
+
+    if (!rx_line.data.empty() && static_cast<uint8_t>(rx_line.data.front()) == 0x26 &&
+        this->xml_decode_inner_transport_) {
+      std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(rx_line.data);
+      if (!candidates.empty() && !candidates.front().payload.empty()) {
+        const auto &decoded = candidates.front();
+        decoded_or_ascii = transport_payload_log_text(decoded.payload);
+        const char *decoded_class = classify_decoded_inner_response(decoded.payload);
+        if (rx_line.complete) {
+          ESP_LOGD(TAG, "xml_probe_inner cmd=%s idx=%u decoded=\"%s\"", command.c_str(), static_cast<unsigned>(i),
+                   decoded_or_ascii.c_str());
+          ESP_LOGD(TAG, "xml_probe_class cmd=%s idx=%u decoded_class=%s", command.c_str(),
+                   static_cast<unsigned>(i), decoded_class);
+          if (std::strcmp(decoded_class, "tf_response") == 0) {
+            saw_tf = true;
+          }
+          matched = this->xml_session_probe_expected_match_(command, decoded.payload);
+        } else {
+          ESP_LOGD(TAG, "xml_probe_inner_partial cmd=%s idx=%u decoded=\"%s\"", command.c_str(),
+                   static_cast<unsigned>(i), decoded_or_ascii.c_str());
+        }
       }
     }
+
+    if (matched) {
+      saw_useful = true;
+    } else if (std::strcmp(response_class, "crlf_only") != 0) {
+      saw_unmatched = true;
+      ESP_LOGD(TAG, "xml_probe_rx_unmatched cmd=%s idx=%u decoded_or_ascii=\"%s\"", command.c_str(),
+               static_cast<unsigned>(i), decoded_or_ascii.empty() ? "" : decoded_or_ascii.c_str());
+    }
   }
+  const char *result = saw_useful ? "useful_response"
+                                  : (saw_tf ? "tf_response" : (lines.empty() ? "timeout" : "unmatched_only"));
+  ESP_LOGD(TAG, "xml_probe_result cmd=%s result=%s lines=%u unmatched=%s", command.c_str(), result,
+           static_cast<unsigned>(lines.size()), YESNO(saw_unmatched));
   this->xml_command_probe_rx_buffer_.clear();
   this->xml_command_probe_current_cmd_.clear();
   this->xml_command_probe_deadline_ms_ = 0;
@@ -3545,6 +3614,9 @@ void JuraComponent::start_xml_session_probe_(uint32_t now) {
   this->xml_session_probe_deadline_ms_ = 0;
   this->xml_session_probe_timeouts_ = 0;
   ESP_LOGD(TAG, "xml_session_start variant=%s", this->xml_session_probe_variant_.c_str());
+  if (this->xml_session_probe_variant_ == "dongle_full") {
+    ESP_LOGD(TAG, "xml_session_variant variant=dongle_full experimental=true");
+  }
   (void) now;
 }
 
@@ -3610,6 +3682,35 @@ const char *JuraComponent::classify_xml_session_decoded_response_(const std::str
   return "unknown";
 }
 
+bool JuraComponent::xml_session_probe_expected_match_(const std::string &command,
+                                                      const std::string &response) const {
+  std::string cmd = lower_trimmed_transport_payload(command);
+  if (cmd == "ty:") {
+    return payload_starts_with_ci(response, "ty:");
+  }
+  if (cmd == "@t1") {
+    return payload_starts_with_ci(response, "@t1");
+  }
+  if (cmd == "@t3") {
+    return payload_starts_with_ci(response, "@t3");
+  }
+  if (cmd == "@ts:00" || cmd == "@ts:01") {
+    return payload_starts_with_ci(response, "@ts") || payload_starts_with_ci(response, "ok");
+  }
+  if (cmd == "@tr:37") {
+    return payload_starts_with_ci(response, "@tr:37");
+  }
+  if (cmd.rfind("@tr:32,", 0) == 0) {
+    std::string expected = "@tr:32," + cmd.substr(std::strlen("@tr:32,"));
+    return payload_starts_with_ci(response, expected);
+  }
+  if (cmd.rfind("@tg:", 0) == 0) {
+    std::string expected = "@tg:" + cmd.substr(std::strlen("@tg:"));
+    return payload_starts_with_ci(response, expected);
+  }
+  return false;
+}
+
 void JuraComponent::send_xml_session_probe_command_(const std::string &command, uint32_t now) {
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     this->finish_xml_session_probe_cycle_(now, "failed", "controller_not_ready");
@@ -3634,48 +3735,91 @@ void JuraComponent::send_xml_session_probe_command_(const std::string &command, 
 }
 
 void JuraComponent::finish_xml_session_probe_step_(const std::string &command, uint32_t now) {
-  const bool timed_out = this->xml_session_probe_rx_buffer_.empty();
-  const char *response_class = classify_xml_probe_response_(this->xml_session_probe_rx_buffer_);
-  ESP_LOGD(TAG, "xml_session_rx variant=%s cmd=%s class=%s len=%u hex=\"%s\"",
-           this->xml_session_probe_variant_.c_str(), command.c_str(), response_class,
-           static_cast<unsigned>(this->xml_session_probe_rx_buffer_.size()),
-           compact_hex_string(this->xml_session_probe_rx_buffer_, this->xml_session_probe_rx_buffer_.size()).c_str());
-  if (!this->xml_session_probe_rx_buffer_.empty() &&
-      this->is_printable_status_text_(this->xml_session_probe_rx_buffer_)) {
-    ESP_LOGD(TAG, "xml_session_ascii variant=%s cmd=%s ascii=\"%s\"", this->xml_session_probe_variant_.c_str(),
-             command.c_str(), sanitize_text_for_api(this->xml_session_probe_rx_buffer_).c_str());
-    ESP_LOGD(TAG, "xml_session_class variant=%s cmd=%s decoded_class=%s",
-             this->xml_session_probe_variant_.c_str(), command.c_str(),
-             this->classify_xml_session_decoded_response_(this->xml_session_probe_rx_buffer_));
-  }
+  std::vector<ProbeRxLine> lines = split_probe_rx_lines(this->xml_session_probe_rx_buffer_);
+  const bool timed_out = lines.empty();
+  bool saw_useful = false;
+  bool saw_tf = false;
+  bool saw_unmatched = false;
+  bool abort_unexpected_handshake = false;
 
-  if (!this->xml_session_probe_rx_buffer_.empty() &&
-      static_cast<uint8_t>(this->xml_session_probe_rx_buffer_.front()) == 0x26 &&
-      this->xml_decode_inner_transport_) {
-    const bool complete_inner_frame = has_unescaped_inner_transport_cr(this->xml_session_probe_rx_buffer_);
-    std::vector<InnerTransportDecodeResult> candidates =
-        decode_inner_transport_candidates(this->xml_session_probe_rx_buffer_);
-    if (!candidates.empty() && !candidates.front().payload.empty()) {
-      const auto &decoded = candidates.front();
-      const char *decoded_class = this->classify_xml_session_decoded_response_(decoded.payload);
-      if (complete_inner_frame) {
-        ESP_LOGD(TAG, "xml_session_inner variant=%s cmd=%s decoded=\"%s\"",
-                 this->xml_session_probe_variant_.c_str(), command.c_str(),
-                 transport_payload_log_text(decoded.payload).c_str());
-        ESP_LOGD(TAG, "xml_session_class variant=%s cmd=%s decoded_class=%s",
-                 this->xml_session_probe_variant_.c_str(), command.c_str(), decoded_class);
-      } else {
-        ESP_LOGD(TAG, "xml_session_inner_partial variant=%s cmd=%s decoded=\"%s\"",
-                 this->xml_session_probe_variant_.c_str(), command.c_str(),
-                 transport_payload_log_text(decoded.payload).c_str());
+  for (size_t i = 0; i < lines.size(); ++i) {
+    const auto &rx_line = lines[i];
+    const char *response_class = classify_xml_probe_response_(rx_line.data, rx_line.complete);
+    ESP_LOGD(TAG, "xml_session_rx_line variant=%s cmd=%s idx=%u class=%s hex=\"%s\"",
+             this->xml_session_probe_variant_.c_str(), command.c_str(), static_cast<unsigned>(i), response_class,
+             compact_hex_string(rx_line.data, rx_line.data.size()).c_str());
+
+    bool matched = false;
+    std::string decoded_or_ascii;
+    const char *decoded_class = "unknown";
+    if (!rx_line.data.empty() && this->is_printable_status_text_(rx_line.data)) {
+      decoded_or_ascii = sanitize_text_for_api(rx_line.data);
+      decoded_class = this->classify_xml_session_decoded_response_(rx_line.data);
+      ESP_LOGD(TAG, "xml_session_ascii variant=%s cmd=%s idx=%u ascii=\"%s\"",
+               this->xml_session_probe_variant_.c_str(), command.c_str(), static_cast<unsigned>(i),
+               decoded_or_ascii.c_str());
+      ESP_LOGD(TAG, "xml_session_class variant=%s cmd=%s idx=%u decoded_class=%s",
+               this->xml_session_probe_variant_.c_str(), command.c_str(), static_cast<unsigned>(i), decoded_class);
+      matched = this->xml_session_probe_expected_match_(command, rx_line.data);
+    }
+
+    if (!rx_line.data.empty() && static_cast<uint8_t>(rx_line.data.front()) == 0x26 &&
+        this->xml_decode_inner_transport_) {
+      std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(rx_line.data);
+      if (!candidates.empty() && !candidates.front().payload.empty()) {
+        const auto &decoded = candidates.front();
+        decoded_or_ascii = transport_payload_log_text(decoded.payload);
+        decoded_class = this->classify_xml_session_decoded_response_(decoded.payload);
+        if (rx_line.complete) {
+          ESP_LOGD(TAG, "xml_session_inner variant=%s cmd=%s idx=%u decoded=\"%s\"",
+                   this->xml_session_probe_variant_.c_str(), command.c_str(), static_cast<unsigned>(i),
+                   decoded_or_ascii.c_str());
+          ESP_LOGD(TAG, "xml_session_class variant=%s cmd=%s idx=%u decoded_class=%s",
+                   this->xml_session_probe_variant_.c_str(), command.c_str(), static_cast<unsigned>(i),
+                   decoded_class);
+          if (std::strcmp(decoded_class, "tf_response") == 0) {
+            saw_tf = true;
+          }
+          matched = this->xml_session_probe_expected_match_(command, decoded.payload);
+        } else {
+          ESP_LOGD(TAG, "xml_session_inner_partial variant=%s cmd=%s idx=%u decoded=\"%s\"",
+                   this->xml_session_probe_variant_.c_str(), command.c_str(), static_cast<unsigned>(i),
+                   decoded_or_ascii.c_str());
+        }
+      }
+    }
+
+    if (matched) {
+      saw_useful = true;
+    } else if (std::strcmp(response_class, "crlf_only") != 0) {
+      saw_unmatched = true;
+      ESP_LOGD(TAG, "xml_session_rx_unmatched variant=%s cmd=%s idx=%u decoded_or_ascii=\"%s\"",
+               this->xml_session_probe_variant_.c_str(), command.c_str(), static_cast<unsigned>(i),
+               decoded_or_ascii.empty() ? "" : decoded_or_ascii.c_str());
+      if (std::strcmp(decoded_class, "handshake_response") == 0 &&
+          !this->xml_session_probe_expected_match_(command, decoded_or_ascii)) {
+        abort_unexpected_handshake = true;
       }
     }
   }
+
+  const char *result = saw_useful ? "useful_response"
+                                  : (saw_tf ? "tf_response" : (timed_out ? "timeout" : "unmatched_only"));
+  ESP_LOGD(TAG, "xml_session_result variant=%s cmd=%s result=%s lines=%u unmatched=%s",
+           this->xml_session_probe_variant_.c_str(), command.c_str(), result, static_cast<unsigned>(lines.size()),
+           YESNO(saw_unmatched));
 
   if (timed_out) {
     ++this->xml_session_probe_timeouts_;
   } else {
     this->xml_session_probe_timeouts_ = 0;
+  }
+
+  if (abort_unexpected_handshake) {
+    ESP_LOGD(TAG, "xml_session_abort reason=unexpected_handshake_response variant=%s",
+             this->xml_session_probe_variant_.c_str());
+    this->finish_xml_session_probe_cycle_(now, "failed", "unexpected_handshake_response");
+    return;
   }
 
   this->xml_session_probe_rx_buffer_.clear();

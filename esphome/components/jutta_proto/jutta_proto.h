@@ -316,7 +316,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   size_t xml_command_probe_command_count_() const;
   void send_xml_command_probe_command_(const std::string &command, uint32_t now);
   void finish_xml_command_probe_step_(const std::string &command, uint32_t now);
-  const char *classify_xml_probe_response_(const std::string &response) const;
+  const char *classify_xml_probe_response_(const std::string &response, bool line_complete = false) const;
   void process_xml_session_probe_scheduler_(uint32_t now);
   void log_xml_session_probe_wait_(const char *reason, const char *owner = nullptr);
   bool process_xml_session_probe_(uint32_t now);
@@ -327,6 +327,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void send_xml_session_probe_command_(const std::string &command, uint32_t now);
   void finish_xml_session_probe_step_(const std::string &command, uint32_t now);
   const char *classify_xml_session_decoded_response_(const std::string &response) const;
+  bool xml_session_probe_expected_match_(const std::string &command, const std::string &response) const;
   void finish_xml_session_probe_cycle_(uint32_t now, const char *result, const char *reason = nullptr);
   bool ensure_xml_mapping_loaded_();
   void log_xml_mapping_status_(bool force = false);
