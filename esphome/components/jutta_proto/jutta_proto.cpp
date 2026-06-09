@@ -1777,9 +1777,15 @@ void JuraComponent::process_handshake() {
                                                                   const char *parser_branch) {
       this->handle_decoded_response_(response, parser_branch);
     });
-    ESP_LOGI(TAG, "Coffee maker controller initialized.");
-    this->reset_xml_poll_state_();
-  }
+      ESP_LOGI(TAG, "Coffee maker controller initialized.");
+      this->reset_xml_poll_state_();
+
+      if (this->xml_dongle_startup_) {
+        this->stats_session_ready_ = false;
+        this->dongle_startup_state_ = DongleStartupState::IDLE;
+        this->dongle_startup_next_retry_ms_ = esphome::millis() + 10000;
+        ESP_LOGD(TAG, "dongle_startup_delayed_after_controller_init delay_ms=10000");
+      }
 }
 
 void JuraComponent::restart_handshake(const char *reason) {
@@ -4677,40 +4683,17 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       }
       return false;
 
-      case DongleStartupState::READY:
-        if (!this->stats_session_ready_) {
-          this->stats_session_ready_ = true;
-          this->stats_inner_tx_required_ = true;
-          this->post_gate_tx_ready_event_ = true;
-
-          ESP_LOGD(TAG, "dongle_startup_ready events=0x%02X all_events=0x%02X",
-                   static_cast<unsigned>(this->dongle_events_ & DONGLE_STARTUP_READY_MASK),
-                   static_cast<unsigned>(this->dongle_events_));
-          ESP_LOGD(TAG, "post_gate_transport_enabled inner_tx=YES flags_equiv=0x90");
-
-          if (this->enable_xml_poll_) {
-            this->xml_state_ = XmlPollState::IDLE;
-            this->xml_deadline_ms_ = 0;
-            this->xml_next_action_ms_ = 0;
-            this->xml_inflight_ = false;
-            this->xml_stats_capture_start_ms_ = 0;
-            this->xml_stats_binary_response_ = false;
-            this->xml_stats_reject_reason_.clear();
-            this->xml_stats_reject_decoded_.clear();
-            this->xml_rx_line_.clear();
-            this->xml_rx_buffer_.clear();
-            this->xml_last_command_.clear();
-            this->xml_expected_prefix_.clear();
-            this->clear_db_transaction_(DbTransactionOwner::XML_POLL);
-
-            this->xml_next_poll_ = now + this->xml_startup_delay_ms_;
-
-            ESP_LOGD(TAG, "stats_poll_scheduled_after_dongle_ready delay_ms=%u next_in_ms=%u",
-                     static_cast<unsigned>(this->xml_startup_delay_ms_),
-                     static_cast<unsigned>(this->xml_startup_delay_ms_));
-          }
-        }
-        return true;
+    case DongleStartupState::READY:
+      if (!this->stats_session_ready_) {
+        this->stats_session_ready_ = true;
+        this->stats_inner_tx_required_ = true;
+        this->post_gate_tx_ready_event_ = true;
+        ESP_LOGD(TAG, "dongle_startup_ready events=0x%02X all_events=0x%02X",
+                 static_cast<unsigned>(this->dongle_events_ & DONGLE_STARTUP_READY_MASK),
+                 static_cast<unsigned>(this->dongle_events_));
+        ESP_LOGD(TAG, "post_gate_transport_enabled inner_tx=YES flags_equiv=0x90");
+      }
+      return true;
 
     case DongleStartupState::FAILED:
       if (this->dongle_startup_next_retry_ms_ != 0 && time_reached(now, this->dongle_startup_next_retry_ms_)) {
