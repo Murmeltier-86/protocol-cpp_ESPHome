@@ -1786,6 +1786,7 @@ void JuraComponent::process_handshake() {
         this->dongle_startup_next_retry_ms_ = esphome::millis() + 10000;
         ESP_LOGD(TAG, "dongle_startup_delayed_after_controller_init delay_ms=10000");
       }
+  }
 }
 
 void JuraComponent::restart_handshake(const char *reason) {
