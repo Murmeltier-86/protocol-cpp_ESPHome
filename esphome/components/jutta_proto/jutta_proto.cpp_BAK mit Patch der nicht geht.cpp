@@ -1777,8 +1777,15 @@ void JuraComponent::process_handshake() {
                                                                   const char *parser_branch) {
       this->handle_decoded_response_(response, parser_branch);
     });
-    ESP_LOGI(TAG, "Coffee maker controller initialized.");
-    this->reset_xml_poll_state_();
+      ESP_LOGI(TAG, "Coffee maker controller initialized.");
+      this->reset_xml_poll_state_();
+
+      if (this->xml_dongle_startup_) {
+        this->stats_session_ready_ = false;
+        this->dongle_startup_state_ = DongleStartupState::IDLE;
+        this->dongle_startup_next_retry_ms_ = esphome::millis() + 10000;
+        ESP_LOGD(TAG, "dongle_startup_delayed_after_controller_init delay_ms=10000");
+      }
   }
 }
 
