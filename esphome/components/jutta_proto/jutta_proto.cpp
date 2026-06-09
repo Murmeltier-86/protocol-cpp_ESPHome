@@ -39,12 +39,14 @@ constexpr uint32_t kPostGateControlTimeoutMs = 1000;
 constexpr uint32_t kTabletSeqRxWindowMs = 1500;
 constexpr size_t kTabletSeqMaxRxBytes = 256;
 constexpr uint32_t kInterCmdGapMs = 250;
+constexpr uint32_t kStatsRetryDelayMs = 1200;
 constexpr uint32_t kXmlQuietMs = 120;
 constexpr uint32_t kCycleSleepMs = 2000;
 constexpr uint8_t kTr32PageCount = 16;
 constexpr uint8_t kTr32ProductsPerPage = 4;
 constexpr uint8_t kTr32BytesPerProduct = 2;
 constexpr uint8_t kStatsMaxConsecutiveFailures = 4;
+constexpr uint8_t kStatsMaxRetries = 2;
 constexpr uint32_t kDongleStartupProbeDelayMs = 250;
 constexpr uint32_t kDongleStartupTimeoutMs = 1500;
 constexpr uint32_t kDongleStartupT0AfterT3TimeoutMs = 5000;
@@ -120,8 +122,8 @@ std::string sanitize_text_for_api(const std::string &input) {
       out.push_back(static_cast<char>(c));
       continue;
     }
-    if (c == '    ') {
-      out.push_back('    ');
+    if (c == '\t') {
+      out.push_back(' ');
       continue;
     }
     out.push_back('\\');
@@ -2599,6 +2601,8 @@ void JuraComponent::start_new_xml_cycle_(uint32_t now) {
   this->xml_tr32_pages_ok_ = 0;
   this->xml_tg43_ok_ = false;
   this->xml_tgc0_ok_ = false;
+  this->xml_tgc0_timeout_streak_ = 0;
+  this->xml_skip_tgc0_ = false;
   this->xml_retry_count_.fill(0);
   this->xml_invalid_len_seen_.fill(false);
   this->xml_last_invalid_len_.fill(0);
@@ -2625,18 +2629,28 @@ void JuraComponent::start_new_xml_cycle_(uint32_t now) {
 
 size_t JuraComponent::xml_command_index_(XmlPollState state) const {
   switch (state) {
+    case XmlPollState::TS_LOCK:
+    case XmlPollState::WAIT_TS_LOCK:
+      return 0;
+    case XmlPollState::TR32_PAGE:
+    case XmlPollState::WAIT_TR32_PAGE:
     case XmlPollState::SEND_TR32:
     case XmlPollState::WAIT_TR32:
     case XmlPollState::PARSE_TR32:
-      return 0;
+      return 1;
+    case XmlPollState::TG43:
     case XmlPollState::SEND_TG43:
     case XmlPollState::WAIT_TG43:
     case XmlPollState::PARSE_TG43:
-      return 1;
+      return 2;
+    case XmlPollState::TGC0:
     case XmlPollState::SEND_TGC0:
     case XmlPollState::WAIT_TGC0:
     case XmlPollState::PARSE_TGC0:
-      return 2;
+      return 3;
+    case XmlPollState::TS_UNLOCK:
+    case XmlPollState::WAIT_TS_UNLOCK:
+      return 4;
     default:
       break;
   }
@@ -3009,8 +3023,7 @@ void JuraComponent::handle_xml_failure_(XmlPollState wait_state, bool is_timeout
       this->xml_tgc0_timeout_streak_ += 1;
     }
     if (this->xml_tgc0_timeout_streak_ >= 3) {
-      ESP_LOGW(TAG, "XML @TG:C0 drei Timeouts – überspringe nächsten Versuch");
-      this->xml_skip_tgc0_ = true;
+      ESP_LOGW(TAG, "XML @TG:C0 drei Timeouts – nächster Zyklus versucht @TG:C0 trotzdem erneut");
       this->xml_tgc0_timeout_streak_ = 0;
     }
   }
@@ -4852,10 +4865,8 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         return;
       }
       if (this->xml_skip_tgc0_) {
-        ESP_LOGW(TAG, "XML @TG:C0 übersprungen (Timeout-Streak)");
+        ESP_LOGD(TAG, "XML @TG:C0 Timeout-Streak zurückgesetzt; Befehl wird trotzdem abgefragt");
         this->xml_skip_tgc0_ = false;
-        this->transition_to_state_(XmlPollState::TS_UNLOCK, now, kInterCmdGapMs);
-        return;
       }
       if (!this->xml_state_has_mapping_(XmlPollState::TGC0)) {
         this->transition_to_state_(this->xml_stats_use_ts_lock_ ? XmlPollState::TS_UNLOCK : XmlPollState::DONE, now,
@@ -4900,17 +4911,6 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
                    static_cast<unsigned>(waited_ms));
         }
         ESP_LOGD(TAG, "stats_timeout cmd=%s", this->xml_last_command_.c_str());
-        if (this->xml_state_ == XmlPollState::WAIT_TGC0) {
-          if (this->xml_tgc0_timeout_streak_ < std::numeric_limits<uint8_t>::max()) {
-            this->xml_tgc0_timeout_streak_ += 1;
-          }
-          if (this->xml_tgc0_timeout_streak_ >= 3) {
-            ESP_LOGW(TAG, "XML @TG:C0 drei Timeouts – überspringe nächsten Versuch");
-            this->xml_skip_tgc0_ = true;
-            this->xml_tgc0_timeout_streak_ = 0;
-          }
-        }
-        this->xml_cycle_failed_ = true;
         this->xml_inflight_ = false;
         this->xml_deadline_ms_ = 0;
         this->xml_rx_line_.clear();
@@ -5921,9 +5921,11 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
       if (lower.rfind(expected, 0) != 0) {
         if (lower.rfind("@tf", 0) == 0) {
           this->publish_tf_status_(line);
+          this->xml_stats_reject_reason_ = "tf_status";
           ESP_LOGD(TAG, "post_gate_rx_unmatched cmd=%s decoded_or_ascii=\"%s\" class=tf_status",
                    this->xml_last_command_.c_str(), sanitize_text_for_api(line).c_str());
         } else {
+          this->xml_stats_reject_reason_ = "unexpected_response";
           ESP_LOGD(TAG, "post_gate_rx_unmatched cmd=%s decoded_or_ascii=\"%s\"",
                    this->xml_last_command_.c_str(), sanitize_text_for_api(line).c_str());
         }
@@ -5954,6 +5956,7 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
       if (lower.rfind("@ts", 0) == 0 || lower == "ok") {
         ESP_LOGV(TAG, "stats_parse cmd=@TS:01 payload=lock_ack");
         this->xml_stats_locked_ = true;
+        this->complete_command_success_(this->xml_state_);
         this->xml_inflight_ = false;
         if (post_gate) {
           this->post_gate_tx_ready_event_ = true;
@@ -5964,12 +5967,14 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
       }
       ESP_LOGD(TAG, "stats_reject cmd=@TS:01 reason=unexpected_response raw='%s'",
                sanitize_text_for_api(line).c_str());
+      this->xml_stats_reject_reason_ = "unexpected_response";
       return false;
 
     case XmlPollState::WAIT_TR32_PAGE:
       if (lower.rfind("@tr:32", 0) == 0 || lower.rfind("@tr:00", 0) == 0) {
         parsed = this->parse_tr32_page_line_(line, this->xml_tr32_page_);
         if (parsed) {
+          this->complete_command_success_(this->xml_state_);
           this->xml_stats_consecutive_failures_ = 0;
           if (this->xml_tr32_pages_ok_ < std::numeric_limits<uint8_t>::max()) {
             ++this->xml_tr32_pages_ok_;
@@ -5977,10 +5982,16 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
           this->publish_xml_stats_();
           this->xml_stats_.clear();
         } else {
-          this->xml_cycle_failed_ = true;
           if (this->xml_stats_consecutive_failures_ < std::numeric_limits<uint8_t>::max()) {
             ++this->xml_stats_consecutive_failures_;
           }
+          this->xml_inflight_ = false;
+          if (post_gate) {
+            this->post_gate_tx_ready_event_ = true;
+          }
+          this->xml_deadline_ms_ = 0;
+          this->retry_stats_command_or_advance_(this->xml_state_, "parse_failed", now);
+          return false;
         }
         this->xml_inflight_ = false;
         if (post_gate) {
@@ -6001,6 +6012,7 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
       }
       ESP_LOGD(TAG, "stats_reject cmd=%s reason=unexpected_response raw='%s'", this->xml_last_command_.c_str(),
                sanitize_text_for_api(line).c_str());
+      this->xml_stats_reject_reason_ = "unexpected_response";
       return false;
 
     case XmlPollState::WAIT_TG43:
@@ -6008,14 +6020,22 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
         this->xml_stats_.clear();
         parsed = this->parse_tg43_line_(line);
         if (parsed) {
+          this->complete_command_success_(this->xml_state_);
           this->xml_stats_consecutive_failures_ = 0;
           this->xml_tg43_ok_ = true;
           this->publish_xml_stats_();
         } else {
-          this->xml_cycle_failed_ = true;
           if (this->xml_stats_consecutive_failures_ < std::numeric_limits<uint8_t>::max()) {
             ++this->xml_stats_consecutive_failures_;
           }
+          this->xml_stats_.clear();
+          this->xml_inflight_ = false;
+          if (post_gate) {
+            this->post_gate_tx_ready_event_ = true;
+          }
+          this->xml_deadline_ms_ = 0;
+          this->retry_stats_command_or_advance_(this->xml_state_, "parse_failed", now);
+          return false;
         }
         this->xml_stats_.clear();
         this->xml_inflight_ = false;
@@ -6028,6 +6048,7 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
       }
       ESP_LOGD(TAG, "stats_reject cmd=@TG:43 reason=unexpected_response raw='%s'",
                sanitize_text_for_api(line).c_str());
+      this->xml_stats_reject_reason_ = "unexpected_response";
       return false;
 
     case XmlPollState::WAIT_TGC0:
@@ -6035,15 +6056,23 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
         this->xml_stats_.clear();
         parsed = this->parse_tgc0_line_(line);
         if (parsed) {
+          this->complete_command_success_(this->xml_state_);
           this->xml_stats_consecutive_failures_ = 0;
           this->xml_tgc0_timeout_streak_ = 0;
           this->xml_tgc0_ok_ = true;
           this->publish_xml_stats_();
         } else {
-          this->xml_cycle_failed_ = true;
           if (this->xml_stats_consecutive_failures_ < std::numeric_limits<uint8_t>::max()) {
             ++this->xml_stats_consecutive_failures_;
           }
+          this->xml_stats_.clear();
+          this->xml_inflight_ = false;
+          if (post_gate) {
+            this->post_gate_tx_ready_event_ = true;
+          }
+          this->xml_deadline_ms_ = 0;
+          this->retry_stats_command_or_advance_(this->xml_state_, "parse_failed", now);
+          return false;
         }
         this->xml_stats_.clear();
         this->xml_inflight_ = false;
@@ -6057,11 +6086,13 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
       }
       ESP_LOGD(TAG, "stats_reject cmd=@TG:C0 reason=unexpected_response raw='%s'",
                sanitize_text_for_api(line).c_str());
+      this->xml_stats_reject_reason_ = "unexpected_response";
       return false;
 
     case XmlPollState::WAIT_TS_UNLOCK:
       ESP_LOGV(TAG, "stats_parse cmd=@TS:00 payload=unlock_ack raw='%s'", sanitize_text_for_api(line).c_str());
       this->xml_stats_locked_ = false;
+      this->complete_command_success_(this->xml_state_);
       this->xml_inflight_ = false;
       if (post_gate) {
         this->post_gate_tx_ready_event_ = true;
@@ -6077,12 +6108,131 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
   }
 }
 
+void JuraComponent::reset_stats_attempt_(const char *end_reason) {
+  if (this->stats_inner_tx_required_) {
+    this->post_gate_tx_ready_event_ = true;
+  }
+  this->xml_inflight_ = false;
+  this->xml_deadline_ms_ = 0;
+  this->xml_next_action_ms_ = 0;
+  this->xml_rx_line_.clear();
+  this->xml_rx_buffer_.clear();
+  this->xml_stats_capture_start_ms_ = 0;
+  this->xml_stats_rx_logged_ = false;
+  this->xml_stats_binary_response_ = false;
+  this->xml_stats_reject_reason_.clear();
+  this->xml_stats_reject_decoded_.clear();
+  if (!this->stats_inner_tx_required_ && this->coffee_maker_ != nullptr && this->coffee_maker_->connection != nullptr) {
+    auto *connection = this->coffee_maker_->connection.get();
+    connection->reset_response_line_buffer();
+    connection->reset_db_rx_buffer();
+    connection->drain_serial_input_nonblocking();
+  }
+  this->end_xml_transaction_(end_reason != nullptr && end_reason[0] != '\0' ? end_reason : "stats_attempt_reset");
+  this->xml_last_command_.clear();
+  this->xml_expected_prefix_.clear();
+}
+
+bool JuraComponent::retry_stats_command_or_advance_(XmlPollState wait_state, const char *reason, uint32_t now) {
+  const char *failure_reason = reason != nullptr && reason[0] != '\0' ? reason : "unknown";
+  const size_t index = this->xml_command_index_(wait_state);
+  const uint8_t max_retries = kStatsMaxRetries;
+  const std::string failed_command = this->xml_last_command_;
+
+  if (this->xml_retry_count_[index] < max_retries) {
+    ++this->xml_retry_count_[index];
+    if (wait_state == XmlPollState::WAIT_TR32_PAGE) {
+      ESP_LOGD(TAG, "stats_retry cmd=@TR:32 page=%02X reason=%s attempt=%u/%u",
+               static_cast<unsigned>(this->xml_tr32_page_), failure_reason,
+               static_cast<unsigned>(this->xml_retry_count_[index]), static_cast<unsigned>(max_retries));
+    } else {
+      ESP_LOGD(TAG, "stats_retry cmd=%s reason=%s attempt=%u/%u",
+               failed_command.empty() ? this->xml_state_command_(wait_state) : failed_command.c_str(), failure_reason,
+               static_cast<unsigned>(this->xml_retry_count_[index]), static_cast<unsigned>(max_retries));
+    }
+    this->reset_stats_attempt_("retry");
+    switch (wait_state) {
+      case XmlPollState::WAIT_TS_LOCK:
+        this->transition_to_state_(XmlPollState::TS_LOCK, now, kStatsRetryDelayMs);
+        return true;
+      case XmlPollState::WAIT_TR32_PAGE:
+        this->transition_to_state_(XmlPollState::TR32_PAGE, now, kStatsRetryDelayMs);
+        return true;
+      case XmlPollState::WAIT_TG43:
+        this->transition_to_state_(XmlPollState::TG43, now, kStatsRetryDelayMs);
+        return true;
+      case XmlPollState::WAIT_TGC0:
+        this->transition_to_state_(XmlPollState::TGC0, now, kStatsRetryDelayMs);
+        return true;
+      case XmlPollState::WAIT_TS_UNLOCK:
+        this->transition_to_state_(XmlPollState::TS_UNLOCK, now, kStatsRetryDelayMs);
+        return true;
+      default:
+        break;
+    }
+  }
+
+  this->xml_retry_count_[index] = 0;
+  this->reset_stats_attempt_("retry_exhausted");
+  switch (wait_state) {
+    case XmlPollState::WAIT_TS_LOCK:
+      this->xml_cycle_failed_ = true;
+      ESP_LOGD(TAG, "stats_lock_failed action=abort_cycle reason=%s", failure_reason);
+      this->transition_to_state_(XmlPollState::TS_UNLOCK, now, kInterCmdGapMs);
+      return false;
+
+    case XmlPollState::WAIT_TR32_PAGE:
+      this->xml_cycle_failed_ = true;
+      if (this->xml_stats_consecutive_failures_ < std::numeric_limits<uint8_t>::max()) {
+        ++this->xml_stats_consecutive_failures_;
+      }
+      ESP_LOGD(TAG, "stats_command_failed cmd=@TR:32 page=%02X reason=%s action=skip",
+               static_cast<unsigned>(this->xml_tr32_page_), failure_reason);
+      ++this->xml_tr32_page_;
+      this->transition_to_state_(this->xml_tr32_page_ < kTr32PageCount ? XmlPollState::TR32_PAGE
+                                                                       : XmlPollState::TG43,
+                                 now, kInterCmdGapMs);
+      return false;
+
+    case XmlPollState::WAIT_TG43:
+      this->xml_cycle_failed_ = true;
+      if (this->xml_stats_consecutive_failures_ < std::numeric_limits<uint8_t>::max()) {
+        ++this->xml_stats_consecutive_failures_;
+      }
+      ESP_LOGD(TAG, "stats_command_failed cmd=@TG:43 reason=%s action=skip", failure_reason);
+      this->transition_to_state_(XmlPollState::TGC0, now, kInterCmdGapMs);
+      return false;
+
+    case XmlPollState::WAIT_TGC0:
+      this->xml_cycle_failed_ = true;
+      if (this->xml_stats_consecutive_failures_ < std::numeric_limits<uint8_t>::max()) {
+        ++this->xml_stats_consecutive_failures_;
+      }
+      ESP_LOGD(TAG, "stats_command_failed cmd=@TG:C0 reason=%s action=skip", failure_reason);
+      this->transition_to_state_(this->xml_stats_use_ts_lock_ ? XmlPollState::TS_UNLOCK : XmlPollState::DONE, now,
+                                 kInterCmdGapMs);
+      return false;
+
+    case XmlPollState::WAIT_TS_UNLOCK:
+      this->xml_stats_locked_ = false;
+      ESP_LOGD(TAG, "stats_command_failed cmd=@TS:00 reason=%s action=finish", failure_reason);
+      this->finish_stats_cycle_(now, "unlock_failed");
+      return false;
+
+    default:
+      this->transition_to_state_(this->xml_stats_use_ts_lock_ ? XmlPollState::TS_UNLOCK : XmlPollState::DONE, now,
+                                 kInterCmdGapMs);
+      return false;
+  }
+}
+
 bool JuraComponent::handle_stats_binary_response_(uint32_t now) {
   if (!this->xml_stats_binary_response_) {
     return false;
   }
 
   const char *reason = this->xml_stats_reject_reason_.empty() ? "unexpected_binary" : this->xml_stats_reject_reason_.c_str();
+  std::string reason_text = reason;
   if (!this->xml_stats_reject_decoded_.empty()) {
     ESP_LOGD(TAG, "stats_reject cmd=%s reason=%s decoded=\"%s\"", this->xml_last_command_.c_str(), reason,
              this->xml_stats_reject_decoded_.c_str());
@@ -6092,7 +6242,6 @@ bool JuraComponent::handle_stats_binary_response_(uint32_t now) {
   this->xml_stats_binary_response_ = false;
   this->xml_stats_reject_reason_.clear();
   this->xml_stats_reject_decoded_.clear();
-  this->xml_cycle_failed_ = true;
   this->xml_inflight_ = false;
   if (this->stats_inner_tx_required_) {
     this->post_gate_tx_ready_event_ = true;
@@ -6106,61 +6255,30 @@ bool JuraComponent::handle_stats_binary_response_(uint32_t now) {
     connection->reset_db_rx_buffer();
     connection->drain_serial_input_nonblocking();
   }
-  this->advance_after_stats_reject_(now);
+  this->advance_after_stats_reject_(now, reason_text.c_str());
   return true;
 }
 
-void JuraComponent::advance_after_stats_reject_(uint32_t now) {
+void JuraComponent::advance_after_stats_reject_(uint32_t now, const char *reason) {
   switch (this->xml_state_) {
     case XmlPollState::WAIT_TS_LOCK:
-      if (this->xml_wait_for_ts_ack_) {
-        this->transition_to_state_(XmlPollState::TS_UNLOCK, now, kInterCmdGapMs);
-      } else {
-        this->xml_stats_locked_ = true;
-        this->transition_to_state_(XmlPollState::TR32_PAGE, now, kInterCmdGapMs);
-      }
+      this->retry_stats_command_or_advance_(this->xml_state_, reason, now);
       return;
 
     case XmlPollState::WAIT_TR32_PAGE:
-      if (this->xml_stats_consecutive_failures_ < std::numeric_limits<uint8_t>::max()) {
-        ++this->xml_stats_consecutive_failures_;
-      }
-      if (!this->stats_inner_tx_required_ && this->xml_stats_consecutive_failures_ >= kStatsMaxConsecutiveFailures) {
-        ESP_LOGD(TAG, "stats_reject cmd=@TR:32 reason=too_many_consecutive_failures count=%u",
-                 static_cast<unsigned>(this->xml_stats_consecutive_failures_));
-        this->transition_to_state_(XmlPollState::TS_UNLOCK, now, kInterCmdGapMs);
-        return;
-      }
-      ++this->xml_tr32_page_;
-      this->transition_to_state_(this->xml_tr32_page_ < kTr32PageCount ? XmlPollState::TR32_PAGE
-                                                                       : XmlPollState::TG43,
-                                 now, kInterCmdGapMs);
+      this->retry_stats_command_or_advance_(this->xml_state_, reason, now);
       return;
 
     case XmlPollState::WAIT_TG43:
-      if (this->xml_stats_consecutive_failures_ < std::numeric_limits<uint8_t>::max()) {
-        ++this->xml_stats_consecutive_failures_;
-      }
-      if (!this->stats_inner_tx_required_ && this->xml_stats_consecutive_failures_ >= kStatsMaxConsecutiveFailures) {
-        ESP_LOGD(TAG, "stats_reject cmd=@TG:43 reason=too_many_consecutive_failures count=%u",
-                 static_cast<unsigned>(this->xml_stats_consecutive_failures_));
-        this->transition_to_state_(XmlPollState::TS_UNLOCK, now, kInterCmdGapMs);
-      } else {
-        this->transition_to_state_(XmlPollState::TGC0, now, kInterCmdGapMs);
-      }
+      this->retry_stats_command_or_advance_(this->xml_state_, reason, now);
       return;
 
     case XmlPollState::WAIT_TGC0:
-      if (this->xml_stats_consecutive_failures_ < std::numeric_limits<uint8_t>::max()) {
-        ++this->xml_stats_consecutive_failures_;
-      }
-      this->transition_to_state_(this->xml_stats_use_ts_lock_ ? XmlPollState::TS_UNLOCK : XmlPollState::DONE, now,
-                                 kInterCmdGapMs);
+      this->retry_stats_command_or_advance_(this->xml_state_, reason, now);
       return;
 
     case XmlPollState::WAIT_TS_UNLOCK:
-      this->xml_stats_locked_ = false;
-      this->finish_stats_cycle_(now, "unlock_rejected");
+      this->retry_stats_command_or_advance_(this->xml_state_, reason, now);
       return;
 
     default:
@@ -6171,60 +6289,28 @@ void JuraComponent::advance_after_stats_reject_(uint32_t now) {
 }
 
 void JuraComponent::advance_after_stats_timeout_(uint32_t now) {
+  std::string timeout_reason = this->xml_stats_reject_reason_.empty() ? "timeout" : this->xml_stats_reject_reason_;
   switch (this->xml_state_) {
     case XmlPollState::WAIT_TS_LOCK:
-      if (this->xml_wait_for_ts_ack_) {
-        this->xml_cycle_failed_ = true;
-        ESP_LOGD(TAG, "xml_retry_scheduled cmd=@TS:00 delay_ms=%u", static_cast<unsigned>(kInterCmdGapMs));
-        this->transition_to_state_(XmlPollState::TS_UNLOCK, now, kInterCmdGapMs);
-      } else {
-        this->xml_stats_locked_ = true;
-        this->transition_to_state_(XmlPollState::TR32_PAGE, now, kInterCmdGapMs);
-      }
+      this->retry_stats_command_or_advance_(this->xml_state_, timeout_reason.c_str(), now);
       return;
 
     case XmlPollState::WAIT_TR32_PAGE:
       ESP_LOGD(TAG, "stats_timeout cmd=@TR:32 page=%02X",
                static_cast<unsigned>(this->xml_tr32_page_));
-      if (this->xml_stats_consecutive_failures_ < std::numeric_limits<uint8_t>::max()) {
-        ++this->xml_stats_consecutive_failures_;
-      }
-      if (!this->stats_inner_tx_required_ && this->xml_stats_consecutive_failures_ >= kStatsMaxConsecutiveFailures) {
-        ESP_LOGD(TAG, "stats_reject cmd=@TR:32 reason=too_many_consecutive_failures count=%u",
-                 static_cast<unsigned>(this->xml_stats_consecutive_failures_));
-        this->transition_to_state_(XmlPollState::TS_UNLOCK, now, kInterCmdGapMs);
-        return;
-      }
-      ++this->xml_tr32_page_;
-      this->transition_to_state_(this->xml_tr32_page_ < kTr32PageCount ? XmlPollState::TR32_PAGE
-                                                                       : XmlPollState::TG43,
-                                 now, kInterCmdGapMs);
+      this->retry_stats_command_or_advance_(this->xml_state_, timeout_reason.c_str(), now);
       return;
 
     case XmlPollState::WAIT_TG43:
-      if (this->xml_stats_consecutive_failures_ < std::numeric_limits<uint8_t>::max()) {
-        ++this->xml_stats_consecutive_failures_;
-      }
-      if (!this->stats_inner_tx_required_ && this->xml_stats_consecutive_failures_ >= kStatsMaxConsecutiveFailures) {
-        ESP_LOGD(TAG, "stats_reject cmd=@TG:43 reason=too_many_consecutive_failures count=%u",
-                 static_cast<unsigned>(this->xml_stats_consecutive_failures_));
-        this->transition_to_state_(XmlPollState::TS_UNLOCK, now, kInterCmdGapMs);
-      } else {
-        this->transition_to_state_(XmlPollState::TGC0, now, kInterCmdGapMs);
-      }
+      this->retry_stats_command_or_advance_(this->xml_state_, timeout_reason.c_str(), now);
       return;
 
     case XmlPollState::WAIT_TGC0:
-      if (this->xml_stats_consecutive_failures_ < std::numeric_limits<uint8_t>::max()) {
-        ++this->xml_stats_consecutive_failures_;
-      }
-      this->transition_to_state_(this->xml_stats_use_ts_lock_ ? XmlPollState::TS_UNLOCK : XmlPollState::DONE, now,
-                                 kInterCmdGapMs);
+      this->retry_stats_command_or_advance_(this->xml_state_, timeout_reason.c_str(), now);
       return;
 
     case XmlPollState::WAIT_TS_UNLOCK:
-      this->xml_stats_locked_ = false;
-      this->finish_stats_cycle_(now, "unlock_timeout");
+      this->retry_stats_command_or_advance_(this->xml_state_, timeout_reason.c_str(), now);
       return;
 
     default:
@@ -6502,7 +6588,7 @@ void JuraComponent::finish_stats_cycle_(uint32_t now, const char *reason) {
   bool all_ok = (!tr32_expected || this->xml_tr32_pages_ok_ == kTr32PageCount) &&
                 (!tg43_expected || this->xml_tg43_ok_) &&
                 (!tgc0_expected || this->xml_tgc0_ok_);
-  const char *result = all_ok ? "success" : (any_ok ? "partial" : "failed");
+  const char *result = all_ok ? "ok" : (any_ok ? "partial" : "failed");
   this->end_xml_transaction_(end_reason);
   this->xml_inflight_ = false;
   this->post_gate_tx_ready_event_ = true;
@@ -6518,7 +6604,9 @@ void JuraComponent::finish_stats_cycle_(uint32_t now, const char *reason) {
   this->xml_deadline_ms_ = now + sleep;
   this->xml_next_poll_ = this->xml_deadline_ms_;
   if (!any_ok) {
-    ESP_LOGD(TAG, "stats_cycle_end result=failed reason=no_valid_tr32_pages next_retry_ms=%u",
+    ESP_LOGD(TAG, "stats_cycle_end result=failed reason=no_valid_tr32_pages pages_ok=%u tg43_ok=%s tgc0_ok=%s "
+                  "next_retry_ms=%u",
+             static_cast<unsigned>(this->xml_tr32_pages_ok_), YESNO(this->xml_tg43_ok_), YESNO(this->xml_tgc0_ok_),
              static_cast<unsigned>(sleep));
   } else {
     ESP_LOGD(TAG, "stats_cycle_end result=%s pages_ok=%u tg43_ok=%s tgc0_ok=%s next_retry_ms=%u", result,

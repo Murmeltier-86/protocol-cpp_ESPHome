@@ -450,8 +450,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool decode_stats_inner_transport_line_(const std::string &raw_line, std::string &decoded_line,
                                           bool frame_complete = true);
   bool handle_stats_binary_response_(uint32_t now);
+  void reset_stats_attempt_(const char *end_reason);
+  bool retry_stats_command_or_advance_(XmlPollState wait_state, const char *reason, uint32_t now);
   void advance_after_stats_timeout_(uint32_t now);
-  void advance_after_stats_reject_(uint32_t now);
+  void advance_after_stats_reject_(uint32_t now, const char *reason = nullptr);
   bool parse_tr32_page_line_(const std::string &line, uint8_t expected_page);
   bool parse_tg43_line_(const std::string &line);
   bool parse_tgc0_line_(const std::string &line);
@@ -624,12 +626,12 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::unordered_map<std::string, XmlSensorMeta> xml_sensor_meta_{};
   std::unordered_map<std::string, bool> xml_missing_sensor_logged_{};
   std::unordered_map<std::string, bool> xml_unconfigured_sensor_logged_{};
-  static constexpr size_t XML_COMMAND_COUNT = 3;
-  std::array<uint8_t, XML_COMMAND_COUNT> xml_retry_count_{{0, 0, 0}};
-  std::array<bool, XML_COMMAND_COUNT> xml_invalid_len_seen_{{false, false, false}};
-  std::array<size_t, XML_COMMAND_COUNT> xml_last_invalid_len_{{0, 0, 0}};
+  static constexpr size_t XML_COMMAND_COUNT = 5;
+  std::array<uint8_t, XML_COMMAND_COUNT> xml_retry_count_{};
+  std::array<bool, XML_COMMAND_COUNT> xml_invalid_len_seen_{};
+  std::array<size_t, XML_COMMAND_COUNT> xml_last_invalid_len_{};
   std::array<std::vector<uint8_t>, XML_COMMAND_COUNT> xml_counter_candidate_frame_{};
-  std::array<uint8_t, XML_COMMAND_COUNT> xml_counter_candidate_count_{{0, 0, 0}};
+  std::array<uint8_t, XML_COMMAND_COUNT> xml_counter_candidate_count_{};
   uint8_t xml_tgc0_timeout_streak_{0};
   bool xml_skip_tgc0_{false};
   void prepare_tgc0_request_();
