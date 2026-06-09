@@ -6457,12 +6457,11 @@ bool JuraComponent::parse_tr32_page_line_(const std::string &line, uint8_t expec
   }
   ESP_LOGV(TAG, "stats_parse cmd=@TR:32 page=%02X payload=%s bytes=%s", static_cast<unsigned>(page),
            payload.c_str(), format_hex_string(bytes).c_str());
-    bool any = false;
-    for (uint8_t slot = 0; slot < kTr32ProductsPerPage; ++slot) {
-      size_t byte_offset = slot * kTr32BytesPerProduct;
-      uint16_t value = (static_cast<uint16_t>(bytes[byte_offset]) << 8U) | bytes[byte_offset + 1];
-      uint8_t product_index = page * kTr32ProductsPerPage + slot;
-
+  bool any = false;
+  for (uint8_t slot = 0; slot < kTr32ProductsPerPage; ++slot) {
+    size_t byte_offset = slot * kTr32BytesPerProduct;
+    uint16_t value = (static_cast<uint16_t>(bytes[byte_offset]) << 8U) | bytes[byte_offset + 1];
+    uint8_t product_index = page * kTr32ProductsPerPage + slot;
       if (value == 0xFFFF) {
         ESP_LOGD(TAG, "stats_slot_ignored cmd=@TR:32 page=%02X slot=%u reason=ffff_unavailable",
                  static_cast<unsigned>(page), static_cast<unsigned>(slot));
@@ -6475,21 +6474,12 @@ bool JuraComponent::parse_tr32_page_line_(const std::string &line, uint8_t expec
                  static_cast<unsigned>(this->xml_counter_max_));
         continue;
       }
-
-      std::string label;
-      std::string field = this->product_counter_field_name_(product_index, label);
-      any = this->stage_xml_stat_value_(field, label, static_cast<double>(value), XmlSensorKind::Counter, "@TR:32") || any;
-    }
-
-    // Eine syntaktisch gültige @tr:32-Seite ist auch dann erfolgreich,
-    // wenn alle Slots FFFF sind oder kein Slot in YAML gemappt ist.
-    // FFFF bedeutet leer/unavailable, nicht Command-Fehler.
-    if (!any) {
-      ESP_LOGD(TAG, "stats_page_empty cmd=@TR:32 page=%02X reason=no_publishable_slots action=advance",
-               static_cast<unsigned>(page));
-    }
-    return true;
+    std::string label;
+    std::string field = this->product_counter_field_name_(product_index, label);
+    any = this->stage_xml_stat_value_(field, label, static_cast<double>(value), XmlSensorKind::Counter, "@TR:32") || any;
   }
+  return any;
+}
 
 bool JuraComponent::parse_tg43_line_(const std::string &line) {
   if (this->xml_mapping_.tg43.empty()) {
