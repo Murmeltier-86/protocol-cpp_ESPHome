@@ -644,6 +644,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint8_t xml_tr32_consecutive_failed_pages_{0};
   bool xml_tg43_ok_{false};
   bool xml_tgc0_ok_{false};
+  bool xml_tg_phase_done_{false};
   uint32_t xml_cycle_start_ms_{0};
   uint32_t xml_last_success_ms_{0};
   std::string stats_last_cycle_result_{"idle"};
