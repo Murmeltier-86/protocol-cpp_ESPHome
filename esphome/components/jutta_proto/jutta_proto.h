@@ -249,6 +249,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_counter_max(uint32_t max_value) { this->xml_counter_max_ = max_value; }
   void set_xml_wait_for_ts_ack(bool enabled) { this->xml_wait_for_ts_ack_ = enabled; }
   void set_xml_stats_use_ts_lock(bool enabled) { this->xml_stats_use_ts_lock_ = enabled; }
+  void set_xml_stats_split_maintenance_cycle(bool enabled) { this->xml_stats_split_maintenance_cycle_ = enabled; }
   void set_xml_debug_compact(bool enabled) { this->xml_debug_compact_ = enabled; }
   void set_xml_decode_inner_transport(bool enabled) { this->xml_decode_inner_transport_ = enabled; }
   void set_xml_inner_decode_trace(bool enabled) { this->xml_inner_decode_trace_ = enabled; }
@@ -648,6 +649,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_tg43_ok_{false};
   bool xml_tgc0_ok_{false};
   bool xml_tg_phase_done_{false};
+  bool xml_stats_split_maintenance_cycle_{true};
+  bool xml_maintenance_cycle_pending_{false};
+  bool xml_maintenance_cycle_active_{false};
   size_t xml_command_rx_bytes_{0};
   size_t xml_command_rx_frames_{0};
   std::string xml_command_rx_last_noise_reason_{};
