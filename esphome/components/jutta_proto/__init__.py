@@ -35,6 +35,14 @@ CONF_TF_COFFEE_READY = "tf_coffee_ready"
 CONF_TF_ENERGY_SAFE = "tf_energy_safe"
 CONF_TF_ACTIVE_RF_FILTER = "tf_active_rf_filter"
 CONF_TF_STATUS_BITS = "tf_status_bits"
+CONF_STATS_LAST_CYCLE_RESULT = "stats_last_cycle_result"
+CONF_STATS_LAST_CYCLE_START = "stats_last_cycle_start"
+CONF_STATS_LAST_SUCCESS = "stats_last_success"
+CONF_STATS_LAST_FAILED_COMMAND = "stats_last_failed_command"
+CONF_STATS_LAST_ERROR = "stats_last_error"
+CONF_STATS_TR32_PAGE_STATUS = "stats_tr32_page_status"
+CONF_STATS_TG_STATUS = "stats_tg_status"
+CONF_STATS_EVENT_LOG = "stats_event_log"
 CONF_ENABLE_MACHINE_XML_POLL = "enable_machine_xml_poll"
 CONF_ENABLE_XML_POLL = "enable_xml_poll"
 CONF_XML_MAPPING_PATH = "xml_mapping_path"
@@ -152,6 +160,14 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_TF_ENERGY_SAFE): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_TF_ACTIVE_RF_FILTER): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_TF_STATUS_BITS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_STATS_LAST_CYCLE_RESULT): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_STATS_LAST_CYCLE_START): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_STATS_LAST_SUCCESS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_STATS_LAST_FAILED_COMMAND): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_STATS_LAST_ERROR): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_STATS_TR32_PAGE_STATUS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_STATS_TG_STATUS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_STATS_EVENT_LOG): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_ENABLE_MACHINE_XML_POLL): cv.boolean,
             cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
             cv.Optional(CONF_XML_MAPPING_PATH, default="embedded"): cv.string,
@@ -462,6 +478,38 @@ async def to_code(config):
     if CONF_TF_STATUS_BITS in config:
         tf_status_bits_sensor = await text_sensor.new_text_sensor(config[CONF_TF_STATUS_BITS])
         cg.add(var.set_tf_status_bits_sensor(tf_status_bits_sensor))
+
+    if CONF_STATS_LAST_CYCLE_RESULT in config:
+        stats_sensor = await text_sensor.new_text_sensor(config[CONF_STATS_LAST_CYCLE_RESULT])
+        cg.add(var.set_stats_last_cycle_result_sensor(stats_sensor))
+
+    if CONF_STATS_LAST_CYCLE_START in config:
+        stats_sensor = await text_sensor.new_text_sensor(config[CONF_STATS_LAST_CYCLE_START])
+        cg.add(var.set_stats_last_cycle_start_sensor(stats_sensor))
+
+    if CONF_STATS_LAST_SUCCESS in config:
+        stats_sensor = await text_sensor.new_text_sensor(config[CONF_STATS_LAST_SUCCESS])
+        cg.add(var.set_stats_last_success_sensor(stats_sensor))
+
+    if CONF_STATS_LAST_FAILED_COMMAND in config:
+        stats_sensor = await text_sensor.new_text_sensor(config[CONF_STATS_LAST_FAILED_COMMAND])
+        cg.add(var.set_stats_last_failed_command_sensor(stats_sensor))
+
+    if CONF_STATS_LAST_ERROR in config:
+        stats_sensor = await text_sensor.new_text_sensor(config[CONF_STATS_LAST_ERROR])
+        cg.add(var.set_stats_last_error_sensor(stats_sensor))
+
+    if CONF_STATS_TR32_PAGE_STATUS in config:
+        stats_sensor = await text_sensor.new_text_sensor(config[CONF_STATS_TR32_PAGE_STATUS])
+        cg.add(var.set_stats_tr32_page_status_sensor(stats_sensor))
+
+    if CONF_STATS_TG_STATUS in config:
+        stats_sensor = await text_sensor.new_text_sensor(config[CONF_STATS_TG_STATUS])
+        cg.add(var.set_stats_tg_status_sensor(stats_sensor))
+
+    if CONF_STATS_EVENT_LOG in config:
+        stats_sensor = await text_sensor.new_text_sensor(config[CONF_STATS_EVENT_LOG])
+        cg.add(var.set_stats_event_log_sensor(stats_sensor))
 
     for xml_sensor in config.get(CONF_XML_SENSORS, []):
         sensor_conf = xml_sensor.copy()

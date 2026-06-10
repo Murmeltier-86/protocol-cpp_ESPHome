@@ -225,6 +225,22 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     this->tf_active_rf_filter_sensor_ = sensor;
   }
   void set_tf_status_bits_sensor(text_sensor::TextSensor *sensor) { this->tf_status_bits_sensor_ = sensor; }
+  void set_stats_last_cycle_result_sensor(text_sensor::TextSensor *sensor) {
+    this->stats_last_cycle_result_sensor_ = sensor;
+  }
+  void set_stats_last_cycle_start_sensor(text_sensor::TextSensor *sensor) {
+    this->stats_last_cycle_start_sensor_ = sensor;
+  }
+  void set_stats_last_success_sensor(text_sensor::TextSensor *sensor) { this->stats_last_success_sensor_ = sensor; }
+  void set_stats_last_failed_command_sensor(text_sensor::TextSensor *sensor) {
+    this->stats_last_failed_command_sensor_ = sensor;
+  }
+  void set_stats_last_error_sensor(text_sensor::TextSensor *sensor) { this->stats_last_error_sensor_ = sensor; }
+  void set_stats_tr32_page_status_sensor(text_sensor::TextSensor *sensor) {
+    this->stats_tr32_page_status_sensor_ = sensor;
+  }
+  void set_stats_tg_status_sensor(text_sensor::TextSensor *sensor) { this->stats_tg_status_sensor_ = sensor; }
+  void set_stats_event_log_sensor(text_sensor::TextSensor *sensor) { this->stats_event_log_sensor_ = sensor; }
   void set_log_decoded_tx(bool enabled) { this->log_decoded_tx_ = enabled; }
   void set_log_encoded_uart(bool enabled) { this->log_encoded_uart_ = enabled; }
   void set_enable_machine_xml_poll(bool enabled) { this->enable_machine_xml_poll_ = enabled; }
@@ -452,6 +468,14 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool handle_stats_binary_response_(uint32_t now);
   void reset_stats_attempt_(const char *end_reason);
   bool retry_stats_command_or_advance_(XmlPollState wait_state, const char *reason, uint32_t now);
+  void set_stats_last_error_(const std::string &command, const std::string &reason);
+  void append_stats_event_(const std::string &event);
+  void publish_stats_debug_sensors_();
+  void set_tr32_page_status_(uint8_t page, const std::string &status);
+  void set_tg_status_(const std::string &command, const std::string &status);
+  std::string tr32_page_status_text_() const;
+  std::string tg_status_text_() const;
+  std::string stats_event_log_text_() const;
   void advance_after_stats_timeout_(uint32_t now);
   void advance_after_stats_reject_(uint32_t now, const char *reason = nullptr);
   bool parse_tr32_page_line_(const std::string &line, uint8_t expected_page);
@@ -505,6 +529,14 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   binary_sensor::BinarySensor *tf_energy_safe_sensor_{nullptr};
   binary_sensor::BinarySensor *tf_active_rf_filter_sensor_{nullptr};
   text_sensor::TextSensor *tf_status_bits_sensor_{nullptr};
+  text_sensor::TextSensor *stats_last_cycle_result_sensor_{nullptr};
+  text_sensor::TextSensor *stats_last_cycle_start_sensor_{nullptr};
+  text_sensor::TextSensor *stats_last_success_sensor_{nullptr};
+  text_sensor::TextSensor *stats_last_failed_command_sensor_{nullptr};
+  text_sensor::TextSensor *stats_last_error_sensor_{nullptr};
+  text_sensor::TextSensor *stats_tr32_page_status_sensor_{nullptr};
+  text_sensor::TextSensor *stats_tg_status_sensor_{nullptr};
+  text_sensor::TextSensor *stats_event_log_sensor_{nullptr};
   bool log_decoded_tx_{true};
   bool log_encoded_uart_{false};
   uint32_t machine_data_query_next_{0};
@@ -609,8 +641,20 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_cycle_failed_{false};
   uint8_t xml_stats_consecutive_failures_{0};
   uint8_t xml_tr32_pages_ok_{0};
+  uint8_t xml_tr32_consecutive_failed_pages_{0};
   bool xml_tg43_ok_{false};
   bool xml_tgc0_ok_{false};
+  uint32_t xml_cycle_start_ms_{0};
+  uint32_t xml_last_success_ms_{0};
+  std::string stats_last_cycle_result_{"idle"};
+  std::string stats_last_cycle_start_{"never"};
+  std::string stats_last_success_{"never"};
+  std::string stats_last_failed_command_{};
+  std::string stats_last_error_{};
+  std::array<std::string, 16> stats_tr32_page_status_{};
+  std::string stats_tg43_status_{"TG43:--"};
+  std::string stats_tgc0_status_{"TGC0:--"};
+  std::deque<std::string> stats_event_log_{};
   std::vector<uint8_t> xml_rx_buffer_{};
   bool xml_mapping_logged_{false};
   bool xml_mapping_loaded_{false};
