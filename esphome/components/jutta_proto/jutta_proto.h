@@ -453,6 +453,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool send_stats_ascii_command_(const std::string &command, XmlPollState wait_state, uint32_t now);
   bool send_stats_fire_and_forget_(const std::string &command, XmlPollState next_state, uint32_t now,
                                    uint32_t settle_delay_ms);
+  void reset_stats_rx_tracking_();
+  void prepare_maintenance_command_(const char *command);
+  void log_tg_rx_summary_(const std::string &command, const char *reason);
   bool process_tablet_start_sequence_(uint32_t now);
   void start_tablet_start_sequence_(uint32_t now);
   void send_tablet_sequence_command_(const std::string &command, TabletSeqState wait_state, uint32_t now);
@@ -645,6 +648,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_tg43_ok_{false};
   bool xml_tgc0_ok_{false};
   bool xml_tg_phase_done_{false};
+  size_t xml_command_rx_bytes_{0};
+  size_t xml_command_rx_frames_{0};
+  std::string xml_command_rx_last_noise_reason_{};
   uint32_t xml_cycle_start_ms_{0};
   uint32_t xml_last_success_ms_{0};
   std::string stats_last_cycle_result_{"idle"};
