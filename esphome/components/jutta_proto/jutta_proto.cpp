@@ -5614,7 +5614,6 @@ bool JuraComponent::read_stats_line_(std::string &line) {
   if (starts_inner_transport) {
     if (this->xml_stats_capture_start_ms_ == 0) {
       this->xml_stats_capture_start_ms_ = now;
-      this->xml_deadline_ms_ = now + kStatsRxCaptureWindowMs + kInterCmdGapMs;
     }
     if (!time_reached(now, this->xml_stats_capture_start_ms_ + kStatsRxCaptureWindowMs)) {
       std::vector<uint8_t> buffer;
@@ -5671,7 +5670,6 @@ bool JuraComponent::read_stats_line_(std::string &line) {
   if (starts_inner_transport) {
     if (this->xml_stats_capture_start_ms_ == 0) {
       this->xml_stats_capture_start_ms_ = now;
-      this->xml_deadline_ms_ = now + kStatsRxCaptureWindowMs + kInterCmdGapMs;
     }
     if (!time_reached(now, this->xml_stats_capture_start_ms_ + kStatsRxCaptureWindowMs)) {
       return false;
@@ -5710,6 +5708,16 @@ bool JuraComponent::read_stats_line_(std::string &line) {
     }
     this->publish_raw_rx_(this->xml_rx_line_, "stats_binary");
     this->xml_stats_reject_reason_ = "unexpected_binary";
+    bool command_deadline_reached = this->xml_deadline_ms_ == 0 || time_reached(now, this->xml_deadline_ms_);
+    if (!command_deadline_reached) {
+      ESP_LOGD(TAG, "stats_rx_noise cmd=%s reason=unexpected_binary action=continue_wait deadline_ms=%u",
+               this->xml_last_command_.c_str(),
+               static_cast<unsigned>(this->xml_deadline_ms_ > now ? this->xml_deadline_ms_ - now : 0));
+      this->xml_rx_line_.clear();
+      this->xml_stats_capture_start_ms_ = 0;
+      this->xml_stats_rx_logged_ = false;
+      return false;
+    }
     this->xml_stats_binary_response_ = true;
   }
   return false;
@@ -5800,6 +5808,7 @@ bool JuraComponent::finish_stats_rx_capture_(std::string &line, uint32_t now) {
         ESP_LOGD(TAG, "stats_rx_frame_ignored cmd=%s index=%u reason=unmatched decoded=\"%s\"",
                  this->xml_last_command_.c_str(), static_cast<unsigned>(i),
                  sanitize_text_for_api(decoded_line).c_str());
+        this->xml_stats_reject_reason_ = "unexpected_response";
         continue;
       }
 
@@ -5815,7 +5824,21 @@ bool JuraComponent::finish_stats_rx_capture_(std::string &line, uint32_t now) {
 
   if (!this->xml_stats_binary_response_) {
     this->publish_raw_rx_(this->xml_rx_line_, saw_inner_frame ? "stats_inner_transport_capture" : "stats_binary_capture");
-    this->xml_stats_reject_reason_ = saw_inner_frame ? "inner_decode_not_ascii" : "unexpected_binary";
+    if (this->xml_stats_reject_reason_.empty()) {
+      this->xml_stats_reject_reason_ = saw_inner_frame ? "inner_decode_not_ascii" : "unexpected_binary";
+    }
+    bool command_deadline_reached = this->xml_deadline_ms_ == 0 || time_reached(now, this->xml_deadline_ms_);
+    if (!command_deadline_reached) {
+      ESP_LOGD(TAG, "stats_rx_noise cmd=%s reason=%s action=continue_wait deadline_ms=%u",
+               this->xml_last_command_.c_str(), this->xml_stats_reject_reason_.c_str(),
+               static_cast<unsigned>(this->xml_deadline_ms_ > now ? this->xml_deadline_ms_ - now : 0));
+      this->xml_stats_binary_response_ = false;
+      this->xml_stats_reject_decoded_.clear();
+      this->xml_rx_line_.clear();
+      this->xml_stats_capture_start_ms_ = 0;
+      this->xml_stats_rx_logged_ = false;
+      return false;
+    }
     this->xml_stats_binary_response_ = true;
   }
   return false;
