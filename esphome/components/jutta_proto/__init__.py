@@ -28,8 +28,12 @@ CONF_RAW_RX = "raw_rx"
 CONF_LAST_COMMAND_RESULT = "last_command_result"
 CONF_MACHINE_TYPE = "machine_type"
 CONF_MACHINE_STATUS = "machine_status"
+CONF_MACHINE_DISPLAY_STATUS = "machine_display_status"
+CONF_MACHINE_WARNING = "machine_warning"
+CONF_ACTIVE_ALERTS = "active_alerts"
 CONF_MACHINE_ONLINE = "machine_online"
 CONF_MACHINE_READY = "machine_ready"
+CONF_FILL_WATER_REQUIRED = "fill_water_required"
 CONF_TF_WELCOME = "tf_welcome"
 CONF_TF_COFFEE_READY = "tf_coffee_ready"
 CONF_TF_ENERGY_SAFE = "tf_energy_safe"
@@ -145,8 +149,12 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_LAST_COMMAND_RESULT): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_MACHINE_TYPE): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_MACHINE_STATUS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_DISPLAY_STATUS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_WARNING): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_ACTIVE_ALERTS): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_MACHINE_ONLINE): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_MACHINE_READY): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_FILL_WATER_REQUIRED): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_TF_WELCOME): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_TF_COFFEE_READY): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_TF_ENERGY_SAFE): binary_sensor.binary_sensor_schema(),
@@ -435,6 +443,18 @@ async def to_code(config):
         machine_status_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_STATUS])
         cg.add(var.set_machine_status_sensor(machine_status_sensor))
 
+    if CONF_MACHINE_DISPLAY_STATUS in config:
+        machine_display_status_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DISPLAY_STATUS])
+        cg.add(var.set_machine_display_status_sensor(machine_display_status_sensor))
+
+    if CONF_MACHINE_WARNING in config:
+        machine_warning_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_WARNING])
+        cg.add(var.set_machine_warning_sensor(machine_warning_sensor))
+
+    if CONF_ACTIVE_ALERTS in config:
+        active_alerts_sensor = await text_sensor.new_text_sensor(config[CONF_ACTIVE_ALERTS])
+        cg.add(var.set_active_alerts_sensor(active_alerts_sensor))
+
     if CONF_MACHINE_ONLINE in config:
         machine_online_sensor = await binary_sensor.new_binary_sensor(config[CONF_MACHINE_ONLINE])
         cg.add(var.set_machine_online_sensor(machine_online_sensor))
@@ -442,6 +462,10 @@ async def to_code(config):
     if CONF_MACHINE_READY in config:
         machine_ready_sensor = await binary_sensor.new_binary_sensor(config[CONF_MACHINE_READY])
         cg.add(var.set_machine_ready_sensor(machine_ready_sensor))
+
+    if CONF_FILL_WATER_REQUIRED in config:
+        fill_water_required_sensor = await binary_sensor.new_binary_sensor(config[CONF_FILL_WATER_REQUIRED])
+        cg.add(var.set_fill_water_required_sensor(fill_water_required_sensor))
 
     if CONF_TF_WELCOME in config:
         tf_welcome_sensor = await binary_sensor.new_binary_sensor(config[CONF_TF_WELCOME])

@@ -1755,9 +1755,8 @@ void JuraComponent::process_handshake() {
           this->ensure_xml_mapping_loaded_();
         }
         this->publish_last_command_result_("handshake_done");
-        this->publish_machine_status_("ready");
         this->publish_machine_online_(true);
-        this->publish_machine_ready_(true);
+        this->update_machine_status_from_state_("handshake");
       } else {
         this->restart_handshake("failed to send @t3");
       }
@@ -1869,6 +1868,13 @@ void JuraComponent::handle_decoded_response_(const std::string &response, const 
   if (lowered.rfind("@tf:", 0) == 0) {
     if (this->publish_tf_status_(response)) {
       this->publish_last_command_result_("tf_status");
+    }
+    return;
+  }
+
+  if (lowered.rfind("@tv:", 0) == 0) {
+    if (this->handle_tv_progress_(response)) {
+      this->publish_last_command_result_("tv_progress");
     }
     return;
   }
@@ -2122,6 +2128,58 @@ void JuraComponent::publish_machine_ready_(bool ready) {
   }
 }
 
+void JuraComponent::update_machine_status_from_state_(const char *source) {
+  const char *safe_source = source != nullptr ? source : "unknown";
+  const bool blocking_alert = this->fill_water_required_ || !this->current_machine_warning_.empty();
+  std::string status;
+  bool ready = false;
+
+  if (this->machine_display_status_sensor_ != nullptr && !this->current_display_status_.empty()) {
+    this->machine_display_status_sensor_->publish_state(sanitize_text_for_api(this->current_display_status_));
+  }
+  if (this->machine_warning_sensor_ != nullptr) {
+    this->machine_warning_sensor_->publish_state(
+        this->current_machine_warning_.empty() ? "keine" : sanitize_text_for_api(this->current_machine_warning_));
+  }
+  if (this->active_alerts_sensor_ != nullptr) {
+    this->active_alerts_sensor_->publish_state(
+        this->current_active_alerts_.empty() ? "keine" : sanitize_text_for_api(this->current_active_alerts_));
+  }
+  if (this->fill_water_required_sensor_ != nullptr) {
+    this->fill_water_required_sensor_->publish_state(this->fill_water_required_);
+  }
+
+  if (blocking_alert) {
+    status = this->current_machine_warning_.empty() ? "Warnung" : this->current_machine_warning_;
+    ready = false;
+    if (std::strcmp(safe_source, "handshake") == 0) {
+      ESP_LOGD(TAG, "machine_status_update source=handshake ignored_reason=active_blocking_alert");
+    }
+    ESP_LOGD(TAG, "machine_status_update source=%s priority=alert status=\"%s\"", safe_source,
+             sanitize_text_for_api(status).c_str());
+  } else if (!this->current_display_status_.empty()) {
+    status = this->current_display_status_;
+    ready = (status == "Bereit");
+    ESP_LOGD(TAG, "machine_status_update source=%s priority=display status=\"%s\"", safe_source,
+             sanitize_text_for_api(status).c_str());
+  } else if (this->tf_coffee_ready_active_) {
+    status = "Bereit";
+    ready = true;
+    ESP_LOGD(TAG, "machine_status_update source=%s priority=tf_ready status=\"Bereit\"", safe_source);
+  } else if (this->is_ready()) {
+    status = "ready";
+    ready = true;
+    ESP_LOGD(TAG, "machine_status_update source=%s priority=handshake status=\"ready\"", safe_source);
+  } else {
+    status = "offline";
+    ready = false;
+    ESP_LOGD(TAG, "machine_status_update source=%s priority=offline status=\"offline\"", safe_source);
+  }
+
+  this->publish_machine_status_(status);
+  this->publish_machine_ready_(ready);
+}
+
 bool JuraComponent::publish_tf_status_(const std::string &response) {
   std::string trimmed = response;
   trim_in_place(trimmed);
@@ -2175,6 +2233,36 @@ bool JuraComponent::publish_tf_status_(const std::string &response) {
     return (data[bit / 8U] & mask) != 0;
   };
 
+  const bool fill_water = has_bit(1);
+  const bool coffee_ready = has_bit(13);
+  this->fill_water_required_ = fill_water;
+  this->tf_coffee_ready_active_ = coffee_ready;
+
+  std::vector<std::string> active_alerts;
+  if (fill_water) {
+    active_alerts.emplace_back("Wassertank füllen");
+    this->current_machine_warning_ = "Wassertank füllen";
+    this->current_display_status_ = "Wassertank füllen";
+  } else if (this->current_machine_warning_ == "Wassertank füllen") {
+    this->current_machine_warning_.clear();
+  }
+  if (coffee_ready) {
+    active_alerts.emplace_back("Bereit");
+    if (!fill_water) {
+      this->current_display_status_ = "Bereit";
+    }
+  } else if (!fill_water && this->current_display_status_ == "Wassertank füllen") {
+    this->current_display_status_.clear();
+  }
+  this->current_active_alerts_ = join_values(active_alerts, ", ");
+
+  const std::string active_alerts_log =
+      this->current_active_alerts_.empty() ? "keine" : sanitize_text_for_api(this->current_active_alerts_);
+  ESP_LOGD(TAG, "tf_status decoded payload=\"%s\" active_alerts=\"%s\"",
+           sanitize_text_for_api(payload).c_str(), active_alerts_log.c_str());
+  ESP_LOGD(TAG, "tf_alert bit=1 name=\"fill water\" active=%s type=block", YESNO(fill_water));
+  ESP_LOGD(TAG, "tf_alert bit=13 name=\"coffee ready\" active=%s", YESNO(coffee_ready));
+
   if (this->tf_welcome_sensor_ != nullptr) {
     this->tf_welcome_sensor_->publish_state(has_bit(11));
   }
@@ -2190,6 +2278,69 @@ bool JuraComponent::publish_tf_status_(const std::string &response) {
   if (this->tf_status_bits_sensor_ != nullptr) {
     this->tf_status_bits_sensor_->publish_state(bits_text);
   }
+  this->update_machine_status_from_state_("tf");
+  return true;
+}
+
+bool JuraComponent::handle_tv_progress_(const std::string &response) {
+  std::string trimmed = response;
+  trim_in_place(trimmed);
+  std::string lower = to_lower_copy(trimmed);
+  if (lower.rfind("@tv:", 0) != 0) {
+    return false;
+  }
+
+  const std::string payload = trimmed.substr(4);
+  if (payload.size() < 2 || !std::isxdigit(static_cast<unsigned char>(payload[0])) ||
+      !std::isxdigit(static_cast<unsigned char>(payload[1]))) {
+    ESP_LOGD(TAG, "tv_progress ignored decoded=\"%s\" reason=invalid_hex",
+             sanitize_text_for_api(trimmed).c_str());
+    return false;
+  }
+
+  char code_text[3] = {payload[0], payload[1], '\0'};
+  const uint8_t code = static_cast<uint8_t>(std::strtoul(code_text, nullptr, 16));
+  const char *state = nullptr;
+  bool blocking = false;
+  switch (code) {
+    case 0x02:
+      state = "Wassertank füllen";
+      blocking = true;
+      break;
+    case 0x24:
+      state = "Bereit";
+      break;
+    case 0x0E:
+      state = "Alarm";
+      blocking = true;
+      break;
+    default:
+      ESP_LOGD(TAG, "tv_progress code=%02X state=\"unknown\" raw=\"%s\"", code,
+               sanitize_text_for_api(trimmed).c_str());
+      return true;
+  }
+
+  this->current_display_status_ = state;
+  if (blocking) {
+    this->current_machine_warning_ = state;
+    this->current_active_alerts_ = state;
+    if (code == 0x02) {
+      this->fill_water_required_ = true;
+    }
+  } else {
+    if (this->current_machine_warning_ == state || this->current_machine_warning_ == "Wassertank füllen" ||
+        this->current_machine_warning_ == "Alarm") {
+      this->current_machine_warning_.clear();
+    }
+    if (code == 0x24) {
+      this->fill_water_required_ = false;
+      this->tf_coffee_ready_active_ = true;
+      this->current_active_alerts_ = "Bereit";
+    }
+  }
+
+  ESP_LOGD(TAG, "tv_progress code=%02X state=\"%s\"", code, sanitize_text_for_api(state).c_str());
+  this->update_machine_status_from_state_("tv");
   return true;
 }
 

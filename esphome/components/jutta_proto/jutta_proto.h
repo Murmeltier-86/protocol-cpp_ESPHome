@@ -216,8 +216,12 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_last_command_result_sensor(text_sensor::TextSensor *sensor) { this->last_command_result_sensor_ = sensor; }
   void set_machine_type_sensor(text_sensor::TextSensor *sensor) { this->machine_type_sensor_ = sensor; }
   void set_machine_status_sensor(text_sensor::TextSensor *sensor) { this->machine_status_sensor_ = sensor; }
+  void set_machine_display_status_sensor(text_sensor::TextSensor *sensor) { this->machine_display_status_sensor_ = sensor; }
+  void set_machine_warning_sensor(text_sensor::TextSensor *sensor) { this->machine_warning_sensor_ = sensor; }
+  void set_active_alerts_sensor(text_sensor::TextSensor *sensor) { this->active_alerts_sensor_ = sensor; }
   void set_machine_online_sensor(binary_sensor::BinarySensor *sensor) { this->machine_online_sensor_ = sensor; }
   void set_machine_ready_sensor(binary_sensor::BinarySensor *sensor) { this->machine_ready_sensor_ = sensor; }
+  void set_fill_water_required_sensor(binary_sensor::BinarySensor *sensor) { this->fill_water_required_sensor_ = sensor; }
   void set_tf_welcome_sensor(binary_sensor::BinarySensor *sensor) { this->tf_welcome_sensor_ = sensor; }
   void set_tf_coffee_ready_sensor(binary_sensor::BinarySensor *sensor) { this->tf_coffee_ready_sensor_ = sensor; }
   void set_tf_energy_safe_sensor(binary_sensor::BinarySensor *sensor) { this->tf_energy_safe_sensor_ = sensor; }
@@ -328,6 +332,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void publish_machine_online_(bool online);
   void publish_machine_ready_(bool ready);
   bool publish_tf_status_(const std::string &response);
+  bool handle_tv_progress_(const std::string &response);
+  void update_machine_status_from_state_(const char *source);
   bool decode_and_publish_status_(const std::string &response, const char *parser_branch);
   std::string format_decoded_status_(const std::vector<JuraDecodedField> &fields) const;
   bool is_printable_status_text_(const std::string &text) const;
@@ -496,8 +502,12 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   text_sensor::TextSensor *last_command_result_sensor_{nullptr};
   text_sensor::TextSensor *machine_type_sensor_{nullptr};
   text_sensor::TextSensor *machine_status_sensor_{nullptr};
+  text_sensor::TextSensor *machine_display_status_sensor_{nullptr};
+  text_sensor::TextSensor *machine_warning_sensor_{nullptr};
+  text_sensor::TextSensor *active_alerts_sensor_{nullptr};
   binary_sensor::BinarySensor *machine_online_sensor_{nullptr};
   binary_sensor::BinarySensor *machine_ready_sensor_{nullptr};
+  binary_sensor::BinarySensor *fill_water_required_sensor_{nullptr};
   binary_sensor::BinarySensor *tf_welcome_sensor_{nullptr};
   binary_sensor::BinarySensor *tf_coffee_ready_sensor_{nullptr};
   binary_sensor::BinarySensor *tf_energy_safe_sensor_{nullptr};
@@ -509,6 +519,11 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t machine_xml_busy_backoff_until_{0};
   std::string machine_xml_cache_{};
   uint32_t machine_xml_timestamp_{0};
+  std::string current_display_status_{};
+  std::string current_machine_warning_{};
+  std::string current_active_alerts_{};
+  bool fill_water_required_{false};
+  bool tf_coffee_ready_active_{false};
 
   bool enable_machine_xml_poll_{true};
   bool enable_xml_poll_{false};
