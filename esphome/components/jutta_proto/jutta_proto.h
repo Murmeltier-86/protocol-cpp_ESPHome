@@ -225,22 +225,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     this->tf_active_rf_filter_sensor_ = sensor;
   }
   void set_tf_status_bits_sensor(text_sensor::TextSensor *sensor) { this->tf_status_bits_sensor_ = sensor; }
-  void set_stats_last_cycle_result_sensor(text_sensor::TextSensor *sensor) {
-    this->stats_last_cycle_result_sensor_ = sensor;
-  }
-  void set_stats_last_cycle_start_sensor(text_sensor::TextSensor *sensor) {
-    this->stats_last_cycle_start_sensor_ = sensor;
-  }
-  void set_stats_last_success_sensor(text_sensor::TextSensor *sensor) { this->stats_last_success_sensor_ = sensor; }
-  void set_stats_last_failed_command_sensor(text_sensor::TextSensor *sensor) {
-    this->stats_last_failed_command_sensor_ = sensor;
-  }
-  void set_stats_last_error_sensor(text_sensor::TextSensor *sensor) { this->stats_last_error_sensor_ = sensor; }
-  void set_stats_tr32_page_status_sensor(text_sensor::TextSensor *sensor) {
-    this->stats_tr32_page_status_sensor_ = sensor;
-  }
-  void set_stats_tg_status_sensor(text_sensor::TextSensor *sensor) { this->stats_tg_status_sensor_ = sensor; }
-  void set_stats_event_log_sensor(text_sensor::TextSensor *sensor) { this->stats_event_log_sensor_ = sensor; }
   void set_log_decoded_tx(bool enabled) { this->log_decoded_tx_ = enabled; }
   void set_log_encoded_uart(bool enabled) { this->log_encoded_uart_ = enabled; }
   void set_enable_machine_xml_poll(bool enabled) { this->enable_machine_xml_poll_ = enabled; }
@@ -249,7 +233,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_counter_max(uint32_t max_value) { this->xml_counter_max_ = max_value; }
   void set_xml_wait_for_ts_ack(bool enabled) { this->xml_wait_for_ts_ack_ = enabled; }
   void set_xml_stats_use_ts_lock(bool enabled) { this->xml_stats_use_ts_lock_ = enabled; }
-  void set_xml_stats_split_maintenance_cycle(bool enabled) { this->xml_stats_split_maintenance_cycle_ = enabled; }
   void set_xml_debug_compact(bool enabled) { this->xml_debug_compact_ = enabled; }
   void set_xml_decode_inner_transport(bool enabled) { this->xml_decode_inner_transport_ = enabled; }
   void set_xml_inner_decode_trace(bool enabled) { this->xml_inner_decode_trace_ = enabled; }
@@ -454,9 +437,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool send_stats_ascii_command_(const std::string &command, XmlPollState wait_state, uint32_t now);
   bool send_stats_fire_and_forget_(const std::string &command, XmlPollState next_state, uint32_t now,
                                    uint32_t settle_delay_ms);
-  void reset_stats_rx_tracking_();
-  void prepare_maintenance_command_(const char *command);
-  void log_tg_rx_summary_(const std::string &command, const char *reason);
   bool process_tablet_start_sequence_(uint32_t now);
   void start_tablet_start_sequence_(uint32_t now);
   void send_tablet_sequence_command_(const std::string &command, TabletSeqState wait_state, uint32_t now);
@@ -470,18 +450,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool decode_stats_inner_transport_line_(const std::string &raw_line, std::string &decoded_line,
                                           bool frame_complete = true);
   bool handle_stats_binary_response_(uint32_t now);
-  void reset_stats_attempt_(const char *end_reason);
-  bool retry_stats_command_or_advance_(XmlPollState wait_state, const char *reason, uint32_t now);
-  void set_stats_last_error_(const std::string &command, const std::string &reason);
-  void append_stats_event_(const std::string &event);
-  void publish_stats_debug_sensors_();
-  void set_tr32_page_status_(uint8_t page, const std::string &status);
-  void set_tg_status_(const std::string &command, const std::string &status);
-  std::string tr32_page_status_text_() const;
-  std::string tg_status_text_() const;
-  std::string stats_event_log_text_() const;
   void advance_after_stats_timeout_(uint32_t now);
-  void advance_after_stats_reject_(uint32_t now, const char *reason = nullptr);
+  void advance_after_stats_reject_(uint32_t now);
   bool parse_tr32_page_line_(const std::string &line, uint8_t expected_page);
   bool parse_tg43_line_(const std::string &line);
   bool parse_tgc0_line_(const std::string &line);
@@ -533,14 +503,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   binary_sensor::BinarySensor *tf_energy_safe_sensor_{nullptr};
   binary_sensor::BinarySensor *tf_active_rf_filter_sensor_{nullptr};
   text_sensor::TextSensor *tf_status_bits_sensor_{nullptr};
-  text_sensor::TextSensor *stats_last_cycle_result_sensor_{nullptr};
-  text_sensor::TextSensor *stats_last_cycle_start_sensor_{nullptr};
-  text_sensor::TextSensor *stats_last_success_sensor_{nullptr};
-  text_sensor::TextSensor *stats_last_failed_command_sensor_{nullptr};
-  text_sensor::TextSensor *stats_last_error_sensor_{nullptr};
-  text_sensor::TextSensor *stats_tr32_page_status_sensor_{nullptr};
-  text_sensor::TextSensor *stats_tg_status_sensor_{nullptr};
-  text_sensor::TextSensor *stats_event_log_sensor_{nullptr};
   bool log_decoded_tx_{true};
   bool log_encoded_uart_{false};
   uint32_t machine_data_query_next_{0};
@@ -645,27 +607,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_cycle_failed_{false};
   uint8_t xml_stats_consecutive_failures_{0};
   uint8_t xml_tr32_pages_ok_{0};
-  uint8_t xml_tr32_consecutive_failed_pages_{0};
   bool xml_tg43_ok_{false};
   bool xml_tgc0_ok_{false};
-  bool xml_tg_phase_done_{false};
-  bool xml_stats_split_maintenance_cycle_{true};
-  bool xml_maintenance_cycle_pending_{false};
-  bool xml_maintenance_cycle_active_{false};
-  size_t xml_command_rx_bytes_{0};
-  size_t xml_command_rx_frames_{0};
-  std::string xml_command_rx_last_noise_reason_{};
-  uint32_t xml_cycle_start_ms_{0};
-  uint32_t xml_last_success_ms_{0};
-  std::string stats_last_cycle_result_{"idle"};
-  std::string stats_last_cycle_start_{"never"};
-  std::string stats_last_success_{"never"};
-  std::string stats_last_failed_command_{};
-  std::string stats_last_error_{};
-  std::array<std::string, 16> stats_tr32_page_status_{};
-  std::string stats_tg43_status_{"TG43:--"};
-  std::string stats_tgc0_status_{"TGC0:--"};
-  std::deque<std::string> stats_event_log_{};
   std::vector<uint8_t> xml_rx_buffer_{};
   bool xml_mapping_logged_{false};
   bool xml_mapping_loaded_{false};
@@ -681,12 +624,12 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::unordered_map<std::string, XmlSensorMeta> xml_sensor_meta_{};
   std::unordered_map<std::string, bool> xml_missing_sensor_logged_{};
   std::unordered_map<std::string, bool> xml_unconfigured_sensor_logged_{};
-  static constexpr size_t XML_COMMAND_COUNT = 5;
-  std::array<uint8_t, XML_COMMAND_COUNT> xml_retry_count_{};
-  std::array<bool, XML_COMMAND_COUNT> xml_invalid_len_seen_{};
-  std::array<size_t, XML_COMMAND_COUNT> xml_last_invalid_len_{};
+  static constexpr size_t XML_COMMAND_COUNT = 3;
+  std::array<uint8_t, XML_COMMAND_COUNT> xml_retry_count_{{0, 0, 0}};
+  std::array<bool, XML_COMMAND_COUNT> xml_invalid_len_seen_{{false, false, false}};
+  std::array<size_t, XML_COMMAND_COUNT> xml_last_invalid_len_{{0, 0, 0}};
   std::array<std::vector<uint8_t>, XML_COMMAND_COUNT> xml_counter_candidate_frame_{};
-  std::array<uint8_t, XML_COMMAND_COUNT> xml_counter_candidate_count_{};
+  std::array<uint8_t, XML_COMMAND_COUNT> xml_counter_candidate_count_{{0, 0, 0}};
   uint8_t xml_tgc0_timeout_streak_{0};
   bool xml_skip_tgc0_{false};
   void prepare_tgc0_request_();
