@@ -2115,6 +2115,7 @@ void JuraComponent::publish_machine_status_(const std::string &status) {
 }
 
 void JuraComponent::publish_machine_online_(bool online) {
+  this->machine_online_state_ = online;
   ESP_LOGD(TAG, "Machine online: %s", YESNO(online));
   if (this->machine_online_sensor_ != nullptr) {
     this->machine_online_sensor_->publish_state(online);
@@ -2122,6 +2123,7 @@ void JuraComponent::publish_machine_online_(bool online) {
 }
 
 void JuraComponent::publish_machine_ready_(bool ready) {
+  this->machine_ready_state_ = ready;
   ESP_LOGD(TAG, "Machine ready: %s", YESNO(ready));
   if (this->machine_ready_sensor_ != nullptr) {
     this->machine_ready_sensor_->publish_state(ready);
@@ -2130,12 +2132,14 @@ void JuraComponent::publish_machine_ready_(bool ready) {
 
 void JuraComponent::update_machine_status_from_state_(const char *source) {
   const char *safe_source = source != nullptr ? source : "unknown";
+  const bool online = this->machine_online_state_ || this->is_ready();
   const bool blocking_alert = this->fill_water_required_ || !this->current_machine_warning_.empty();
   std::string status;
-  bool ready = false;
+  bool ready = this->machine_ready_state_ || this->is_ready();
 
-  if (this->machine_display_status_sensor_ != nullptr && !this->current_display_status_.empty()) {
-    this->machine_display_status_sensor_->publish_state(sanitize_text_for_api(this->current_display_status_));
+  if (this->machine_display_status_sensor_ != nullptr) {
+    this->machine_display_status_sensor_->publish_state(
+        this->current_display_status_.empty() ? "keine" : sanitize_text_for_api(this->current_display_status_));
   }
   if (this->machine_warning_sensor_ != nullptr) {
     this->machine_warning_sensor_->publish_state(
@@ -2149,7 +2153,11 @@ void JuraComponent::update_machine_status_from_state_(const char *source) {
     this->fill_water_required_sensor_->publish_state(this->fill_water_required_);
   }
 
-  if (blocking_alert) {
+  if (!online) {
+    status = "offline";
+    ready = false;
+    ESP_LOGD(TAG, "machine_status_update source=%s priority=offline status=\"offline\"", safe_source);
+  } else if (blocking_alert) {
     status = this->current_machine_warning_.empty() ? "Warnung" : this->current_machine_warning_;
     ready = false;
     if (std::strcmp(safe_source, "handshake") == 0) {
@@ -2166,15 +2174,20 @@ void JuraComponent::update_machine_status_from_state_(const char *source) {
     status = "Bereit";
     ready = true;
     ESP_LOGD(TAG, "machine_status_update source=%s priority=tf_ready status=\"Bereit\"", safe_source);
-  } else if (this->is_ready()) {
-    status = "ready";
-    ready = true;
-    ESP_LOGD(TAG, "machine_status_update source=%s priority=handshake status=\"ready\"", safe_source);
+  } else if (ready) {
+    status = "Bereit";
+    ESP_LOGD(TAG, "machine_status_update source=%s priority=protocol_ready status=\"Bereit\"", safe_source);
   } else {
-    status = "offline";
-    ready = false;
-    ESP_LOGD(TAG, "machine_status_update source=%s priority=offline status=\"offline\"", safe_source);
+    status = "Online";
+    ESP_LOGD(TAG, "machine_status_update source=%s priority=online status=\"Online\"", safe_source);
   }
+
+  ESP_LOGD(TAG,
+           "machine_status_decision online=%s ready=%s has_valid_tf=%s has_valid_tv=%s blocking_alert=%s "
+           "display_state=\"%s\" result=\"%s\"",
+           YESNO(online), YESNO(ready), YESNO(this->has_valid_tf_status_), YESNO(this->has_valid_tv_status_),
+           YESNO(blocking_alert), sanitize_text_for_api(this->current_display_status_).c_str(),
+           sanitize_text_for_api(status).c_str());
 
   this->publish_machine_status_(status);
   this->publish_machine_ready_(ready);
@@ -2233,10 +2246,25 @@ bool JuraComponent::publish_tf_status_(const std::string &response) {
     return (data[bit / 8U] & mask) != 0;
   };
 
+  this->has_valid_tf_status_ = true;
   const bool fill_water = has_bit(1);
   const bool coffee_ready = has_bit(13);
   this->fill_water_required_ = fill_water;
   this->tf_coffee_ready_active_ = coffee_ready;
+
+  auto log_alert_check = [&has_bit](size_t xml_bit) {
+    const size_t zero_based_index = xml_bit;
+    const size_t one_based_index = xml_bit > 0 ? xml_bit - 1 : 0;
+    const uint8_t zero_based_mask = static_cast<uint8_t>(1U << (7U - (zero_based_index % 8U)));
+    const uint8_t one_based_mask = static_cast<uint8_t>(1U << (7U - (one_based_index % 8U)));
+    const bool active_zero_based = has_bit(zero_based_index);
+    const bool active_one_based = xml_bit > 0 && has_bit(one_based_index);
+    ESP_LOGD(TAG,
+             "tf_alert_check xml_bit=%u zero_based_mask=0x%02X one_based_mask=0x%02X "
+             "active_zero_based=%s active_one_based=%s",
+             static_cast<unsigned>(xml_bit), static_cast<unsigned>(zero_based_mask),
+             static_cast<unsigned>(one_based_mask), YESNO(active_zero_based), YESNO(active_one_based));
+  };
 
   std::vector<std::string> active_alerts;
   if (fill_water) {
@@ -2247,7 +2275,6 @@ bool JuraComponent::publish_tf_status_(const std::string &response) {
     this->current_machine_warning_.clear();
   }
   if (coffee_ready) {
-    active_alerts.emplace_back("Bereit");
     if (!fill_water) {
       this->current_display_status_ = "Bereit";
     }
@@ -2258,8 +2285,14 @@ bool JuraComponent::publish_tf_status_(const std::string &response) {
 
   const std::string active_alerts_log =
       this->current_active_alerts_.empty() ? "keine" : sanitize_text_for_api(this->current_active_alerts_);
+  ESP_LOGD(TAG, "tf_decode raw=\"%s\" valid=YES active_alerts=\"%s\"",
+           sanitize_text_for_api(trimmed).c_str(), active_alerts_log.c_str());
   ESP_LOGD(TAG, "tf_status decoded payload=\"%s\" active_alerts=\"%s\"",
            sanitize_text_for_api(payload).c_str(), active_alerts_log.c_str());
+  ESP_LOGD(TAG, "tf_payload raw=%s bytes=%s", sanitize_text_for_api(payload).c_str(),
+           format_hex_string(data).c_str());
+  log_alert_check(1);
+  log_alert_check(13);
   ESP_LOGD(TAG, "tf_alert bit=1 name=\"fill water\" active=%s type=block", YESNO(fill_water));
   ESP_LOGD(TAG, "tf_alert bit=13 name=\"coffee ready\" active=%s", YESNO(coffee_ready));
 
@@ -2300,6 +2333,7 @@ bool JuraComponent::handle_tv_progress_(const std::string &response) {
 
   char code_text[3] = {payload[0], payload[1], '\0'};
   const uint8_t code = static_cast<uint8_t>(std::strtoul(code_text, nullptr, 16));
+  this->has_valid_tv_status_ = true;
   const char *state = nullptr;
   bool blocking = false;
   switch (code) {
@@ -2317,6 +2351,7 @@ bool JuraComponent::handle_tv_progress_(const std::string &response) {
     default:
       ESP_LOGD(TAG, "tv_progress code=%02X state=\"unknown\" raw=\"%s\"", code,
                sanitize_text_for_api(trimmed).c_str());
+      ESP_LOGD(TAG, "tv_decode raw=\"%s\" valid=YES state=\"unknown\"", sanitize_text_for_api(trimmed).c_str());
       return true;
   }
 
@@ -2335,11 +2370,13 @@ bool JuraComponent::handle_tv_progress_(const std::string &response) {
     if (code == 0x24) {
       this->fill_water_required_ = false;
       this->tf_coffee_ready_active_ = true;
-      this->current_active_alerts_ = "Bereit";
+      this->current_active_alerts_.clear();
     }
   }
 
   ESP_LOGD(TAG, "tv_progress code=%02X state=\"%s\"", code, sanitize_text_for_api(state).c_str());
+  ESP_LOGD(TAG, "tv_decode raw=\"%s\" valid=YES state=\"%s\"", sanitize_text_for_api(trimmed).c_str(),
+           sanitize_text_for_api(state).c_str());
   this->update_machine_status_from_state_("tv");
   return true;
 }
@@ -6674,6 +6711,7 @@ bool JuraComponent::parse_tgc0_line_(const std::string &line) {
   if (lower.rfind(kPrefix, 0) != 0) {
     ESP_LOGD(TAG, "stats_reject cmd=@TG:C0 reason=prefix_mismatch raw='%s'",
              sanitize_text_for_api(line).c_str());
+    ESP_LOGD(TAG, "maintenance_publish source=@TG:C0 valid=NO reason=prefix_mismatch publish=NO");
     return false;
   }
   std::string payload = trimmed.substr(std::char_traits<char>::length(kPrefix));
@@ -6681,12 +6719,14 @@ bool JuraComponent::parse_tgc0_line_(const std::string &line) {
   if (payload.size() != 6) {
     ESP_LOGD(TAG, "stats_reject cmd=@TG:C0 reason=invalid_hex_length hex_len=%u expected=6",
              static_cast<unsigned>(payload.size()));
+    ESP_LOGD(TAG, "maintenance_publish source=@TG:C0 valid=NO reason=invalid_hex_length publish=NO");
     return false;
   }
   std::vector<uint8_t> bytes;
   std::string reason;
   if (!this->parse_hex_bytes_(payload, bytes, reason)) {
     ESP_LOGD(TAG, "stats_reject cmd=@TG:C0 reason=%s payload='%s'", reason.c_str(), payload.c_str());
+    ESP_LOGD(TAG, "maintenance_publish source=@TG:C0 valid=NO reason=%s publish=NO", reason.c_str());
     return false;
   }
   ESP_LOGV(TAG, "stats_parse cmd=@TG:C0 payload=%s bytes=%s", payload.c_str(), format_hex_string(bytes).c_str());
@@ -6698,15 +6738,21 @@ bool JuraComponent::parse_tgc0_line_(const std::string &line) {
     if (raw == 0xFF) {
       ESP_LOGD(TAG, "stats_reject cmd=@TG:C0 field=%s byte_index=%u reason=not_available raw=0xFF",
                field.name.c_str(), static_cast<unsigned>(index));
+      ESP_LOGD(TAG, "maintenance_publish source=@TG:C0 valid=YES field=%s raw=0xFF publish=NO reason=not_available",
+               field.name.c_str());
       continue;
     }
     if (raw > 100) {
       ESP_LOGD(TAG, "stats_reject cmd=@TG:C0 field=%s byte_index=%u reason=percent_out_of_range value=%u",
                field.name.c_str(), static_cast<unsigned>(index), static_cast<unsigned>(raw));
+      ESP_LOGD(TAG, "maintenance_publish source=@TG:C0 valid=NO field=%s cleaning_percent=%u publish=NO reason=out_of_range",
+               field.name.c_str(), static_cast<unsigned>(raw));
       continue;
     }
     ESP_LOGV(TAG, "stats_parse cmd=@TG:C0 field=%s byte_index=%u raw=0x%02X value=%u", field.name.c_str(),
              static_cast<unsigned>(index), static_cast<unsigned>(raw), static_cast<unsigned>(raw));
+    ESP_LOGD(TAG, "maintenance_publish source=@TG:C0 valid=YES field=%s cleaning_percent=%u publish=YES",
+             field.name.c_str(), static_cast<unsigned>(raw));
     any = this->stage_xml_stat_value_(field.name, field.label, static_cast<double>(raw),
                                       XmlSensorKind::Measurement, "@TG:C0") || any;
   }

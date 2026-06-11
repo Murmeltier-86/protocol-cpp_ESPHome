@@ -522,6 +522,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string current_display_status_{};
   std::string current_machine_warning_{};
   std::string current_active_alerts_{};
+  bool machine_online_state_{false};
+  bool machine_ready_state_{false};
+  bool has_valid_tf_status_{false};
+  bool has_valid_tv_status_{false};
   bool fill_water_required_{false};
   bool tf_coffee_ready_active_{false};
 
