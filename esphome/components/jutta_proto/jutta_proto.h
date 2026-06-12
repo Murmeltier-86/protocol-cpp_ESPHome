@@ -219,6 +219,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_machine_display_status_sensor(text_sensor::TextSensor *sensor) { this->machine_display_status_sensor_ = sensor; }
   void set_machine_warning_sensor(text_sensor::TextSensor *sensor) { this->machine_warning_sensor_ = sensor; }
   void set_active_alerts_sensor(text_sensor::TextSensor *sensor) { this->active_alerts_sensor_ = sensor; }
+  void set_live_status_source_sensor(text_sensor::TextSensor *sensor) { this->live_status_source_sensor_ = sensor; }
   void set_status_probe_last_response_sensor(text_sensor::TextSensor *sensor) {
     this->status_probe_last_response_sensor_ = sensor;
   }
@@ -536,6 +537,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   text_sensor::TextSensor *machine_display_status_sensor_{nullptr};
   text_sensor::TextSensor *machine_warning_sensor_{nullptr};
   text_sensor::TextSensor *active_alerts_sensor_{nullptr};
+  text_sensor::TextSensor *live_status_source_sensor_{nullptr};
   text_sensor::TextSensor *status_probe_last_response_sensor_{nullptr};
   text_sensor::TextSensor *last_t2_status_raw_sensor_{nullptr};
   text_sensor::TextSensor *last_t2_status_decoded_sensor_{nullptr};
@@ -556,6 +558,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string current_display_status_{};
   std::string current_machine_warning_{};
   std::string current_active_alerts_{};
+  std::string current_live_status_source_{"nicht verfügbar"};
   bool machine_online_state_{false};
   bool machine_ready_state_{false};
   bool has_valid_tf_status_{false};

@@ -2197,26 +2197,35 @@ void JuraComponent::publish_machine_ready_(bool ready) {
 void JuraComponent::update_machine_status_from_state_(const char *source) {
   const char *safe_source = source != nullptr ? source : "unknown";
   const bool online = this->machine_online_state_ || this->is_ready();
+  const bool live_status_seen = this->has_valid_tf_status_ || this->has_valid_tv_status_;
   const bool blocking_alert = this->fill_water_required_ || !this->current_machine_warning_.empty();
   std::string status;
   bool ready = this->machine_ready_state_ || this->is_ready();
 
-  if (this->machine_display_status_sensor_ != nullptr &&
-      (this->has_valid_tv_status_ || !this->current_display_status_.empty())) {
+  if (this->live_status_source_sensor_ != nullptr) {
+    this->live_status_source_sensor_->publish_state(
+        live_status_seen ? sanitize_text_for_api(this->current_live_status_source_) : "nicht verfügbar");
+  }
+
+  if (this->machine_display_status_sensor_ != nullptr) {
     this->machine_display_status_sensor_->publish_state(
-        this->current_display_status_.empty() ? "keine" : sanitize_text_for_api(this->current_display_status_));
+        live_status_seen ? (this->current_display_status_.empty() ? "keine"
+                                                                  : sanitize_text_for_api(this->current_display_status_))
+                         : "nicht verfügbar");
   }
-  if (this->machine_warning_sensor_ != nullptr &&
-      (this->has_valid_tf_status_ || this->has_valid_tv_status_ || !this->current_machine_warning_.empty())) {
+  if (this->machine_warning_sensor_ != nullptr) {
     this->machine_warning_sensor_->publish_state(
-        this->current_machine_warning_.empty() ? "keine" : sanitize_text_for_api(this->current_machine_warning_));
+        live_status_seen ? (this->current_machine_warning_.empty() ? "keine"
+                                                                   : sanitize_text_for_api(this->current_machine_warning_))
+                         : "nicht verfügbar");
   }
-  if (this->active_alerts_sensor_ != nullptr &&
-      (this->has_valid_tf_status_ || this->has_valid_tv_status_ || !this->current_active_alerts_.empty())) {
+  if (this->active_alerts_sensor_ != nullptr) {
     this->active_alerts_sensor_->publish_state(
-        this->current_active_alerts_.empty() ? "keine" : sanitize_text_for_api(this->current_active_alerts_));
+        live_status_seen ? (this->current_active_alerts_.empty() ? "keine"
+                                                                 : sanitize_text_for_api(this->current_active_alerts_))
+                         : "nicht verfügbar");
   }
-  if (this->fill_water_required_sensor_ != nullptr && (this->has_valid_tf_status_ || this->has_valid_tv_status_)) {
+  if (this->fill_water_required_sensor_ != nullptr && live_status_seen) {
     this->fill_water_required_sensor_->publish_state(this->fill_water_required_);
   }
 
@@ -2224,6 +2233,10 @@ void JuraComponent::update_machine_status_from_state_(const char *source) {
     status = "offline";
     ready = false;
     ESP_LOGD(TAG, "machine_status_update source=%s priority=offline status=\"offline\"", safe_source);
+  } else if (!live_status_seen) {
+    status = "Online";
+    ESP_LOGD(TAG, "machine_status_update source=%s priority=protocol_online_no_live_status status=\"Online\"",
+             safe_source);
   } else if (blocking_alert) {
     status = this->current_machine_warning_.empty() ? "Warnung" : this->current_machine_warning_;
     ready = false;
@@ -2249,12 +2262,15 @@ void JuraComponent::update_machine_status_from_state_(const char *source) {
     ESP_LOGD(TAG, "machine_status_update source=%s priority=online status=\"Online\"", safe_source);
   }
 
+  const std::string live_source_log =
+      live_status_seen ? sanitize_text_for_api(this->current_live_status_source_) : "nicht verfügbar";
+  const std::string display_status_log = sanitize_text_for_api(this->current_display_status_);
+  const std::string machine_status_log = sanitize_text_for_api(status);
   ESP_LOGD(TAG,
            "machine_status_decision online=%s ready=%s has_valid_tf=%s has_valid_tv=%s blocking_alert=%s "
-           "display_state=\"%s\" result=\"%s\"",
+           "live_status_source=\"%s\" display_state=\"%s\" result=\"%s\"",
            YESNO(online), YESNO(ready), YESNO(this->has_valid_tf_status_), YESNO(this->has_valid_tv_status_),
-           YESNO(blocking_alert), sanitize_text_for_api(this->current_display_status_).c_str(),
-           sanitize_text_for_api(status).c_str());
+           YESNO(blocking_alert), live_source_log.c_str(), display_status_log.c_str(), machine_status_log.c_str());
 
   this->publish_machine_status_(status);
   this->publish_machine_ready_(ready);
@@ -2314,6 +2330,7 @@ bool JuraComponent::publish_tf_status_(const std::string &response) {
   };
 
   this->has_valid_tf_status_ = true;
+  this->current_live_status_source_ = "@TF";
   const bool fill_water = has_bit(1);
   const bool coffee_ready = has_bit(13);
   this->fill_water_required_ = fill_water;
@@ -2401,6 +2418,7 @@ bool JuraComponent::handle_tv_progress_(const std::string &response) {
   char code_text[3] = {payload[0], payload[1], '\0'};
   const uint8_t code = static_cast<uint8_t>(std::strtoul(code_text, nullptr, 16));
   this->has_valid_tv_status_ = true;
+  this->current_live_status_source_ = "@TV";
   const char *state = nullptr;
   bool blocking = false;
   switch (code) {

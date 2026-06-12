@@ -32,6 +32,7 @@ CONF_MACHINE_STATUS = "machine_status"
 CONF_MACHINE_DISPLAY_STATUS = "machine_display_status"
 CONF_MACHINE_WARNING = "machine_warning"
 CONF_ACTIVE_ALERTS = "active_alerts"
+CONF_LIVE_STATUS_SOURCE = "live_status_source"
 CONF_STATUS_PROBE_LAST_RESPONSE = "status_probe_last_response"
 CONF_LAST_T2_STATUS_RAW = "last_t2_status_raw"
 CONF_LAST_T2_STATUS_DECODED = "last_t2_status_decoded"
@@ -178,6 +179,7 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_MACHINE_DISPLAY_STATUS): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_MACHINE_WARNING): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_ACTIVE_ALERTS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_LIVE_STATUS_SOURCE): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_STATUS_PROBE_LAST_RESPONSE): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_LAST_T2_STATUS_RAW): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_LAST_T2_STATUS_DECODED): text_sensor.text_sensor_schema(),
@@ -517,6 +519,10 @@ async def to_code(config):
     if CONF_ACTIVE_ALERTS in config:
         active_alerts_sensor = await text_sensor.new_text_sensor(config[CONF_ACTIVE_ALERTS])
         cg.add(var.set_active_alerts_sensor(active_alerts_sensor))
+
+    if CONF_LIVE_STATUS_SOURCE in config:
+        live_status_source_sensor = await text_sensor.new_text_sensor(config[CONF_LIVE_STATUS_SOURCE])
+        cg.add(var.set_live_status_source_sensor(live_status_source_sensor))
 
     if CONF_STATUS_PROBE_LAST_RESPONSE in config:
         status_probe_sensor = await text_sensor.new_text_sensor(config[CONF_STATUS_PROBE_LAST_RESPONSE])
