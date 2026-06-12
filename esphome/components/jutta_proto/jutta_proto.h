@@ -265,6 +265,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_status_debug(bool enabled) { this->status_debug_ = enabled; }
   void set_status_probe_enabled(bool enabled) { this->status_probe_enabled_ = enabled; }
   void set_status_probe_interval(uint32_t interval_ms) { this->status_probe_interval_ms_ = interval_ms; }
+  void run_status_probe_command(const std::string &command);
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
   void set_xml_mapping_source(const char *data, size_t length) {
     this->xml_mapping_data_ = data;
@@ -349,8 +350,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void publish_status_probe_last_response_(const std::string &text);
   void process_status_probe_(uint32_t now);
   void start_status_probe_(uint32_t now);
+  void start_manual_status_probe_(const std::string &command, uint32_t now);
   const char *status_probe_candidate_(size_t index) const;
   size_t status_probe_candidate_count_() const;
+  bool status_probe_command_allowed_(const std::string &command) const;
   bool send_status_probe_candidate_(const std::string &command, uint32_t now);
   bool handle_status_probe_line_(const std::string &line, bool complete, uint32_t now);
   void finish_status_probe_candidate_(uint32_t now, const char *reason);
@@ -776,6 +779,17 @@ class RunSequenceAction : public esphome::Action<> {
  protected:
   JuraComponent *parent_;
   std::vector<::jutta_proto::CoffeeMaker::SequenceStep> steps_{};
+};
+
+class ManualStatusProbeAction : public esphome::Action<> {
+ public:
+  explicit ManualStatusProbeAction(JuraComponent *parent) : parent_(parent) {}
+  void set_command(const std::string &command) { command_ = command; }
+  void play() override { this->parent_->run_status_probe_command(command_); }
+
+ protected:
+  JuraComponent *parent_;
+  std::string command_{};
 };
 
 }  // namespace jutta_component

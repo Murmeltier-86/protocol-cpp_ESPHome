@@ -1502,6 +1502,7 @@ void JuraComponent::loop() {
 
   this->process_machine_data_query();
   this->process_xml_polling();
+  this->process_status_probe_(esphome::millis());
   this->poll_settings_once_();
   this->poll_error_cycle_();
 }
@@ -2464,6 +2465,13 @@ void JuraComponent::publish_status_probe_last_response_(const std::string &text)
   this->status_probe_last_response_sensor_->publish_state(sanitize_text_for_api(text));
 }
 
+void JuraComponent::run_status_probe_command(const std::string &command) {
+  uint32_t now = esphome::millis();
+  std::string trimmed = command;
+  trim_in_place(trimmed);
+  this->start_manual_status_probe_(trimmed, now);
+}
+
 void JuraComponent::start_status_probe_(uint32_t now) {
   this->status_probe_state_ = StatusProbeState::SEND;
   this->status_probe_index_ = 0;
@@ -2477,12 +2485,46 @@ void JuraComponent::start_status_probe_(uint32_t now) {
 }
 
 const char *JuraComponent::status_probe_candidate_(size_t index) const {
-  static const char *const CANDIDATES[] = {"@TF", "@TV", "@TF:", "@TV:"};
+  static const char *const CANDIDATES[] = {"@hf", "@ha:03,20", "@ha:03,21", "@ha:03,22", "@ha:03,23"};
   return index < (sizeof(CANDIDATES) / sizeof(CANDIDATES[0])) ? CANDIDATES[index] : nullptr;
 }
 
 size_t JuraComponent::status_probe_candidate_count_() const {
-  return 4;
+  return 5;
+}
+
+bool JuraComponent::status_probe_command_allowed_(const std::string &command) const {
+  return command == "@hf" || command == "@ha:03,20" || command == "@ha:03,21" || command == "@ha:03,22" ||
+         command == "@ha:03,23";
+}
+
+void JuraComponent::start_manual_status_probe_(const std::string &command, uint32_t now) {
+  if (!this->status_probe_command_allowed_(command)) {
+    ESP_LOGW(TAG, "status_probe_skip reason=unsupported_candidate cmd=%s", command.c_str());
+    this->publish_status_probe_last_response_(command + " -> unsupported_candidate");
+    return;
+  }
+  if (this->status_probe_state_ != StatusProbeState::IDLE) {
+    ESP_LOGD(TAG, "status_probe_skip reason=uart_busy_or_stats_active cmd=%s", command.c_str());
+    this->publish_status_probe_last_response_(command + " -> busy");
+    return;
+  }
+  if (!this->stats_session_ready_ || !this->stats_inner_tx_required_) {
+    ESP_LOGD(TAG, "status_probe_skip reason=post_gate_not_ready cmd=%s", command.c_str());
+    this->publish_status_probe_last_response_(command + " -> post_gate_not_ready");
+    return;
+  }
+  if (!this->post_gate_tx_ready_event_ || this->xml_inflight_ ||
+      this->db_transaction_owner_ != DbTransactionOwner::NONE || this->is_busy()) {
+    ESP_LOGD(TAG, "status_probe_skip reason=uart_busy_or_stats_active cmd=%s owner=%s", command.c_str(),
+             this->db_transaction_owner_name_(this->db_transaction_owner_));
+    this->publish_status_probe_last_response_(command + " -> busy");
+    return;
+  }
+
+  ESP_LOGD(TAG, "manual_status_probe_start cmd=%s", command.c_str());
+  this->publish_status_probe_last_response_(command + " -> started");
+  this->send_status_probe_candidate_(command, now);
 }
 
 bool JuraComponent::send_status_probe_candidate_(const std::string &command, uint32_t now) {
@@ -2490,19 +2532,16 @@ bool JuraComponent::send_status_probe_candidate_(const std::string &command, uin
     return false;
   }
   if (!this->stats_session_ready_ || !this->stats_inner_tx_required_) {
-    ESP_LOGD(TAG, "status_probe_wait reason=post_gate_not_ready cmd=%s", command.c_str());
-    this->status_probe_next_ms_ = now + 1000U;
+    ESP_LOGD(TAG, "status_probe_skip reason=post_gate_not_ready cmd=%s", command.c_str());
     return false;
   }
   if (!this->post_gate_tx_ready_event_) {
-    ESP_LOGD(TAG, "status_probe_wait reason=post_gate_tx_not_ready cmd=%s", command.c_str());
-    this->status_probe_next_ms_ = now + 250U;
+    ESP_LOGD(TAG, "status_probe_skip reason=uart_busy_or_stats_active cmd=%s", command.c_str());
     return false;
   }
   if (this->xml_inflight_ || this->db_transaction_owner_ != DbTransactionOwner::NONE || this->is_busy()) {
-    ESP_LOGD(TAG, "status_probe_wait reason=uart_busy owner=%s cmd=%s",
+    ESP_LOGD(TAG, "status_probe_skip reason=uart_busy_or_stats_active owner=%s cmd=%s",
              this->db_transaction_owner_name_(this->db_transaction_owner_), command.c_str());
-    this->status_probe_next_ms_ = now + 1000U;
     return false;
   }
 
@@ -2516,10 +2555,10 @@ bool JuraComponent::send_status_probe_candidate_(const std::string &command, uin
     this->coffee_maker_->connection->reset_response_line_buffer();
   }
 
-  ESP_LOGD(TAG, "status_probe_tx candidate=%s mode=inner_uart0 timeout_ms=%u", command.c_str(),
+  ESP_LOGD(TAG, "manual_status_probe_tx cmd=%s mode=inner_uart0 timeout_ms=%u", command.c_str(),
            static_cast<unsigned>(kStatusProbeTimeoutMs));
   if (!this->write_inner_uart0_command_(command, now, true)) {
-    ESP_LOGD(TAG, "status_probe_timeout candidate=%s frames=0 reason=tx_failed", command.c_str());
+    ESP_LOGD(TAG, "manual_status_probe_done cmd=%s result=tx_failed frames=0", command.c_str());
     this->finish_status_probe_candidate_(now, "tx_failed");
     return false;
   }
@@ -2537,32 +2576,43 @@ bool JuraComponent::handle_status_probe_line_(const std::string &line, bool comp
 
   this->publish_status_probe_last_response_(line);
   this->update_dongle_events_from_line_(line);
-  ESP_LOGD(TAG, "status_probe_rx_decoded candidate=%s line=\"%s\"", this->status_probe_current_cmd_.c_str(),
+  ESP_LOGD(TAG, "manual_status_probe_rx_decoded cmd=%s line=\"%s\"", this->status_probe_current_cmd_.c_str(),
            sanitize_text_for_api(line).c_str());
 
   if (lower.rfind("@tf:", 0) == 0) {
-    ESP_LOGD(TAG, "status_probe_detected_frame type=tf line=\"%s\"", sanitize_text_for_api(line).c_str());
+    ESP_LOGD(TAG, "manual_status_probe_detected_tf line=\"%s\"", sanitize_text_for_api(line).c_str());
+    ESP_LOGD(TAG, "tf_decode source=manual_probe raw=\"%s\"", sanitize_text_for_api(line).c_str());
     this->publish_tf_status_(line);
     this->finish_status_probe_cycle_(now, "detected_tf");
     return true;
   }
   if (lower.rfind("@tv:", 0) == 0) {
-    ESP_LOGD(TAG, "status_probe_detected_frame type=tv line=\"%s\"", sanitize_text_for_api(line).c_str());
+    ESP_LOGD(TAG, "manual_status_probe_detected_tv line=\"%s\"", sanitize_text_for_api(line).c_str());
     this->handle_tv_progress_(line);
     this->finish_status_probe_cycle_(now, "detected_tv");
     return true;
   }
+  if (lower.rfind("@t2", 0) == 0) {
+    ESP_LOGD(TAG, "manual_status_probe_detected_t2 line=\"%s\"", sanitize_text_for_api(line).c_str());
+    this->handle_t2_status_debug_(line);
+    return false;
+  }
+  if (lower.rfind("@", 0) == 0) {
+    ESP_LOGD(TAG, "manual_status_probe_detected_status_like line=\"%s\"", sanitize_text_for_api(line).c_str());
+    return false;
+  }
 
-  ESP_LOGD(TAG, "status_probe_rx_unmatched candidate=%s decoded_or_ascii=\"%s\"",
+  ESP_LOGD(TAG, "manual_status_probe_rx_unmatched cmd=%s decoded_or_ascii=\"%s\"",
            this->status_probe_current_cmd_.c_str(), sanitize_text_for_api(line).c_str());
   return false;
 }
 
 void JuraComponent::finish_status_probe_candidate_(uint32_t now, const char *reason) {
   const char *safe_reason = reason != nullptr ? reason : "done";
-  ESP_LOGD(TAG, "status_probe_candidate_done candidate=%s reason=%s frames=%u",
-           this->status_probe_current_cmd_.empty() ? "(none)" : this->status_probe_current_cmd_.c_str(), safe_reason,
-           static_cast<unsigned>(this->status_probe_frames_));
+  const std::string command = this->status_probe_current_cmd_;
+  const uint16_t frames = this->status_probe_frames_;
+  ESP_LOGD(TAG, "manual_status_probe_done cmd=%s result=%s frames=%u",
+           command.empty() ? "(none)" : command.c_str(), safe_reason, static_cast<unsigned>(frames));
   if (this->db_transaction_owner_ == DbTransactionOwner::STATUS_PROBE) {
     this->db_transaction_owner_ = DbTransactionOwner::NONE;
   }
@@ -2570,16 +2620,15 @@ void JuraComponent::finish_status_probe_candidate_(uint32_t now, const char *rea
   this->status_probe_current_cmd_.clear();
   this->status_probe_rx_buffer_.clear();
   this->status_probe_deadline_ms_ = 0;
-  this->status_probe_index_++;
-  if (this->status_probe_index_ >= this->status_probe_candidate_count_()) {
-    this->finish_status_probe_cycle_(now, "no_status_frame");
-    return;
-  }
-  this->status_probe_state_ = StatusProbeState::SEND;
+  this->status_probe_state_ = StatusProbeState::IDLE;
+  this->publish_status_probe_last_response_((command.empty() ? std::string{} : command + " -> ") + safe_reason +
+                                            " frames=" + std::to_string(frames));
+  (void) now;
 }
 
 void JuraComponent::finish_status_probe_cycle_(uint32_t now, const char *result) {
   const char *safe_result = result != nullptr ? result : "done";
+  std::string command = this->status_probe_current_cmd_;
   if (this->db_transaction_owner_ == DbTransactionOwner::STATUS_PROBE) {
     this->db_transaction_owner_ = DbTransactionOwner::NONE;
   }
@@ -2589,23 +2638,19 @@ void JuraComponent::finish_status_probe_cycle_(uint32_t now, const char *result)
   this->status_probe_current_cmd_.clear();
   this->status_probe_rx_buffer_.clear();
   this->status_probe_deadline_ms_ = 0;
-  this->status_probe_next_ms_ = now + this->status_probe_interval_ms_;
-  ESP_LOGD(TAG, "status_probe_done result=%s next_retry_ms=%u", safe_result,
-           static_cast<unsigned>(this->status_probe_interval_ms_));
+  this->status_probe_next_ms_ = 0;
+  ESP_LOGD(TAG, "manual_status_probe_done cmd=%s result=%s frames=%u",
+           command.empty() ? "(none)" : command.c_str(), safe_result, static_cast<unsigned>(this->status_probe_frames_));
   if (std::strcmp(safe_result, "detected_tf") != 0 && std::strcmp(safe_result, "detected_tv") != 0) {
-    this->publish_status_probe_last_response_(safe_result);
+    this->publish_status_probe_last_response_((command.empty() ? std::string{} : command + " -> ") + safe_result +
+                                              " frames=" + std::to_string(this->status_probe_frames_));
   }
+  (void) now;
 }
 
 void JuraComponent::process_status_probe_(uint32_t now) {
-  if (!this->status_probe_enabled_) {
+  if (this->status_probe_state_ == StatusProbeState::IDLE || this->status_probe_state_ == StatusProbeState::DONE) {
     return;
-  }
-  if (this->status_probe_next_ms_ != 0 && !time_reached(now, this->status_probe_next_ms_)) {
-    return;
-  }
-  if (this->status_probe_state_ == StatusProbeState::IDLE) {
-    this->start_status_probe_(now);
   }
 
   if (this->status_probe_state_ == StatusProbeState::SEND) {
@@ -2629,21 +2674,21 @@ void JuraComponent::process_status_probe_(uint32_t now) {
   std::string raw_line;
   while (this->coffee_maker_->connection->read_line_until(raw_line)) {
     this->status_probe_frames_++;
-    ESP_LOGD(TAG, "status_probe_rx_raw candidate=%s hex=\"%s\"", this->status_probe_current_cmd_.c_str(),
+    ESP_LOGD(TAG, "manual_status_probe_rx_raw cmd=%s hex=\"%s\"", this->status_probe_current_cmd_.c_str(),
              compact_hex_string(raw_line, raw_line.size()).c_str());
     if (!raw_line.empty() && this->xml_decode_inner_transport_ &&
         is_inner_transport_start(static_cast<uint8_t>(raw_line.front()))) {
       std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(raw_line);
       if (!candidates.empty() && !candidates.front().payload.empty()) {
         const auto &decoded = candidates.front();
-        ESP_LOGD(TAG, "status_probe_rx_decoded candidate=%s line=\"%s\" table=%s",
+        ESP_LOGD(TAG, "manual_status_probe_rx_decoded cmd=%s line=\"%s\" table=%s",
                  this->status_probe_current_cmd_.c_str(), transport_payload_log_text(decoded.payload).c_str(),
                  decoded.table_name);
         if (this->handle_status_probe_line_(decoded.payload, true, now)) {
           return;
         }
       } else {
-        ESP_LOGD(TAG, "status_probe_rx_noise candidate=%s reason=inner_decode_empty",
+        ESP_LOGD(TAG, "manual_status_probe_rx_noise cmd=%s reason=inner_decode_empty",
                  this->status_probe_current_cmd_.c_str());
       }
     } else if (this->is_printable_status_text_(raw_line)) {
@@ -2651,13 +2696,13 @@ void JuraComponent::process_status_probe_(uint32_t now) {
         return;
       }
     } else {
-      ESP_LOGD(TAG, "status_probe_rx_noise candidate=%s reason=non_printable hex=\"%s\"",
+      ESP_LOGD(TAG, "manual_status_probe_rx_noise cmd=%s reason=non_printable hex=\"%s\"",
                this->status_probe_current_cmd_.c_str(), compact_hex_string(raw_line, raw_line.size()).c_str());
     }
   }
 
   if (time_reached(now, this->status_probe_deadline_ms_)) {
-    ESP_LOGD(TAG, "status_probe_timeout candidate=%s frames=%u", this->status_probe_current_cmd_.c_str(),
+    ESP_LOGD(TAG, "manual_status_probe_timeout cmd=%s frames=%u", this->status_probe_current_cmd_.c_str(),
              static_cast<unsigned>(this->status_probe_frames_));
     this->finish_status_probe_candidate_(now, "timeout");
   }

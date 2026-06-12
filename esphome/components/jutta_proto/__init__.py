@@ -18,6 +18,7 @@ CONF_WATER_DURATION = "water_duration"
 CONF_PAGE = "page"
 CONF_SEQUENCE = "sequence"
 CONF_COMMAND = "command"
+CONF_PROBE = "probe"
 CONF_RAW = "raw"
 CONF_SLEEP = "sleep"
 CONF_DELAY = "delay"
@@ -92,6 +93,9 @@ CancelCustomBrewAction = jutta_component_ns.class_(
 )
 SwitchPageAction = jutta_component_ns.class_("SwitchPageAction", automation.Action)
 RunSequenceAction = jutta_component_ns.class_("RunSequenceAction", automation.Action)
+ManualStatusProbeAction = jutta_component_ns.class_(
+    "ManualStatusProbeAction", automation.Action
+)
 
 COFFEE_TYPES = {
     "espresso": CoffeeType.ESPRESSO,
@@ -138,6 +142,14 @@ SEQUENCE_COMMAND_EXPRESSIONS = {
     "water_heater_off": cg.RawExpression("::jutta_proto::JUTTA_COFFEE_WATER_HEATER_OFF"),
     "water_pump_on": cg.RawExpression("::jutta_proto::JUTTA_COFFEE_WATER_PUMP_ON"),
     "water_pump_off": cg.RawExpression("::jutta_proto::JUTTA_COFFEE_WATER_PUMP_OFF"),
+}
+
+STATUS_PROBE_COMMANDS = {
+    "hf": "@hf",
+    "ha_0": "@ha:03,20",
+    "ha_1": "@ha:03,21",
+    "ha_2": "@ha:03,22",
+    "ha_3": "@ha:03,23",
 }
 
 JURA_COMPONENT_IDS = []
@@ -346,6 +358,19 @@ def _normalize_sequence(value):
         {
             cv.Optional(CONF_ID): cv.use_id(JuraComponent),
             cv.Required(CONF_SEQUENCE): cv.All(cv.ensure_list(_validate_sequence_step)),
+        }
+    )(value)
+
+
+def _normalize_status_probe(value):
+    if isinstance(value, str):
+        value = {CONF_PROBE: value}
+    if value is None:
+        value = {}
+    return cv.Schema(
+        {
+            cv.Optional(CONF_ID): cv.use_id(JuraComponent),
+            cv.Required(CONF_PROBE): cv.enum(STATUS_PROBE_COMMANDS, lower=True),
         }
     )(value)
 
@@ -594,4 +619,13 @@ async def run_sequence_action_to_code(config, action_id, template_args, args):
             delay_ms = step[CONF_DELAY].total_milliseconds
             cg.add(var.add_delay_step(delay_ms, description))
 
+    return var
+
+
+@automation.register_action("jutta_proto.status_probe", ManualStatusProbeAction, _normalize_status_probe, synchronous=False)
+async def status_probe_action_to_code(config, action_id, template_args, args):
+    _ = args
+    parent = await _get_parent(config)
+    var = cg.new_Pvariable(action_id, parent)
+    cg.add(var.set_command(cg.std_string(STATUS_PROBE_COMMANDS[config[CONF_PROBE]])))
     return var
