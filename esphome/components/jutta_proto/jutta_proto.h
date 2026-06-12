@@ -222,6 +222,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_status_probe_last_response_sensor(text_sensor::TextSensor *sensor) {
     this->status_probe_last_response_sensor_ = sensor;
   }
+  void set_last_t2_status_raw_sensor(text_sensor::TextSensor *sensor) { this->last_t2_status_raw_sensor_ = sensor; }
+  void set_last_t2_status_decoded_sensor(text_sensor::TextSensor *sensor) {
+    this->last_t2_status_decoded_sensor_ = sensor;
+  }
   void set_machine_online_sensor(binary_sensor::BinarySensor *sensor) { this->machine_online_sensor_ = sensor; }
   void set_machine_ready_sensor(binary_sensor::BinarySensor *sensor) { this->machine_ready_sensor_ = sensor; }
   void set_fill_water_required_sensor(binary_sensor::BinarySensor *sensor) { this->fill_water_required_sensor_ = sensor; }
@@ -340,6 +344,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void publish_machine_ready_(bool ready);
   bool publish_tf_status_(const std::string &response);
   bool handle_tv_progress_(const std::string &response);
+  bool handle_t2_status_debug_(const std::string &response);
   void update_machine_status_from_state_(const char *source);
   void publish_status_probe_last_response_(const std::string &text);
   void process_status_probe_(uint32_t now);
@@ -522,6 +527,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   text_sensor::TextSensor *machine_warning_sensor_{nullptr};
   text_sensor::TextSensor *active_alerts_sensor_{nullptr};
   text_sensor::TextSensor *status_probe_last_response_sensor_{nullptr};
+  text_sensor::TextSensor *last_t2_status_raw_sensor_{nullptr};
+  text_sensor::TextSensor *last_t2_status_decoded_sensor_{nullptr};
   binary_sensor::BinarySensor *machine_online_sensor_{nullptr};
   binary_sensor::BinarySensor *machine_ready_sensor_{nullptr};
   binary_sensor::BinarySensor *fill_water_required_sensor_{nullptr};

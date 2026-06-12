@@ -1469,8 +1469,8 @@ void JuraComponent::setup() {
              "DAT_400d073c_progress esphome=passive_uart_tf_tv");
   }
   if (this->status_probe_enabled_) {
-    ESP_LOGI(TAG, "status_probe_enabled interval_ms=%u mode=diagnostic_post_gate",
-             static_cast<unsigned>(this->status_probe_interval_ms_));
+    ESP_LOGW(TAG, "status_probe_disabled reason=tf_tv_direct_commands_not_valid");
+    this->status_probe_enabled_ = false;
   }
   if (this->enable_xml_poll_) {
     this->ensure_xml_mapping_loaded_();
@@ -1502,7 +1502,6 @@ void JuraComponent::loop() {
 
   this->process_machine_data_query();
   this->process_xml_polling();
-  this->process_status_probe_(esphome::millis());
   this->poll_settings_once_();
   this->poll_error_cycle_();
 }
@@ -1883,9 +1882,6 @@ void JuraComponent::handle_decoded_response_(const std::string &response, const 
   }
 
   if (lowered.rfind("@tf:", 0) == 0) {
-    if (this->status_debug_) {
-      ESP_LOGD(TAG, "passive_status_frame type=tf line=\"%s\"", sanitize_text_for_api(response).c_str());
-    }
     if (this->publish_tf_status_(response)) {
       this->publish_last_command_result_("tf_status");
     }
@@ -1893,9 +1889,6 @@ void JuraComponent::handle_decoded_response_(const std::string &response, const 
   }
 
   if (lowered.rfind("@tv:", 0) == 0) {
-    if (this->status_debug_) {
-      ESP_LOGD(TAG, "passive_status_frame type=tv line=\"%s\"", sanitize_text_for_api(response).c_str());
-    }
     if (this->handle_tv_progress_(response)) {
       this->publish_last_command_result_("tv_progress");
     }
@@ -2404,6 +2397,63 @@ bool JuraComponent::handle_tv_progress_(const std::string &response) {
   ESP_LOGD(TAG, "tv_decode raw=\"%s\" valid=YES state=\"%s\"", sanitize_text_for_api(trimmed).c_str(),
            sanitize_text_for_api(state).c_str());
   this->update_machine_status_from_state_("tv");
+  return true;
+}
+
+bool JuraComponent::handle_t2_status_debug_(const std::string &response) {
+  std::string trimmed = response;
+  trim_in_place(trimmed);
+  if (trimmed.rfind("@T2", 0) != 0) {
+    return false;
+  }
+
+  std::string payload;
+  if (trimmed.rfind("@T2:", 0) == 0) {
+    payload = trimmed.substr(4);
+  } else {
+    payload = trimmed.substr(3);
+  }
+
+  std::vector<uint8_t> payload_bytes;
+  bool payload_is_hex = !payload.empty() && (payload.size() % 2U) == 0;
+  if (payload_is_hex) {
+    payload_bytes.reserve(payload.size() / 2U);
+    for (size_t i = 0; i < payload.size(); i += 2U) {
+      if (!std::isxdigit(static_cast<unsigned char>(payload[i])) ||
+          !std::isxdigit(static_cast<unsigned char>(payload[i + 1U]))) {
+        payload_is_hex = false;
+        payload_bytes.clear();
+        break;
+      }
+      char byte_text[3] = {payload[i], payload[i + 1U], '\0'};
+      payload_bytes.push_back(static_cast<uint8_t>(std::strtoul(byte_text, nullptr, 16)));
+    }
+  }
+
+  const std::string payload_hex =
+      payload_is_hex ? format_hex_string(payload_bytes) : compact_hex_string(payload, payload.size());
+  const std::string candidate073c = payload.substr(0, std::min<size_t>(payload.size(), 16U));
+  const std::string candidate0740 = trimmed.size() > 10U ? trimmed.substr(10U) : std::string{};
+  const std::string decoded = "payload=" + payload + " len=" + std::to_string(payload_bytes.size()) +
+                              " bytes=" + payload_hex + " candidate073c=" + candidate073c +
+                              " candidate0740_offset10=" + candidate0740;
+
+  ESP_LOGD(TAG, "t2_status_decode raw=\"%s\" payload=\"%s\" len=%u",
+           sanitize_text_for_api(trimmed).c_str(), sanitize_text_for_api(payload).c_str(),
+           static_cast<unsigned>(payload_bytes.size()));
+  ESP_LOGD(TAG, "t2_status_cache candidate073c=\"%s\"",
+           sanitize_text_for_api(candidate073c).c_str());
+  ESP_LOGD(TAG, "t2_status_word candidate0740_offset10=\"%s\"",
+           sanitize_text_for_api(candidate0740).c_str());
+  ESP_LOGD(TAG, "t2_status_event set=0x%02X events=0x%02X", static_cast<unsigned>(DONGLE_EVENT_T2),
+           static_cast<unsigned>(this->dongle_events_ | DONGLE_EVENT_T2));
+
+  if (this->last_t2_status_raw_sensor_ != nullptr) {
+    this->last_t2_status_raw_sensor_->publish_state(sanitize_text_for_api(trimmed));
+  }
+  if (this->last_t2_status_decoded_sensor_ != nullptr) {
+    this->last_t2_status_decoded_sensor_->publish_state(sanitize_text_for_api(decoded));
+  }
   return true;
 }
 
@@ -4683,16 +4733,29 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
     bit = DONGLE_EVENT_TY;
   } else if (lower.rfind("@t0", 0) == 0) {
     bit = DONGLE_EVENT_T0;
+    if (this->status_debug_) {
+      ESP_LOGD(TAG, "passive_status_frame type=t0 line=\"%s\" event=0x02",
+               sanitize_text_for_api(trimmed).c_str());
+    }
   } else if (lower.rfind("@t1", 0) == 0) {
     bit = DONGLE_EVENT_T1;
   } else if (trimmed.rfind("@T2", 0) == 0) {
     bit = DONGLE_EVENT_T2;
+    if (this->status_debug_) {
+      ESP_LOGD(TAG, "passive_status_frame type=t2 line=\"%s\"",
+               sanitize_text_for_api(trimmed).c_str());
+    }
+    this->handle_t2_status_debug_(trimmed);
     uint16_t parsed_word = 0;
     if (parse_t2_word_from_response(trimmed, parsed_word)) {
       this->startup_t2_word_ = parsed_word;
     }
   } else if (trimmed.rfind("@T3", 0) == 0) {
     bit = DONGLE_EVENT_T3;
+    if (this->status_debug_) {
+      ESP_LOGD(TAG, "passive_status_frame type=t3 line=\"%s\"",
+               sanitize_text_for_api(trimmed).c_str());
+    }
     this->dongle_machine_identity_ = trimmed;
     if (this->dongle_startup_state_ == DongleStartupState::WAIT_AFTER_T3) {
       this->dongle_startup_t3_seen_during_quiet_ = true;
@@ -4706,8 +4769,17 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
     this->dongle_tr_payload_ = trimmed;
   } else if (lower.rfind("@tf:", 0) == 0) {
     bit = DONGLE_EVENT_TF;
+    if (this->status_debug_) {
+      ESP_LOGD(TAG, "passive_status_frame type=tf line=\"%s\"",
+               sanitize_text_for_api(trimmed).c_str());
+    }
     if (this->dongle_startup_state_ == DongleStartupState::WAIT_TR37) {
       ESP_LOGD(TAG, "dongle_startup_not_stats class=tf_status decoded=\"%s\"",
+               sanitize_text_for_api(trimmed).c_str());
+    }
+  } else if (lower.rfind("@tv:", 0) == 0) {
+    if (this->status_debug_) {
+      ESP_LOGD(TAG, "passive_status_frame type=tv line=\"%s\"",
                sanitize_text_for_api(trimmed).c_str());
     }
   } else if (lower.rfind("@tg", 0) == 0 && this->xml_dongle_startup_debug_) {

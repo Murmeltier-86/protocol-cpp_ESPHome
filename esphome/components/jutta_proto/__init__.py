@@ -32,6 +32,8 @@ CONF_MACHINE_DISPLAY_STATUS = "machine_display_status"
 CONF_MACHINE_WARNING = "machine_warning"
 CONF_ACTIVE_ALERTS = "active_alerts"
 CONF_STATUS_PROBE_LAST_RESPONSE = "status_probe_last_response"
+CONF_LAST_T2_STATUS_RAW = "last_t2_status_raw"
+CONF_LAST_T2_STATUS_DECODED = "last_t2_status_decoded"
 CONF_MACHINE_ONLINE = "machine_online"
 CONF_MACHINE_READY = "machine_ready"
 CONF_FILL_WATER_REQUIRED = "fill_water_required"
@@ -157,6 +159,8 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_MACHINE_WARNING): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_ACTIVE_ALERTS): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_STATUS_PROBE_LAST_RESPONSE): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_LAST_T2_STATUS_RAW): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_LAST_T2_STATUS_DECODED): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_MACHINE_ONLINE): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_MACHINE_READY): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_FILL_WATER_REQUIRED): binary_sensor.binary_sensor_schema(),
@@ -471,6 +475,14 @@ async def to_code(config):
     if CONF_STATUS_PROBE_LAST_RESPONSE in config:
         status_probe_sensor = await text_sensor.new_text_sensor(config[CONF_STATUS_PROBE_LAST_RESPONSE])
         cg.add(var.set_status_probe_last_response_sensor(status_probe_sensor))
+
+    if CONF_LAST_T2_STATUS_RAW in config:
+        last_t2_raw_sensor = await text_sensor.new_text_sensor(config[CONF_LAST_T2_STATUS_RAW])
+        cg.add(var.set_last_t2_status_raw_sensor(last_t2_raw_sensor))
+
+    if CONF_LAST_T2_STATUS_DECODED in config:
+        last_t2_decoded_sensor = await text_sensor.new_text_sensor(config[CONF_LAST_T2_STATUS_DECODED])
+        cg.add(var.set_last_t2_status_decoded_sensor(last_t2_decoded_sensor))
 
     if CONF_MACHINE_ONLINE in config:
         machine_online_sensor = await binary_sensor.new_binary_sensor(config[CONF_MACHINE_ONLINE])
