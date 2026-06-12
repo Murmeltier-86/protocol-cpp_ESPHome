@@ -31,6 +31,7 @@ CONF_MACHINE_STATUS = "machine_status"
 CONF_MACHINE_DISPLAY_STATUS = "machine_display_status"
 CONF_MACHINE_WARNING = "machine_warning"
 CONF_ACTIVE_ALERTS = "active_alerts"
+CONF_STATUS_PROBE_LAST_RESPONSE = "status_probe_last_response"
 CONF_MACHINE_ONLINE = "machine_online"
 CONF_MACHINE_READY = "machine_ready"
 CONF_FILL_WATER_REQUIRED = "fill_water_required"
@@ -66,6 +67,9 @@ CONF_XML_DONGLE_INNER_TX_DEBUG = "xml_dongle_inner_tx_debug"
 CONF_XML_RUN_TABLET_START_SEQUENCE = "xml_run_tablet_start_sequence"
 CONF_XML_TABLET_SEQUENCE_MODE = "xml_tablet_sequence_mode"
 CONF_XML_COUNTER_MAX = "xml_counter_max"
+CONF_STATUS_DEBUG = "status_debug"
+CONF_STATUS_PROBE_ENABLED = "status_probe_enabled"
+CONF_STATUS_PROBE_INTERVAL_MS = "status_probe_interval_ms"
 CONF_XML_SENSORS = "xml_sensors"
 CONF_FIELD = "field"
 CONF_LOG_DECODED_TX = "log_decoded_tx"
@@ -152,6 +156,7 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_MACHINE_DISPLAY_STATUS): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_MACHINE_WARNING): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_ACTIVE_ALERTS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_STATUS_PROBE_LAST_RESPONSE): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_MACHINE_ONLINE): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_MACHINE_READY): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_FILL_WATER_REQUIRED): binary_sensor.binary_sensor_schema(),
@@ -197,6 +202,11 @@ CONFIG_SCHEMA = (
                 "minimal", "minimal_tr37", lower=True
             ),
             cv.Optional(CONF_XML_COUNTER_MAX, default=20000): cv.positive_int,
+            cv.Optional(CONF_STATUS_DEBUG, default=False): cv.boolean,
+            cv.Optional(CONF_STATUS_PROBE_ENABLED, default=False): cv.boolean,
+            cv.Optional(CONF_STATUS_PROBE_INTERVAL_MS, default=300000): cv.All(
+                cv.positive_int, cv.Range(min=10000)
+            ),
             cv.Optional(CONF_XML_SENSORS, default=[]): cv.ensure_list(XML_SENSOR_SCHEMA),
             cv.Optional(CONF_LOG_DECODED_TX, default=True): cv.boolean,
             cv.Optional(CONF_LOG_ENCODED_UART, default=False): cv.boolean,
@@ -376,6 +386,9 @@ async def to_code(config):
     cg.add(var.set_xml_run_tablet_start_sequence(config[CONF_XML_RUN_TABLET_START_SEQUENCE]))
     cg.add(var.set_xml_tablet_sequence_mode(config[CONF_XML_TABLET_SEQUENCE_MODE]))
     cg.add(var.set_xml_counter_max(config[CONF_XML_COUNTER_MAX]))
+    cg.add(var.set_status_debug(config[CONF_STATUS_DEBUG]))
+    cg.add(var.set_status_probe_enabled(config[CONF_STATUS_PROBE_ENABLED]))
+    cg.add(var.set_status_probe_interval(config[CONF_STATUS_PROBE_INTERVAL_MS]))
     mapping_path = config[CONF_XML_MAPPING_PATH]
     if mapping_path == "embedded":
         resolved_path = os.path.join(COMPONENT_DIR, "jura_mapping_embed.xml")
@@ -454,6 +467,10 @@ async def to_code(config):
     if CONF_ACTIVE_ALERTS in config:
         active_alerts_sensor = await text_sensor.new_text_sensor(config[CONF_ACTIVE_ALERTS])
         cg.add(var.set_active_alerts_sensor(active_alerts_sensor))
+
+    if CONF_STATUS_PROBE_LAST_RESPONSE in config:
+        status_probe_sensor = await text_sensor.new_text_sensor(config[CONF_STATUS_PROBE_LAST_RESPONSE])
+        cg.add(var.set_status_probe_last_response_sensor(status_probe_sensor))
 
     if CONF_MACHINE_ONLINE in config:
         machine_online_sensor = await binary_sensor.new_binary_sensor(config[CONF_MACHINE_ONLINE])

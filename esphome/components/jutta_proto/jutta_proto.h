@@ -219,6 +219,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_machine_display_status_sensor(text_sensor::TextSensor *sensor) { this->machine_display_status_sensor_ = sensor; }
   void set_machine_warning_sensor(text_sensor::TextSensor *sensor) { this->machine_warning_sensor_ = sensor; }
   void set_active_alerts_sensor(text_sensor::TextSensor *sensor) { this->active_alerts_sensor_ = sensor; }
+  void set_status_probe_last_response_sensor(text_sensor::TextSensor *sensor) {
+    this->status_probe_last_response_sensor_ = sensor;
+  }
   void set_machine_online_sensor(binary_sensor::BinarySensor *sensor) { this->machine_online_sensor_ = sensor; }
   void set_machine_ready_sensor(binary_sensor::BinarySensor *sensor) { this->machine_ready_sensor_ = sensor; }
   void set_fill_water_required_sensor(binary_sensor::BinarySensor *sensor) { this->fill_water_required_sensor_ = sensor; }
@@ -255,6 +258,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_dongle_inner_tx_debug(bool enabled) { this->xml_dongle_inner_tx_debug_ = enabled; }
   void set_xml_run_tablet_start_sequence(bool enabled) { this->xml_run_tablet_start_sequence_ = enabled; }
   void set_xml_tablet_sequence_mode(const std::string &mode) { this->xml_tablet_sequence_mode_ = mode; }
+  void set_status_debug(bool enabled) { this->status_debug_ = enabled; }
+  void set_status_probe_enabled(bool enabled) { this->status_probe_enabled_ = enabled; }
+  void set_status_probe_interval(uint32_t interval_ms) { this->status_probe_interval_ms_ = interval_ms; }
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
   void set_xml_mapping_source(const char *data, size_t length) {
     this->xml_mapping_data_ = data;
@@ -299,6 +305,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   };
   enum class XmlCommandProbeState { IDLE, SEND, WAIT, DONE };
   enum class XmlSessionProbeState { IDLE, SEND, WAIT, DONE, FAILED };
+  enum class StatusProbeState { IDLE, SEND, WAIT, DONE };
   enum class DongleStartupState {
     IDLE,
     START_CLEAR,
@@ -334,6 +341,15 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool publish_tf_status_(const std::string &response);
   bool handle_tv_progress_(const std::string &response);
   void update_machine_status_from_state_(const char *source);
+  void publish_status_probe_last_response_(const std::string &text);
+  void process_status_probe_(uint32_t now);
+  void start_status_probe_(uint32_t now);
+  const char *status_probe_candidate_(size_t index) const;
+  size_t status_probe_candidate_count_() const;
+  bool send_status_probe_candidate_(const std::string &command, uint32_t now);
+  bool handle_status_probe_line_(const std::string &line, bool complete, uint32_t now);
+  void finish_status_probe_candidate_(uint32_t now, const char *reason);
+  void finish_status_probe_cycle_(uint32_t now, const char *result);
   bool decode_and_publish_status_(const std::string &response, const char *parser_branch);
   std::string format_decoded_status_(const std::vector<JuraDecodedField> &fields) const;
   bool is_printable_status_text_(const std::string &text) const;
@@ -412,7 +428,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     PARSE_TGC0,
     SLEEP
   };
-  enum class DbTransactionOwner { NONE, XML_POLL, MACHINE_XML };
+  enum class DbTransactionOwner { NONE, XML_POLL, MACHINE_XML, STATUS_PROBE };
   size_t xml_command_index_(XmlPollState state) const;
   const char *db_transaction_owner_name_(DbTransactionOwner owner) const;
   bool begin_xml_transaction_(const char *command, uint32_t now);
@@ -505,6 +521,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   text_sensor::TextSensor *machine_display_status_sensor_{nullptr};
   text_sensor::TextSensor *machine_warning_sensor_{nullptr};
   text_sensor::TextSensor *active_alerts_sensor_{nullptr};
+  text_sensor::TextSensor *status_probe_last_response_sensor_{nullptr};
   binary_sensor::BinarySensor *machine_online_sensor_{nullptr};
   binary_sensor::BinarySensor *machine_ready_sensor_{nullptr};
   binary_sensor::BinarySensor *fill_water_required_sensor_{nullptr};
@@ -528,6 +545,16 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool has_valid_tv_status_{false};
   bool fill_water_required_{false};
   bool tf_coffee_ready_active_{false};
+  bool status_debug_{false};
+  bool status_probe_enabled_{false};
+  uint32_t status_probe_interval_ms_{300000};
+  uint32_t status_probe_next_ms_{0};
+  StatusProbeState status_probe_state_{StatusProbeState::IDLE};
+  size_t status_probe_index_{0};
+  std::string status_probe_current_cmd_{};
+  std::string status_probe_rx_buffer_{};
+  uint32_t status_probe_deadline_ms_{0};
+  uint16_t status_probe_frames_{0};
 
   bool enable_machine_xml_poll_{true};
   bool enable_xml_poll_{false};
