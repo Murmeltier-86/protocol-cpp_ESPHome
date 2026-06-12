@@ -1517,7 +1517,10 @@ void JuraComponent::setup() {
              "DAT_400d073c_progress esphome=passive_uart_tf_tv");
   }
   if (this->status_forensics_) {
-    ESP_LOGI(TAG, "status_forensics enabled; passive RX diagnostics only, no automatic status commands");
+    ESP_LOGI(TAG,
+             "status_forensics enabled; passive RX diagnostics only, interval=%u ms, verbose_candidates=%s",
+             static_cast<unsigned>(this->status_forensics_log_interval_ms_),
+             YESNO(this->status_forensics_verbose_candidates_));
   }
   if (this->status_probe_enabled_) {
     ESP_LOGW(TAG, "status_probe_disabled reason=tf_tv_direct_commands_not_valid");
@@ -1640,6 +1643,10 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML session probe variant: %s", this->xml_session_probe_variant_.c_str());
   ESP_LOGCONFIG(TAG, "  Status debug: %s", YESNO(this->status_debug_));
   ESP_LOGCONFIG(TAG, "  Status forensics: %s", YESNO(this->status_forensics_));
+  ESP_LOGCONFIG(TAG, "  Status forensics interval: %u ms",
+                static_cast<unsigned>(this->status_forensics_log_interval_ms_));
+  ESP_LOGCONFIG(TAG, "  Status forensics verbose candidates: %s",
+                YESNO(this->status_forensics_verbose_candidates_));
   ESP_LOGCONFIG(TAG, "  Status probe: %s", YESNO(this->status_probe_enabled_));
   ESP_LOGCONFIG(TAG, "  Status probe interval: %u ms", static_cast<unsigned>(this->status_probe_interval_ms_));
   ESP_LOGCONFIG(TAG, "  Unsafe debug commands: %s", YESNO(this->allow_unsafe_debug_commands_));
@@ -2601,6 +2608,9 @@ void JuraComponent::log_status_forensics_decoded_(const std::string &line, const
   if (!this->status_forensics_) {
     return;
   }
+  if (!this->status_forensics_decode_log_allowed_) {
+    return;
+  }
   std::string trimmed = line;
   trim_in_place(trimmed);
   if (trimmed.empty()) {
@@ -2622,14 +2632,20 @@ void JuraComponent::log_status_forensics_decoded_(const std::string &line, const
 
   const char *safe_source = source != nullptr ? source : "unknown";
   const char *safe_table = table_name != nullptr ? table_name : "ascii";
+  bool logged = false;
   if (type != nullptr) {
     ESP_LOGD(TAG, "status_forensics_known ts_ms=%u source=%s table=%s type=%s line=\"%s\"",
              static_cast<unsigned>(esphome::millis()), safe_source, safe_table, type,
              sanitize_text_for_api(trimmed).c_str());
+    logged = true;
   } else if (this->is_printable_status_text_(trimmed)) {
     ESP_LOGD(TAG, "status_forensics_unknown_printable ts_ms=%u source=%s table=%s line=\"%s\"",
              static_cast<unsigned>(esphome::millis()), safe_source, safe_table,
              sanitize_text_for_api(trimmed).c_str());
+    logged = true;
+  }
+  if (logged) {
+    this->status_forensics_decode_log_allowed_ = false;
   }
 }
 
@@ -2637,10 +2653,21 @@ void JuraComponent::log_status_forensics_frame_(const std::string &raw, const ch
   if (!this->status_forensics_) {
     return;
   }
+  this->status_forensics_decode_log_allowed_ = false;
   const char *safe_source = source != nullptr ? source : "unknown";
-  ESP_LOGD(TAG, "status_forensics_raw ts_ms=%u source=%s len=%u hex=\"%s\"",
-           static_cast<unsigned>(esphome::millis()), safe_source, static_cast<unsigned>(raw.size()),
-           compact_hex_string(raw, raw.size()).c_str());
+  const uint32_t now = esphome::millis();
+  const std::string raw_hex = compact_hex_string(raw, raw.size());
+
+  bool important = false;
+  if (!raw.empty() && this->is_printable_status_text_(raw)) {
+    std::string trimmed = raw;
+    trim_in_place(trimmed);
+    std::string lower = to_lower_copy(trimmed);
+    important = lower.rfind("@tf:", 0) == 0 || lower.rfind("@tv:", 0) == 0 || lower.rfind("@tm", 0) == 0 ||
+                trimmed.rfind("@T2", 0) == 0 || trimmed.rfind("@T3", 0) == 0 || lower.rfind("@t0", 0) == 0 ||
+                lower.rfind("@tr", 0) == 0 || lower.rfind("@tg", 0) == 0 || lower.rfind("ty:", 0) == 0 ||
+                !trimmed.empty();
+  }
   if (!raw.empty() && is_inner_transport_start(static_cast<uint8_t>(raw.front()))) {
     std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(raw);
     int selected = -1;
@@ -2649,21 +2676,70 @@ void JuraComponent::log_status_forensics_frame_(const std::string &raw, const ch
       if (selected < 0 && !candidate.payload.empty() && this->is_printable_status_text_(candidate.payload)) {
         selected = static_cast<int>(i);
       }
-      ESP_LOGD(TAG,
-               "status_forensics_candidate source=%s idx=%u table=%s ok=%s len=%u printable=%u first_ascii=\"%s\" "
-               "hex=\"%s\"",
-               safe_source, static_cast<unsigned>(i), candidate.table_name, YESNO(!candidate.payload.empty()),
-               static_cast<unsigned>(candidate.payload.size()), static_cast<unsigned>(candidate.printable_ratio),
-               printable_preview(candidate.payload, 32).c_str(), compact_hex_string(candidate.payload, 32).c_str());
+      std::string payload_lower = to_lower_copy(candidate.payload);
+      trim_in_place(payload_lower);
+      important = important || payload_lower.rfind("@tf:", 0) == 0 || payload_lower.rfind("@tv:", 0) == 0 ||
+                  payload_lower.rfind("@tm", 0) == 0 || payload_lower.rfind("@t0", 0) == 0 ||
+                  payload_lower.rfind("@tr", 0) == 0 || payload_lower.rfind("@tg", 0) == 0 ||
+                  payload_lower.rfind("ty:", 0) == 0;
     }
+    const bool changed = raw_hex != this->status_forensics_last_raw_hex_;
+    const bool rate_ok = this->status_forensics_next_log_ms_ == 0 || time_reached(now, this->status_forensics_next_log_ms_);
+    if (!(changed || important) || !rate_ok) {
+      if (this->status_forensics_next_suppressed_log_ms_ == 0 ||
+          time_reached(now, this->status_forensics_next_suppressed_log_ms_)) {
+        ESP_LOGD(TAG, "status_forensics_suppressed reason=%s",
+                 !rate_ok ? "rate_limit" : "unchanged");
+        this->status_forensics_next_suppressed_log_ms_ =
+            now + std::max<uint32_t>(this->status_forensics_log_interval_ms_ * 5U, 10000U);
+      }
+      return;
+    }
+    this->status_forensics_last_raw_hex_ = raw_hex;
+    this->status_forensics_next_log_ms_ = now + this->status_forensics_log_interval_ms_;
+    this->status_forensics_decode_log_allowed_ = true;
+    ESP_LOGD(TAG, "status_forensics_raw changed=%s source=%s len=%u hex=\"%s\"", YESNO(changed), safe_source,
+             static_cast<unsigned>(raw.size()), raw_hex.c_str());
     if (selected >= 0) {
       const auto &candidate = candidates[static_cast<size_t>(selected)];
-      ESP_LOGD(TAG, "status_forensics_selected source=%s table=%s decoded=\"%s\"", safe_source, candidate.table_name,
+      ESP_LOGD(TAG, "status_forensics_selected table=%s line=\"%s\"", candidate.table_name,
                transport_payload_log_text(candidate.payload).c_str());
     } else {
-      ESP_LOGD(TAG, "status_forensics_selected source=%s table=none decoded=\"\"", safe_source);
+      const InnerTransportDecodeResult *best = candidates.empty() ? nullptr : &candidates.front();
+      ESP_LOGD(TAG, "status_forensics_unknown best_table=%s decoded=\"%s\"",
+               best != nullptr ? best->table_name : "none",
+               best != nullptr ? transport_payload_log_text(best->payload).c_str() : "");
     }
+    if (this->status_forensics_verbose_candidates_ || selected < 0) {
+      for (size_t i = 0; i < candidates.size(); ++i) {
+        const auto &candidate = candidates[i];
+        ESP_LOGD(TAG,
+                 "status_forensics_candidate source=%s idx=%u table=%s ok=%s len=%u printable=%u first_ascii=\"%s\" "
+                 "hex=\"%s\"",
+                 safe_source, static_cast<unsigned>(i), candidate.table_name, YESNO(!candidate.payload.empty()),
+                 static_cast<unsigned>(candidate.payload.size()), static_cast<unsigned>(candidate.printable_ratio),
+                 printable_preview(candidate.payload, 32).c_str(), compact_hex_string(candidate.payload, 32).c_str());
+      }
+    }
+    return;
   }
+
+  const bool changed = raw_hex != this->status_forensics_last_raw_hex_;
+  const bool rate_ok = this->status_forensics_next_log_ms_ == 0 || time_reached(now, this->status_forensics_next_log_ms_);
+  if (!(changed || important) || !rate_ok) {
+    if (this->status_forensics_next_suppressed_log_ms_ == 0 ||
+        time_reached(now, this->status_forensics_next_suppressed_log_ms_)) {
+      ESP_LOGD(TAG, "status_forensics_suppressed reason=%s", !rate_ok ? "rate_limit" : "unchanged");
+      this->status_forensics_next_suppressed_log_ms_ =
+          now + std::max<uint32_t>(this->status_forensics_log_interval_ms_ * 5U, 10000U);
+    }
+    return;
+  }
+  this->status_forensics_last_raw_hex_ = raw_hex;
+  this->status_forensics_next_log_ms_ = now + this->status_forensics_log_interval_ms_;
+  this->status_forensics_decode_log_allowed_ = true;
+  ESP_LOGD(TAG, "status_forensics_raw changed=%s source=%s len=%u hex=\"%s\"", YESNO(changed), safe_source,
+           static_cast<unsigned>(raw.size()), raw_hex.c_str());
 }
 
 void JuraComponent::start_status_probe_(uint32_t now) {

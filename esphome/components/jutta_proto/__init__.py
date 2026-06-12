@@ -74,6 +74,8 @@ CONF_XML_TABLET_SEQUENCE_MODE = "xml_tablet_sequence_mode"
 CONF_XML_COUNTER_MAX = "xml_counter_max"
 CONF_STATUS_DEBUG = "status_debug"
 CONF_STATUS_FORENSICS = "status_forensics"
+CONF_STATUS_FORENSICS_LOG_INTERVAL_MS = "status_forensics_log_interval_ms"
+CONF_STATUS_FORENSICS_VERBOSE_CANDIDATES = "status_forensics_verbose_candidates"
 CONF_STATUS_PROBE_ENABLED = "status_probe_enabled"
 CONF_STATUS_PROBE_INTERVAL_MS = "status_probe_interval_ms"
 CONF_ALLOW_UNSAFE_DEBUG_COMMANDS = "allow_unsafe_debug_commands"
@@ -242,6 +244,10 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_XML_COUNTER_MAX, default=20000): cv.positive_int,
             cv.Optional(CONF_STATUS_DEBUG, default=False): cv.boolean,
             cv.Optional(CONF_STATUS_FORENSICS, default=False): cv.boolean,
+            cv.Optional(CONF_STATUS_FORENSICS_LOG_INTERVAL_MS, default=2000): cv.All(
+                cv.positive_int, cv.Range(min=250)
+            ),
+            cv.Optional(CONF_STATUS_FORENSICS_VERBOSE_CANDIDATES, default=False): cv.boolean,
             cv.Optional(CONF_STATUS_PROBE_ENABLED, default=False): cv.boolean,
             cv.Optional(CONF_STATUS_PROBE_INTERVAL_MS, default=300000): cv.All(
                 cv.positive_int, cv.Range(min=10000)
@@ -470,6 +476,8 @@ async def to_code(config):
     cg.add(var.set_xml_counter_max(config[CONF_XML_COUNTER_MAX]))
     cg.add(var.set_status_debug(config[CONF_STATUS_DEBUG]))
     cg.add(var.set_status_forensics(config[CONF_STATUS_FORENSICS]))
+    cg.add(var.set_status_forensics_log_interval(config[CONF_STATUS_FORENSICS_LOG_INTERVAL_MS]))
+    cg.add(var.set_status_forensics_verbose_candidates(config[CONF_STATUS_FORENSICS_VERBOSE_CANDIDATES]))
     cg.add(var.set_status_probe_enabled(config[CONF_STATUS_PROBE_ENABLED]))
     cg.add(var.set_status_probe_interval(config[CONF_STATUS_PROBE_INTERVAL_MS]))
     cg.add(var.set_allow_unsafe_debug_commands(config[CONF_ALLOW_UNSAFE_DEBUG_COMMANDS]))
