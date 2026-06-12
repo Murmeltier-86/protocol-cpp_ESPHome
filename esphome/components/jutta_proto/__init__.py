@@ -34,6 +34,7 @@ CONF_MACHINE_WARNING = "machine_warning"
 CONF_ACTIVE_ALERTS = "active_alerts"
 CONF_LIVE_STATUS_SOURCE = "live_status_source"
 CONF_STATUS_PROBE_LAST_RESPONSE = "status_probe_last_response"
+CONF_DEBUG_COMMAND_LAST_RESPONSE = "debug_command_last_response"
 CONF_LAST_T2_STATUS_RAW = "last_t2_status_raw"
 CONF_LAST_T2_STATUS_DECODED = "last_t2_status_decoded"
 CONF_MACHINE_ONLINE = "machine_online"
@@ -72,8 +73,11 @@ CONF_XML_RUN_TABLET_START_SEQUENCE = "xml_run_tablet_start_sequence"
 CONF_XML_TABLET_SEQUENCE_MODE = "xml_tablet_sequence_mode"
 CONF_XML_COUNTER_MAX = "xml_counter_max"
 CONF_STATUS_DEBUG = "status_debug"
+CONF_STATUS_FORENSICS = "status_forensics"
 CONF_STATUS_PROBE_ENABLED = "status_probe_enabled"
 CONF_STATUS_PROBE_INTERVAL_MS = "status_probe_interval_ms"
+CONF_ALLOW_UNSAFE_DEBUG_COMMANDS = "allow_unsafe_debug_commands"
+CONF_TRANSPORT = "transport"
 CONF_XML_SENSORS = "xml_sensors"
 CONF_FIELD = "field"
 CONF_LOG_DECODED_TX = "log_decoded_tx"
@@ -99,6 +103,9 @@ ManualStatusProbeAction = jutta_component_ns.class_(
 )
 Ble2TransportProbeAction = jutta_component_ns.class_(
     "Ble2TransportProbeAction", automation.Action
+)
+SendDebugCommandAction = jutta_component_ns.class_(
+    "SendDebugCommandAction", automation.Action
 )
 
 COFFEE_TYPES = {
@@ -161,6 +168,10 @@ BLE2_TRANSPORT_PROBES = {
     "tr37": "tr37",
 }
 
+DEBUG_COMMAND_TRANSPORTS = {
+    "inner_uart0": "inner_uart0",
+}
+
 JURA_COMPONENT_IDS = []
 
 
@@ -181,6 +192,7 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_ACTIVE_ALERTS): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_LIVE_STATUS_SOURCE): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_STATUS_PROBE_LAST_RESPONSE): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_DEBUG_COMMAND_LAST_RESPONSE): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_LAST_T2_STATUS_RAW): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_LAST_T2_STATUS_DECODED): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_MACHINE_ONLINE): binary_sensor.binary_sensor_schema(),
@@ -229,10 +241,12 @@ CONFIG_SCHEMA = (
             ),
             cv.Optional(CONF_XML_COUNTER_MAX, default=20000): cv.positive_int,
             cv.Optional(CONF_STATUS_DEBUG, default=False): cv.boolean,
+            cv.Optional(CONF_STATUS_FORENSICS, default=False): cv.boolean,
             cv.Optional(CONF_STATUS_PROBE_ENABLED, default=False): cv.boolean,
             cv.Optional(CONF_STATUS_PROBE_INTERVAL_MS, default=300000): cv.All(
                 cv.positive_int, cv.Range(min=10000)
             ),
+            cv.Optional(CONF_ALLOW_UNSAFE_DEBUG_COMMANDS, default=False): cv.boolean,
             cv.Optional(CONF_XML_SENSORS, default=[]): cv.ensure_list(XML_SENSOR_SCHEMA),
             cv.Optional(CONF_LOG_DECODED_TX, default=True): cv.boolean,
             cv.Optional(CONF_LOG_ENCODED_UART, default=False): cv.boolean,
@@ -398,6 +412,22 @@ def _normalize_ble2_transport_probe(value):
     )(value)
 
 
+def _normalize_send_debug_command(value):
+    if isinstance(value, str):
+        value = {CONF_COMMAND: value}
+    if value is None:
+        value = {}
+    return cv.Schema(
+        {
+            cv.Optional(CONF_ID): cv.use_id(JuraComponent),
+            cv.Required(CONF_COMMAND): cv.templatable(cv.string_strict),
+            cv.Optional(CONF_TRANSPORT, default="inner_uart0"): cv.templatable(
+                cv.enum(DEBUG_COMMAND_TRANSPORTS, lower=True)
+            ),
+        }
+    )(value)
+
+
 def _make_raw_string_literal(text):
     delimiter = "JUTTA_XML"
     while f"){delimiter}\"" in text:
@@ -439,8 +469,10 @@ async def to_code(config):
     cg.add(var.set_xml_tablet_sequence_mode(config[CONF_XML_TABLET_SEQUENCE_MODE]))
     cg.add(var.set_xml_counter_max(config[CONF_XML_COUNTER_MAX]))
     cg.add(var.set_status_debug(config[CONF_STATUS_DEBUG]))
+    cg.add(var.set_status_forensics(config[CONF_STATUS_FORENSICS]))
     cg.add(var.set_status_probe_enabled(config[CONF_STATUS_PROBE_ENABLED]))
     cg.add(var.set_status_probe_interval(config[CONF_STATUS_PROBE_INTERVAL_MS]))
+    cg.add(var.set_allow_unsafe_debug_commands(config[CONF_ALLOW_UNSAFE_DEBUG_COMMANDS]))
     mapping_path = config[CONF_XML_MAPPING_PATH]
     if mapping_path == "embedded":
         resolved_path = os.path.join(COMPONENT_DIR, "jura_mapping_embed.xml")
@@ -527,6 +559,10 @@ async def to_code(config):
     if CONF_STATUS_PROBE_LAST_RESPONSE in config:
         status_probe_sensor = await text_sensor.new_text_sensor(config[CONF_STATUS_PROBE_LAST_RESPONSE])
         cg.add(var.set_status_probe_last_response_sensor(status_probe_sensor))
+
+    if CONF_DEBUG_COMMAND_LAST_RESPONSE in config:
+        debug_command_sensor = await text_sensor.new_text_sensor(config[CONF_DEBUG_COMMAND_LAST_RESPONSE])
+        cg.add(var.set_debug_command_last_response_sensor(debug_command_sensor))
 
     if CONF_LAST_T2_STATUS_RAW in config:
         last_t2_raw_sensor = await text_sensor.new_text_sensor(config[CONF_LAST_T2_STATUS_RAW])
@@ -669,4 +705,20 @@ async def ble2_transport_probe_action_to_code(config, action_id, template_args, 
     parent = await _get_parent(config)
     var = cg.new_Pvariable(action_id, parent)
     cg.add(var.set_probe(cg.std_string(config[CONF_PROBE])))
+    return var
+
+
+@automation.register_action(
+    "jutta_proto.send_debug_command",
+    SendDebugCommandAction,
+    _normalize_send_debug_command,
+    synchronous=False,
+)
+async def send_debug_command_action_to_code(config, action_id, template_args, args):
+    parent = await _get_parent(config)
+    var = cg.new_Pvariable(action_id, template_args, parent)
+    command = await cg.templatable(config[CONF_COMMAND], args, cg.std_string)
+    transport = await cg.templatable(config[CONF_TRANSPORT], args, cg.std_string)
+    cg.add(var.set_command(command))
+    cg.add(var.set_transport(transport))
     return var

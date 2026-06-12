@@ -79,6 +79,8 @@ constexpr uint32_t kErrorPollIntervalMs = 5000;
 constexpr uint32_t kCommandTimeoutMs = 1500;
 constexpr uint32_t kStatusProbeTimeoutMs = 5000;
 constexpr uint32_t kBle2ProbeTimeoutMs = 5000;
+constexpr uint32_t kDebugCommandTimeoutMs = 5000;
+constexpr size_t kDebugCommandMaxLength = 80;
 
 constexpr double XML_COUNTER_MIN = 0.0;
 constexpr double XML_COUNTER_MAX = 1'000'000.0;
@@ -1514,6 +1516,9 @@ void JuraComponent::setup() {
              "status_path_app_firmware_summary app_udp=0010A5F3_to_51515 firmware_cache=DAT_400d0738_TF "
              "DAT_400d073c_progress esphome=passive_uart_tf_tv");
   }
+  if (this->status_forensics_) {
+    ESP_LOGI(TAG, "status_forensics enabled; passive RX diagnostics only, no automatic status commands");
+  }
   if (this->status_probe_enabled_) {
     ESP_LOGW(TAG, "status_probe_disabled reason=tf_tv_direct_commands_not_valid");
     this->status_probe_enabled_ = false;
@@ -1550,6 +1555,7 @@ void JuraComponent::loop() {
   this->process_xml_polling();
   this->process_status_probe_(esphome::millis());
   this->process_ble2_transport_probe_(esphome::millis());
+  this->process_debug_command_(esphome::millis());
   this->poll_settings_once_();
   this->poll_error_cycle_();
 }
@@ -1633,8 +1639,10 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML session probe: %s", YESNO(this->xml_session_probe_));
   ESP_LOGCONFIG(TAG, "  XML session probe variant: %s", this->xml_session_probe_variant_.c_str());
   ESP_LOGCONFIG(TAG, "  Status debug: %s", YESNO(this->status_debug_));
+  ESP_LOGCONFIG(TAG, "  Status forensics: %s", YESNO(this->status_forensics_));
   ESP_LOGCONFIG(TAG, "  Status probe: %s", YESNO(this->status_probe_enabled_));
   ESP_LOGCONFIG(TAG, "  Status probe interval: %u ms", static_cast<unsigned>(this->status_probe_interval_ms_));
+  ESP_LOGCONFIG(TAG, "  Unsafe debug commands: %s", YESNO(this->allow_unsafe_debug_commands_));
   ESP_LOGCONFIG(TAG, "  XML dongle startup: %s", YESNO(this->xml_dongle_startup_));
   ESP_LOGCONFIG(TAG, "  XML dongle startup debug: %s", YESNO(this->xml_dongle_startup_debug_));
   ESP_LOGCONFIG(TAG, "  XML dongle startup mode: %s", this->xml_dongle_startup_mode_.c_str());
@@ -1882,6 +1890,8 @@ bool JuraComponent::read_handshake_bytes() {
   std::string line;
   while (this->connection_->read_line_until(line)) {
     read_any = true;
+    this->log_status_forensics_frame_(line, "handshake");
+    this->log_status_forensics_decoded_(line, "handshake", "ascii");
     this->handshake_buffer_.append(line);
     this->handshake_buffer_.append("\r\n");
     if (this->handshake_buffer_.size() > 128) {
@@ -1902,6 +1912,8 @@ bool JuraComponent::time_reached(uint32_t now, uint32_t target) {
 
 void JuraComponent::handle_decoded_response_(const std::string &response, const char *parser_branch) {
   this->publish_raw_rx_(response, parser_branch);
+  this->log_status_forensics_frame_(response, parser_branch != nullptr ? parser_branch : "decoded_response");
+  this->log_status_forensics_decoded_(response, parser_branch != nullptr ? parser_branch : "decoded_response", "ascii");
   this->publish_machine_online_(true);
   this->update_dongle_events_from_line_(response);
 
@@ -2544,6 +2556,116 @@ void JuraComponent::run_ble2_transport_probe(const std::string &probe) {
   this->start_ble2_transport_probe_(normalized, now);
 }
 
+void JuraComponent::run_debug_command(const std::string &command, const std::string &transport) {
+  uint32_t now = esphome::millis();
+  this->start_debug_command_(command, transport, now);
+}
+
+void JuraComponent::publish_debug_command_last_response_(const std::string &text) {
+  if (this->debug_command_last_response_sensor_ == nullptr) {
+    return;
+  }
+  this->debug_command_last_response_sensor_->publish_state(sanitize_text_for_api(text));
+}
+
+std::string JuraComponent::normalize_debug_command_(const std::string &command) const {
+  std::string normalized = command;
+  trim_in_place(normalized);
+  while (!normalized.empty() && (normalized.back() == '\r' || normalized.back() == '\n')) {
+    normalized.pop_back();
+  }
+  trim_in_place(normalized);
+  return normalized;
+}
+
+bool JuraComponent::is_unsafe_debug_command_(const std::string &command) const {
+  std::string trimmed = this->normalize_debug_command_(command);
+  std::string upper = trimmed;
+  std::transform(upper.begin(), upper.end(), upper.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+  static const char *const UNSAFE_PREFIXES[] = {
+      "FN:",   "FA:",    "PR:",    "AN:",    "@TG:2",  "@TG:10", "@TG:21", "@TG:23",
+      "@TG:24", "@TG:25", "@TG:26", "@TS:F1", "@TV:81", "@TV:82", "@TV:84", "@HR:81",
+      "@HW:82",
+  };
+  for (const char *prefix : UNSAFE_PREFIXES) {
+    if (upper.rfind(prefix, 0) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void JuraComponent::log_status_forensics_decoded_(const std::string &line, const char *source,
+                                                  const char *table_name) {
+  if (!this->status_forensics_) {
+    return;
+  }
+  std::string trimmed = line;
+  trim_in_place(trimmed);
+  if (trimmed.empty()) {
+    return;
+  }
+  std::string lower = to_lower_copy(trimmed);
+  const char *type = nullptr;
+  if (lower.rfind("@tf:", 0) == 0) {
+    type = "tf";
+  } else if (lower.rfind("@tv:", 0) == 0) {
+    type = "tv";
+  } else if (trimmed.rfind("@T2", 0) == 0) {
+    type = "t2";
+  } else if (trimmed.rfind("@T3", 0) == 0) {
+    type = "t3";
+  } else if (lower.rfind("@t0", 0) == 0) {
+    type = "t0";
+  }
+
+  const char *safe_source = source != nullptr ? source : "unknown";
+  const char *safe_table = table_name != nullptr ? table_name : "ascii";
+  if (type != nullptr) {
+    ESP_LOGD(TAG, "status_forensics_known ts_ms=%u source=%s table=%s type=%s line=\"%s\"",
+             static_cast<unsigned>(esphome::millis()), safe_source, safe_table, type,
+             sanitize_text_for_api(trimmed).c_str());
+  } else if (this->is_printable_status_text_(trimmed)) {
+    ESP_LOGD(TAG, "status_forensics_unknown_printable ts_ms=%u source=%s table=%s line=\"%s\"",
+             static_cast<unsigned>(esphome::millis()), safe_source, safe_table,
+             sanitize_text_for_api(trimmed).c_str());
+  }
+}
+
+void JuraComponent::log_status_forensics_frame_(const std::string &raw, const char *source) {
+  if (!this->status_forensics_) {
+    return;
+  }
+  const char *safe_source = source != nullptr ? source : "unknown";
+  ESP_LOGD(TAG, "status_forensics_raw ts_ms=%u source=%s len=%u hex=\"%s\"",
+           static_cast<unsigned>(esphome::millis()), safe_source, static_cast<unsigned>(raw.size()),
+           compact_hex_string(raw, raw.size()).c_str());
+  if (!raw.empty() && is_inner_transport_start(static_cast<uint8_t>(raw.front()))) {
+    std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(raw);
+    int selected = -1;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+      const auto &candidate = candidates[i];
+      if (selected < 0 && !candidate.payload.empty() && this->is_printable_status_text_(candidate.payload)) {
+        selected = static_cast<int>(i);
+      }
+      ESP_LOGD(TAG,
+               "status_forensics_candidate source=%s idx=%u table=%s ok=%s len=%u printable=%u first_ascii=\"%s\" "
+               "hex=\"%s\"",
+               safe_source, static_cast<unsigned>(i), candidate.table_name, YESNO(!candidate.payload.empty()),
+               static_cast<unsigned>(candidate.payload.size()), static_cast<unsigned>(candidate.printable_ratio),
+               printable_preview(candidate.payload, 32).c_str(), compact_hex_string(candidate.payload, 32).c_str());
+    }
+    if (selected >= 0) {
+      const auto &candidate = candidates[static_cast<size_t>(selected)];
+      ESP_LOGD(TAG, "status_forensics_selected source=%s table=%s decoded=\"%s\"", safe_source, candidate.table_name,
+               transport_payload_log_text(candidate.payload).c_str());
+    } else {
+      ESP_LOGD(TAG, "status_forensics_selected source=%s table=none decoded=\"\"", safe_source);
+    }
+  }
+}
+
 void JuraComponent::start_status_probe_(uint32_t now) {
   this->status_probe_state_ = StatusProbeState::SEND;
   this->status_probe_index_ = 0;
@@ -2979,6 +3101,201 @@ void JuraComponent::finish_ble2_transport_probe_(uint32_t now, const char *resul
   this->ble2_probe_deadline_ms_ = 0;
   this->publish_status_probe_last_response_("ble2 " + probe + " -> " + safe_result +
                                             " frames=" + std::to_string(frames));
+  (void) now;
+}
+
+bool JuraComponent::start_debug_command_(const std::string &command, const std::string &transport, uint32_t now) {
+  std::string normalized = this->normalize_debug_command_(command);
+  std::string transport_normalized = to_lower_copy(transport);
+  trim_in_place(transport_normalized);
+  if (transport_normalized.empty()) {
+    transport_normalized = "inner_uart0";
+  }
+
+  if (normalized.empty()) {
+    ESP_LOGW(TAG, "debug_command_blocked reason=empty");
+    this->publish_debug_command_last_response_("blocked empty");
+    return false;
+  }
+  if (normalized.size() > kDebugCommandMaxLength) {
+    ESP_LOGW(TAG, "debug_command_blocked reason=too_long len=%u", static_cast<unsigned>(normalized.size()));
+    this->publish_debug_command_last_response_(normalized + " -> blocked too_long");
+    return false;
+  }
+  if (transport_normalized != "inner_uart0") {
+    ESP_LOGW(TAG, "debug_command_blocked cmd=\"%s\" reason=unsupported_transport transport=%s",
+             escape_control_text_for_log(normalized).c_str(), transport_normalized.c_str());
+    this->publish_debug_command_last_response_(normalized + " -> blocked unsupported_transport");
+    return false;
+  }
+  if (this->is_unsafe_debug_command_(normalized)) {
+    if (!this->allow_unsafe_debug_commands_) {
+      ESP_LOGW(TAG, "debug_command_blocked cmd=\"%s\" reason=unsafe_prefix allow_unsafe=false",
+               escape_control_text_for_log(normalized).c_str());
+      this->publish_debug_command_last_response_("blocked unsafe " + normalized);
+      return false;
+    }
+    ESP_LOGW(TAG, "debug_command_unsafe_allowed cmd=\"%s\"", escape_control_text_for_log(normalized).c_str());
+  }
+
+  if (this->debug_command_state_ != DebugCommandState::IDLE || this->ble2_probe_state_ != Ble2ProbeState::IDLE ||
+      this->status_probe_state_ != StatusProbeState::IDLE) {
+    ESP_LOGD(TAG, "debug_command_skip reason=uart_busy_or_stats_active cmd=\"%s\"",
+             escape_control_text_for_log(normalized).c_str());
+    this->publish_debug_command_last_response_(normalized + " -> busy");
+    return false;
+  }
+  if (!this->stats_session_ready_ || !this->stats_inner_tx_required_) {
+    ESP_LOGD(TAG, "debug_command_skip reason=post_gate_not_ready cmd=\"%s\"",
+             escape_control_text_for_log(normalized).c_str());
+    this->publish_debug_command_last_response_(normalized + " -> post_gate_not_ready");
+    return false;
+  }
+  if (!this->post_gate_tx_ready_event_ || this->xml_inflight_ ||
+      this->db_transaction_owner_ != DbTransactionOwner::NONE || this->is_busy()) {
+    ESP_LOGD(TAG, "debug_command_skip reason=uart_busy_or_stats_active cmd=\"%s\" owner=%s",
+             escape_control_text_for_log(normalized).c_str(),
+             this->db_transaction_owner_name_(this->db_transaction_owner_));
+    this->publish_debug_command_last_response_(normalized + " -> busy");
+    return false;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    ESP_LOGD(TAG, "debug_command_skip reason=controller_not_ready cmd=\"%s\"",
+             escape_control_text_for_log(normalized).c_str());
+    this->publish_debug_command_last_response_(normalized + " -> controller_not_ready");
+    return false;
+  }
+
+  this->db_transaction_owner_ = DbTransactionOwner::DEBUG_COMMAND;
+  this->post_gate_tx_ready_event_ = false;
+  this->debug_command_state_ = DebugCommandState::WAIT;
+  this->debug_command_cmd_ = normalized;
+  this->debug_command_transport_ = transport_normalized;
+  this->debug_command_deadline_ms_ = now + kDebugCommandTimeoutMs;
+  this->debug_command_frames_ = 0;
+  this->coffee_maker_->connection->reset_response_line_buffer();
+
+  ESP_LOGD(TAG, "debug_command_start cmd=\"%s\" transport=%s",
+           escape_control_text_for_log(normalized).c_str(), transport_normalized.c_str());
+  ESP_LOGD(TAG, "debug_command_tx cmd=\"%s\" transport=%s timeout_ms=%u",
+           escape_control_text_for_log(normalized).c_str(), transport_normalized.c_str(),
+           static_cast<unsigned>(kDebugCommandTimeoutMs));
+  if (!this->write_inner_uart0_command_(normalized, now, true)) {
+    this->finish_debug_command_(now, "tx_failed");
+    return false;
+  }
+  this->publish_debug_command_last_response_(normalized + " -> sent");
+  return true;
+}
+
+bool JuraComponent::handle_debug_command_line_(const std::string &line, const char *table_name, uint32_t now) {
+  std::string trimmed = line;
+  trim_in_place(trimmed);
+  if (trimmed.empty()) {
+    return false;
+  }
+  std::string lower = to_lower_copy(trimmed);
+  const char *table = table_name != nullptr ? table_name : "ascii";
+  this->update_dongle_events_from_line_(trimmed);
+  this->log_status_forensics_decoded_(trimmed, "debug_command", table);
+  this->publish_debug_command_last_response_(this->debug_command_cmd_ + " -> " + sanitize_text_for_api(trimmed));
+  ESP_LOGD(TAG, "debug_command_rx_decoded cmd=\"%s\" line=\"%s\"",
+           escape_control_text_for_log(this->debug_command_cmd_).c_str(), sanitize_text_for_api(trimmed).c_str());
+
+  if (lower.rfind("@tf:", 0) == 0) {
+    ESP_LOGD(TAG, "debug_command_detected_tf line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
+    this->publish_tf_status_(trimmed);
+    this->finish_debug_command_(now, "detected_tf");
+    return true;
+  }
+  if (lower.rfind("@tv:", 0) == 0) {
+    ESP_LOGD(TAG, "debug_command_detected_tv line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
+    this->handle_tv_progress_(trimmed);
+    this->finish_debug_command_(now, "detected_tv");
+    return true;
+  }
+  if (trimmed.rfind("@T2", 0) == 0) {
+    ESP_LOGD(TAG, "debug_command_detected_t2 line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
+    this->handle_t2_status_debug_(trimmed);
+  }
+  if (lower.rfind("@", 0) == 0) {
+    ESP_LOGD(TAG, "debug_command_detected_status_like line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
+  }
+  return false;
+}
+
+void JuraComponent::process_debug_command_(uint32_t now) {
+  if (this->debug_command_state_ != DebugCommandState::WAIT) {
+    return;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    this->finish_debug_command_(now, "controller_not_ready");
+    return;
+  }
+
+  std::string raw_line;
+  while (this->coffee_maker_->connection->read_line_until(raw_line)) {
+    this->debug_command_frames_++;
+    ESP_LOGD(TAG, "debug_command_rx_raw cmd=\"%s\" hex=\"%s\"",
+             escape_control_text_for_log(this->debug_command_cmd_).c_str(),
+             compact_hex_string(raw_line, raw_line.size()).c_str());
+    this->log_status_forensics_frame_(raw_line, "debug_command");
+    if (!raw_line.empty() && this->xml_decode_inner_transport_ &&
+        is_inner_transport_start(static_cast<uint8_t>(raw_line.front()))) {
+      std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(raw_line);
+      bool had_payload = false;
+      for (const auto &candidate : candidates) {
+        if (candidate.payload.empty()) {
+          continue;
+        }
+        had_payload = true;
+        ESP_LOGD(TAG, "debug_command_rx_decoded_candidate cmd=\"%s\" table=%s line=\"%s\"",
+                 escape_control_text_for_log(this->debug_command_cmd_).c_str(), candidate.table_name,
+                 transport_payload_log_text(candidate.payload).c_str());
+        if (this->handle_debug_command_line_(candidate.payload, candidate.table_name, now)) {
+          return;
+        }
+      }
+      if (!had_payload) {
+        ESP_LOGD(TAG, "debug_command_rx_noise cmd=\"%s\" reason=inner_decode_empty",
+                 escape_control_text_for_log(this->debug_command_cmd_).c_str());
+      }
+    } else if (this->is_printable_status_text_(raw_line)) {
+      if (this->handle_debug_command_line_(raw_line, "ascii", now)) {
+        return;
+      }
+    } else {
+      ESP_LOGD(TAG, "debug_command_rx_noise cmd=\"%s\" reason=non_printable hex=\"%s\"",
+               escape_control_text_for_log(this->debug_command_cmd_).c_str(),
+               compact_hex_string(raw_line, raw_line.size()).c_str());
+    }
+  }
+
+  if (time_reached(now, this->debug_command_deadline_ms_)) {
+    ESP_LOGD(TAG, "debug_command_timeout cmd=\"%s\" frames=%u",
+             escape_control_text_for_log(this->debug_command_cmd_).c_str(),
+             static_cast<unsigned>(this->debug_command_frames_));
+    this->finish_debug_command_(now, "timeout");
+  }
+}
+
+void JuraComponent::finish_debug_command_(uint32_t now, const char *result) {
+  const char *safe_result = result != nullptr ? result : "done";
+  const std::string command = this->debug_command_cmd_;
+  const uint16_t frames = this->debug_command_frames_;
+  ESP_LOGD(TAG, "debug_command_done cmd=\"%s\" result=%s frames=%u",
+           command.empty() ? "(none)" : escape_control_text_for_log(command).c_str(), safe_result,
+           static_cast<unsigned>(frames));
+  if (this->db_transaction_owner_ == DbTransactionOwner::DEBUG_COMMAND) {
+    this->db_transaction_owner_ = DbTransactionOwner::NONE;
+  }
+  this->post_gate_tx_ready_event_ = true;
+  this->debug_command_state_ = DebugCommandState::IDLE;
+  this->debug_command_cmd_.clear();
+  this->debug_command_transport_.clear();
+  this->debug_command_deadline_ms_ = 0;
+  this->publish_debug_command_last_response_((command.empty() ? std::string{} : command + " -> ") + safe_result +
+                                             " frames=" + std::to_string(frames));
   (void) now;
 }
 
@@ -3451,6 +3768,8 @@ const char *JuraComponent::db_transaction_owner_name_(DbTransactionOwner owner) 
       return "status_probe";
     case DbTransactionOwner::BLE2_PROBE:
       return "ble2_probe";
+    case DbTransactionOwner::DEBUG_COMMAND:
+      return "debug_command";
   }
   return "unknown";
 }
@@ -5054,7 +5373,7 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
     bit = DONGLE_EVENT_TY;
   } else if (lower.rfind("@t0", 0) == 0) {
     bit = DONGLE_EVENT_T0;
-    if (this->status_debug_) {
+    if (this->status_debug_ || this->status_forensics_) {
       ESP_LOGD(TAG, "passive_status_frame type=t0 line=\"%s\" event=0x02",
                sanitize_text_for_api(trimmed).c_str());
     }
@@ -5062,7 +5381,7 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
     bit = DONGLE_EVENT_T1;
   } else if (trimmed.rfind("@T2", 0) == 0) {
     bit = DONGLE_EVENT_T2;
-    if (this->status_debug_) {
+    if (this->status_debug_ || this->status_forensics_) {
       ESP_LOGD(TAG, "passive_status_frame type=t2 line=\"%s\"",
                sanitize_text_for_api(trimmed).c_str());
     }
@@ -5073,7 +5392,7 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
     }
   } else if (trimmed.rfind("@T3", 0) == 0) {
     bit = DONGLE_EVENT_T3;
-    if (this->status_debug_) {
+    if (this->status_debug_ || this->status_forensics_) {
       ESP_LOGD(TAG, "passive_status_frame type=t3 line=\"%s\"",
                sanitize_text_for_api(trimmed).c_str());
     }
@@ -5090,7 +5409,7 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
     this->dongle_tr_payload_ = trimmed;
   } else if (lower.rfind("@tf:", 0) == 0) {
     bit = DONGLE_EVENT_TF;
-    if (this->status_debug_) {
+    if (this->status_debug_ || this->status_forensics_) {
       ESP_LOGD(TAG, "passive_status_frame type=tf line=\"%s\"",
                sanitize_text_for_api(trimmed).c_str());
     }
@@ -5099,7 +5418,7 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
                sanitize_text_for_api(trimmed).c_str());
     }
   } else if (lower.rfind("@tv:", 0) == 0) {
-    if (this->status_debug_) {
+    if (this->status_debug_ || this->status_forensics_) {
       ESP_LOGD(TAG, "passive_status_frame type=tv line=\"%s\"",
                sanitize_text_for_api(trimmed).c_str());
     }
@@ -7623,7 +7942,8 @@ void JuraComponent::poll_settings_refresh_() {
 
 void JuraComponent::poll_settings_once_() {
   if (this->db_transaction_owner_ == DbTransactionOwner::STATUS_PROBE ||
-      this->db_transaction_owner_ == DbTransactionOwner::BLE2_PROBE) {
+      this->db_transaction_owner_ == DbTransactionOwner::BLE2_PROBE ||
+      this->db_transaction_owner_ == DbTransactionOwner::DEBUG_COMMAND) {
     return;
   }
   if (!this->is_ready()) {
@@ -7677,7 +7997,8 @@ void JuraComponent::publish_error_state_(uint32_t code) {
 
 void JuraComponent::poll_error_cycle_() {
   if (this->db_transaction_owner_ == DbTransactionOwner::STATUS_PROBE ||
-      this->db_transaction_owner_ == DbTransactionOwner::BLE2_PROBE) {
+      this->db_transaction_owner_ == DbTransactionOwner::BLE2_PROBE ||
+      this->db_transaction_owner_ == DbTransactionOwner::DEBUG_COMMAND) {
     return;
   }
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {

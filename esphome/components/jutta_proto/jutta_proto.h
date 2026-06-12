@@ -223,6 +223,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_status_probe_last_response_sensor(text_sensor::TextSensor *sensor) {
     this->status_probe_last_response_sensor_ = sensor;
   }
+  void set_debug_command_last_response_sensor(text_sensor::TextSensor *sensor) {
+    this->debug_command_last_response_sensor_ = sensor;
+  }
   void set_last_t2_status_raw_sensor(text_sensor::TextSensor *sensor) { this->last_t2_status_raw_sensor_ = sensor; }
   void set_last_t2_status_decoded_sensor(text_sensor::TextSensor *sensor) {
     this->last_t2_status_decoded_sensor_ = sensor;
@@ -264,10 +267,13 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_run_tablet_start_sequence(bool enabled) { this->xml_run_tablet_start_sequence_ = enabled; }
   void set_xml_tablet_sequence_mode(const std::string &mode) { this->xml_tablet_sequence_mode_ = mode; }
   void set_status_debug(bool enabled) { this->status_debug_ = enabled; }
+  void set_status_forensics(bool enabled) { this->status_forensics_ = enabled; }
   void set_status_probe_enabled(bool enabled) { this->status_probe_enabled_ = enabled; }
   void set_status_probe_interval(uint32_t interval_ms) { this->status_probe_interval_ms_ = interval_ms; }
+  void set_allow_unsafe_debug_commands(bool allow) { this->allow_unsafe_debug_commands_ = allow; }
   void run_status_probe_command(const std::string &command);
   void run_ble2_transport_probe(const std::string &probe);
+  void run_debug_command(const std::string &command, const std::string &transport);
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
   void set_xml_mapping_source(const char *data, size_t length) {
     this->xml_mapping_data_ = data;
@@ -314,6 +320,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   enum class XmlSessionProbeState { IDLE, SEND, WAIT, DONE, FAILED };
   enum class StatusProbeState { IDLE, SEND, WAIT, DONE };
   enum class Ble2ProbeState { IDLE, WAIT };
+  enum class DebugCommandState { IDLE, WAIT };
   enum class DongleStartupState {
     IDLE,
     START_CLEAR,
@@ -366,6 +373,15 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool handle_ble2_probe_line_(const std::string &line, const char *table_name, uint32_t now);
   void process_ble2_transport_probe_(uint32_t now);
   void finish_ble2_transport_probe_(uint32_t now, const char *result);
+  void publish_debug_command_last_response_(const std::string &text);
+  std::string normalize_debug_command_(const std::string &command) const;
+  bool is_unsafe_debug_command_(const std::string &command) const;
+  bool start_debug_command_(const std::string &command, const std::string &transport, uint32_t now);
+  bool handle_debug_command_line_(const std::string &line, const char *table_name, uint32_t now);
+  void process_debug_command_(uint32_t now);
+  void finish_debug_command_(uint32_t now, const char *result);
+  void log_status_forensics_frame_(const std::string &raw, const char *source);
+  void log_status_forensics_decoded_(const std::string &line, const char *source, const char *table_name);
   bool decode_and_publish_status_(const std::string &response, const char *parser_branch);
   std::string format_decoded_status_(const std::vector<JuraDecodedField> &fields) const;
   bool is_printable_status_text_(const std::string &text) const;
@@ -444,7 +460,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     PARSE_TGC0,
     SLEEP
   };
-  enum class DbTransactionOwner { NONE, XML_POLL, MACHINE_XML, STATUS_PROBE, BLE2_PROBE };
+  enum class DbTransactionOwner { NONE, XML_POLL, MACHINE_XML, STATUS_PROBE, BLE2_PROBE, DEBUG_COMMAND };
   size_t xml_command_index_(XmlPollState state) const;
   const char *db_transaction_owner_name_(DbTransactionOwner owner) const;
   bool begin_xml_transaction_(const char *command, uint32_t now);
@@ -539,6 +555,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   text_sensor::TextSensor *active_alerts_sensor_{nullptr};
   text_sensor::TextSensor *live_status_source_sensor_{nullptr};
   text_sensor::TextSensor *status_probe_last_response_sensor_{nullptr};
+  text_sensor::TextSensor *debug_command_last_response_sensor_{nullptr};
   text_sensor::TextSensor *last_t2_status_raw_sensor_{nullptr};
   text_sensor::TextSensor *last_t2_status_decoded_sensor_{nullptr};
   binary_sensor::BinarySensor *machine_online_sensor_{nullptr};
@@ -566,8 +583,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool fill_water_required_{false};
   bool tf_coffee_ready_active_{false};
   bool status_debug_{false};
+  bool status_forensics_{false};
   bool status_probe_enabled_{false};
   uint32_t status_probe_interval_ms_{300000};
+  bool allow_unsafe_debug_commands_{false};
   uint32_t status_probe_next_ms_{0};
   StatusProbeState status_probe_state_{StatusProbeState::IDLE};
   size_t status_probe_index_{0};
@@ -580,6 +599,11 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string ble2_probe_command_{};
   uint32_t ble2_probe_deadline_ms_{0};
   uint16_t ble2_probe_frames_{0};
+  DebugCommandState debug_command_state_{DebugCommandState::IDLE};
+  std::string debug_command_cmd_{};
+  std::string debug_command_transport_{};
+  uint32_t debug_command_deadline_ms_{0};
+  uint16_t debug_command_frames_{0};
 
   bool enable_machine_xml_poll_{true};
   bool enable_xml_poll_{false};
@@ -816,6 +840,17 @@ class Ble2TransportProbeAction : public esphome::Action<> {
  protected:
   JuraComponent *parent_;
   std::string probe_{};
+};
+
+template<typename... Ts> class SendDebugCommandAction : public esphome::Action<Ts...> {
+ public:
+  explicit SendDebugCommandAction(JuraComponent *parent) : parent_(parent) {}
+  TEMPLATABLE_VALUE(std::string, command)
+  TEMPLATABLE_VALUE(std::string, transport)
+  void play(Ts... x) override { this->parent_->run_debug_command(this->command_.value(x...), this->transport_.value(x...)); }
+
+ protected:
+  JuraComponent *parent_;
 };
 
 }  // namespace jutta_component
