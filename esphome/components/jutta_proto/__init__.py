@@ -156,8 +156,8 @@ STATUS_PROBE_COMMANDS = {
 }
 
 BLE2_TRANSPORT_PROBES = {
-    "ty": "TY:",
-    "tr37": "@TR:37",
+    "ty": "ty",
+    "tr37": "tr37",
 }
 
 JURA_COMPONENT_IDS = []

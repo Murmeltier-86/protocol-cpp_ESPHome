@@ -2763,10 +2763,13 @@ void JuraComponent::process_status_probe_(uint32_t now) {
 }
 
 bool JuraComponent::start_ble2_transport_probe_(const std::string &probe, uint32_t now) {
+  std::string probe_name;
   std::string command;
-  if (probe == "ty") {
+  if (probe == "ty" || probe == "ty:") {
+    probe_name = "ty";
     command = "TY:";
-  } else if (probe == "tr37") {
+  } else if (probe == "tr37" || probe == "@tr:37") {
+    probe_name = "tr37";
     command = "@TR:37";
   } else {
     ESP_LOGW(TAG, "ble2_probe_skip reason=unsupported_probe probe=%s", probe.c_str());
@@ -2775,26 +2778,26 @@ bool JuraComponent::start_ble2_transport_probe_(const std::string &probe, uint32
   }
 
   if (this->ble2_probe_state_ != Ble2ProbeState::IDLE || this->status_probe_state_ != StatusProbeState::IDLE) {
-    ESP_LOGD(TAG, "ble2_probe_skip reason=uart_busy_or_stats_active probe=%s", probe.c_str());
-    this->publish_status_probe_last_response_("ble2 " + probe + " -> busy");
+    ESP_LOGD(TAG, "ble2_probe_skip reason=uart_busy_or_stats_active probe=%s", probe_name.c_str());
+    this->publish_status_probe_last_response_("ble2 " + probe_name + " -> busy");
     return false;
   }
   if (!this->stats_session_ready_ || !this->stats_inner_tx_required_) {
-    ESP_LOGD(TAG, "ble2_probe_skip reason=post_gate_not_ready probe=%s", probe.c_str());
-    this->publish_status_probe_last_response_("ble2 " + probe + " -> post_gate_not_ready");
+    ESP_LOGD(TAG, "ble2_probe_skip reason=post_gate_not_ready probe=%s", probe_name.c_str());
+    this->publish_status_probe_last_response_("ble2 " + probe_name + " -> post_gate_not_ready");
     return false;
   }
   if (!this->post_gate_tx_ready_event_ || this->xml_inflight_ ||
       this->db_transaction_owner_ != DbTransactionOwner::NONE || this->is_busy()) {
-    ESP_LOGD(TAG, "ble2_probe_skip reason=uart_busy_or_stats_active probe=%s owner=%s", probe.c_str(),
+    ESP_LOGD(TAG, "ble2_probe_skip reason=uart_busy_or_stats_active probe=%s owner=%s", probe_name.c_str(),
              this->db_transaction_owner_name_(this->db_transaction_owner_));
-    this->publish_status_probe_last_response_("ble2 " + probe + " -> busy");
+    this->publish_status_probe_last_response_("ble2 " + probe_name + " -> busy");
     return false;
   }
 
-  ESP_LOGD(TAG, "ble2_probe_start probe=%s", probe.c_str());
-  this->publish_status_probe_last_response_("ble2 " + probe + " -> started");
-  return this->send_ble2_transport_probe_(probe, command, now);
+  ESP_LOGD(TAG, "ble2_probe_start probe=%s cmd=%s", probe_name.c_str(), command.c_str());
+  this->publish_status_probe_last_response_("ble2 " + probe_name + " -> started");
+  return this->send_ble2_transport_probe_(probe_name, command, now);
 }
 
 bool JuraComponent::send_ble2_transport_probe_(const std::string &probe, const std::string &command, uint32_t now) {
