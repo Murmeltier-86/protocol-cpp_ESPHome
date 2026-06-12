@@ -267,12 +267,21 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_run_tablet_start_sequence(bool enabled) { this->xml_run_tablet_start_sequence_ = enabled; }
   void set_xml_tablet_sequence_mode(const std::string &mode) { this->xml_tablet_sequence_mode_ = mode; }
   void set_status_debug(bool enabled) { this->status_debug_ = enabled; }
-  void set_status_forensics(bool enabled) { this->status_forensics_ = enabled; }
-  void set_status_forensics_log_interval(uint32_t interval_ms) { this->status_forensics_log_interval_ms_ = interval_ms; }
-  void set_status_forensics_verbose_candidates(bool enabled) { this->status_forensics_verbose_candidates_ = enabled; }
-  void set_status_probe_enabled(bool enabled) { this->status_probe_enabled_ = enabled; }
+  void set_status_forensics(bool enabled) {
+    (void) enabled;
+    this->status_forensics_ = false;
+  }
+  void set_status_forensics_log_interval(uint32_t interval_ms) { (void) interval_ms; }
+  void set_status_forensics_verbose_candidates(bool enabled) { (void) enabled; }
+  void set_status_probe_enabled(bool enabled) {
+    (void) enabled;
+    this->status_probe_enabled_ = false;
+  }
   void set_status_probe_interval(uint32_t interval_ms) { this->status_probe_interval_ms_ = interval_ms; }
-  void set_allow_unsafe_debug_commands(bool allow) { this->allow_unsafe_debug_commands_ = allow; }
+  void set_allow_unsafe_debug_commands(bool allow) {
+    (void) allow;
+    this->allow_unsafe_debug_commands_ = false;
+  }
   void run_status_probe_command(const std::string &command);
   void run_ble2_transport_probe(const std::string &probe);
   void run_debug_command(const std::string &command, const std::string &transport);

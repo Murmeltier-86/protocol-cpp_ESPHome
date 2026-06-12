@@ -1556,9 +1556,6 @@ void JuraComponent::loop() {
 
   this->process_machine_data_query();
   this->process_xml_polling();
-  this->process_status_probe_(esphome::millis());
-  this->process_ble2_transport_probe_(esphome::millis());
-  this->process_debug_command_(esphome::millis());
   this->poll_settings_once_();
   this->poll_error_cycle_();
 }
@@ -1897,8 +1894,6 @@ bool JuraComponent::read_handshake_bytes() {
   std::string line;
   while (this->connection_->read_line_until(line)) {
     read_any = true;
-    this->log_status_forensics_frame_(line, "handshake");
-    this->log_status_forensics_decoded_(line, "handshake", "ascii");
     this->handshake_buffer_.append(line);
     this->handshake_buffer_.append("\r\n");
     if (this->handshake_buffer_.size() > 128) {
@@ -1919,8 +1914,6 @@ bool JuraComponent::time_reached(uint32_t now, uint32_t target) {
 
 void JuraComponent::handle_decoded_response_(const std::string &response, const char *parser_branch) {
   this->publish_raw_rx_(response, parser_branch);
-  this->log_status_forensics_frame_(response, parser_branch != nullptr ? parser_branch : "decoded_response");
-  this->log_status_forensics_decoded_(response, parser_branch != nullptr ? parser_branch : "decoded_response", "ascii");
   this->publish_machine_online_(true);
   this->update_dongle_events_from_line_(response);
 
@@ -2550,22 +2543,19 @@ void JuraComponent::publish_status_probe_last_response_(const std::string &text)
 }
 
 void JuraComponent::run_status_probe_command(const std::string &command) {
-  uint32_t now = esphome::millis();
-  std::string trimmed = command;
-  trim_in_place(trimmed);
-  this->start_manual_status_probe_(trimmed, now);
+  (void) command;
+  ESP_LOGW(TAG, "status_probe_disabled reason=stability_rollback");
 }
 
 void JuraComponent::run_ble2_transport_probe(const std::string &probe) {
-  uint32_t now = esphome::millis();
-  std::string normalized = to_lower_copy(probe);
-  trim_in_place(normalized);
-  this->start_ble2_transport_probe_(normalized, now);
+  (void) probe;
+  ESP_LOGW(TAG, "ble2_probe_disabled reason=stability_rollback");
 }
 
 void JuraComponent::run_debug_command(const std::string &command, const std::string &transport) {
-  uint32_t now = esphome::millis();
-  this->start_debug_command_(command, transport, now);
+  (void) command;
+  (void) transport;
+  ESP_LOGW(TAG, "debug_command_disabled reason=stability_rollback");
 }
 
 void JuraComponent::publish_debug_command_last_response_(const std::string &text) {
@@ -3840,12 +3830,6 @@ const char *JuraComponent::db_transaction_owner_name_(DbTransactionOwner owner) 
       return "xml_poll";
     case DbTransactionOwner::MACHINE_XML:
       return "machine_xml";
-    case DbTransactionOwner::STATUS_PROBE:
-      return "status_probe";
-    case DbTransactionOwner::BLE2_PROBE:
-      return "ble2_probe";
-    case DbTransactionOwner::DEBUG_COMMAND:
-      return "debug_command";
   }
   return "unknown";
 }
@@ -5449,7 +5433,7 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
     bit = DONGLE_EVENT_TY;
   } else if (lower.rfind("@t0", 0) == 0) {
     bit = DONGLE_EVENT_T0;
-    if (this->status_debug_ || this->status_forensics_) {
+    if (this->status_debug_) {
       ESP_LOGD(TAG, "passive_status_frame type=t0 line=\"%s\" event=0x02",
                sanitize_text_for_api(trimmed).c_str());
     }
@@ -5457,18 +5441,18 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
     bit = DONGLE_EVENT_T1;
   } else if (trimmed.rfind("@T2", 0) == 0) {
     bit = DONGLE_EVENT_T2;
-    if (this->status_debug_ || this->status_forensics_) {
+    if (this->status_debug_) {
       ESP_LOGD(TAG, "passive_status_frame type=t2 line=\"%s\"",
                sanitize_text_for_api(trimmed).c_str());
+      this->handle_t2_status_debug_(trimmed);
     }
-    this->handle_t2_status_debug_(trimmed);
     uint16_t parsed_word = 0;
     if (parse_t2_word_from_response(trimmed, parsed_word)) {
       this->startup_t2_word_ = parsed_word;
     }
   } else if (trimmed.rfind("@T3", 0) == 0) {
     bit = DONGLE_EVENT_T3;
-    if (this->status_debug_ || this->status_forensics_) {
+    if (this->status_debug_) {
       ESP_LOGD(TAG, "passive_status_frame type=t3 line=\"%s\"",
                sanitize_text_for_api(trimmed).c_str());
     }
@@ -5485,7 +5469,7 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
     this->dongle_tr_payload_ = trimmed;
   } else if (lower.rfind("@tf:", 0) == 0) {
     bit = DONGLE_EVENT_TF;
-    if (this->status_debug_ || this->status_forensics_) {
+    if (this->status_debug_) {
       ESP_LOGD(TAG, "passive_status_frame type=tf line=\"%s\"",
                sanitize_text_for_api(trimmed).c_str());
     }
@@ -5494,7 +5478,7 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
                sanitize_text_for_api(trimmed).c_str());
     }
   } else if (lower.rfind("@tv:", 0) == 0) {
-    if (this->status_debug_ || this->status_forensics_) {
+    if (this->status_debug_) {
       ESP_LOGD(TAG, "passive_status_frame type=tv line=\"%s\"",
                sanitize_text_for_api(trimmed).c_str());
     }
@@ -8017,11 +8001,6 @@ void JuraComponent::poll_settings_refresh_() {
 }
 
 void JuraComponent::poll_settings_once_() {
-  if (this->db_transaction_owner_ == DbTransactionOwner::STATUS_PROBE ||
-      this->db_transaction_owner_ == DbTransactionOwner::BLE2_PROBE ||
-      this->db_transaction_owner_ == DbTransactionOwner::DEBUG_COMMAND) {
-    return;
-  }
   if (!this->is_ready()) {
     return;
   }
@@ -8072,11 +8051,6 @@ void JuraComponent::publish_error_state_(uint32_t code) {
 }
 
 void JuraComponent::poll_error_cycle_() {
-  if (this->db_transaction_owner_ == DbTransactionOwner::STATUS_PROBE ||
-      this->db_transaction_owner_ == DbTransactionOwner::BLE2_PROBE ||
-      this->db_transaction_owner_ == DbTransactionOwner::DEBUG_COMMAND) {
-    return;
-  }
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     return;
   }

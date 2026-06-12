@@ -475,12 +475,6 @@ async def to_code(config):
     cg.add(var.set_xml_tablet_sequence_mode(config[CONF_XML_TABLET_SEQUENCE_MODE]))
     cg.add(var.set_xml_counter_max(config[CONF_XML_COUNTER_MAX]))
     cg.add(var.set_status_debug(config[CONF_STATUS_DEBUG]))
-    cg.add(var.set_status_forensics(config[CONF_STATUS_FORENSICS]))
-    cg.add(var.set_status_forensics_log_interval(config[CONF_STATUS_FORENSICS_LOG_INTERVAL_MS]))
-    cg.add(var.set_status_forensics_verbose_candidates(config[CONF_STATUS_FORENSICS_VERBOSE_CANDIDATES]))
-    cg.add(var.set_status_probe_enabled(config[CONF_STATUS_PROBE_ENABLED]))
-    cg.add(var.set_status_probe_interval(config[CONF_STATUS_PROBE_INTERVAL_MS]))
-    cg.add(var.set_allow_unsafe_debug_commands(config[CONF_ALLOW_UNSAFE_DEBUG_COMMANDS]))
     mapping_path = config[CONF_XML_MAPPING_PATH]
     if mapping_path == "embedded":
         resolved_path = os.path.join(COMPONENT_DIR, "jura_mapping_embed.xml")
@@ -563,22 +557,6 @@ async def to_code(config):
     if CONF_LIVE_STATUS_SOURCE in config:
         live_status_source_sensor = await text_sensor.new_text_sensor(config[CONF_LIVE_STATUS_SOURCE])
         cg.add(var.set_live_status_source_sensor(live_status_source_sensor))
-
-    if CONF_STATUS_PROBE_LAST_RESPONSE in config:
-        status_probe_sensor = await text_sensor.new_text_sensor(config[CONF_STATUS_PROBE_LAST_RESPONSE])
-        cg.add(var.set_status_probe_last_response_sensor(status_probe_sensor))
-
-    if CONF_DEBUG_COMMAND_LAST_RESPONSE in config:
-        debug_command_sensor = await text_sensor.new_text_sensor(config[CONF_DEBUG_COMMAND_LAST_RESPONSE])
-        cg.add(var.set_debug_command_last_response_sensor(debug_command_sensor))
-
-    if CONF_LAST_T2_STATUS_RAW in config:
-        last_t2_raw_sensor = await text_sensor.new_text_sensor(config[CONF_LAST_T2_STATUS_RAW])
-        cg.add(var.set_last_t2_status_raw_sensor(last_t2_raw_sensor))
-
-    if CONF_LAST_T2_STATUS_DECODED in config:
-        last_t2_decoded_sensor = await text_sensor.new_text_sensor(config[CONF_LAST_T2_STATUS_DECODED])
-        cg.add(var.set_last_t2_status_decoded_sensor(last_t2_decoded_sensor))
 
     if CONF_MACHINE_ONLINE in config:
         machine_online_sensor = await binary_sensor.new_binary_sensor(config[CONF_MACHINE_ONLINE])
