@@ -71,10 +71,14 @@ constexpr uint8_t INNER_UART_MODE0_A[16] = {0x08, 0x0E, 0x0C, 0x04, 0x03, 0x0D, 
                                             0x00, 0x0F, 0x06, 0x07, 0x02, 0x05, 0x01, 0x09};
 constexpr uint8_t INNER_UART_MODE0_B[16] = {0x04, 0x0B, 0x0D, 0x0A, 0x00, 0x07, 0x0F, 0x05,
                                             0x09, 0x08, 0x03, 0x01, 0x0E, 0x02, 0x0C, 0x06};
+constexpr uint8_t INNER_BLE2_A[16] = {14, 4, 3, 2, 1, 13, 8, 11, 6, 15, 12, 7, 10, 5, 0, 9};
+constexpr uint8_t INNER_BLE2_B[16] = {10, 6, 13, 12, 14, 11, 1, 9, 15, 7, 0, 5, 3, 2, 4, 8};
+constexpr uint8_t kBle2ProbeKey = 0xA7;
 constexpr uint32_t kSettingsRefreshMs = 600000;
 constexpr uint32_t kErrorPollIntervalMs = 5000;
 constexpr uint32_t kCommandTimeoutMs = 1500;
 constexpr uint32_t kStatusProbeTimeoutMs = 5000;
+constexpr uint32_t kBle2ProbeTimeoutMs = 5000;
 
 constexpr double XML_COUNTER_MIN = 0.0;
 constexpr double XML_COUNTER_MAX = 1'000'000.0;
@@ -634,6 +638,18 @@ bool find_inner_encoded_nibble_uart_mode0(uint8_t plain_nibble, uint8_t position
   return false;
 }
 
+bool find_inner_encoded_nibble_with_tables(uint8_t plain_nibble, uint8_t position, uint8_t key_hi, uint8_t key_lo,
+                                           const uint8_t table_a[16], const uint8_t table_b[16],
+                                           uint8_t &encoded_nibble) {
+  for (uint8_t candidate = 0; candidate < 16; ++candidate) {
+    if (fw_nibble_transform(candidate, position, key_hi, key_lo, table_a, table_b) == (plain_nibble & 0x0F)) {
+      encoded_nibble = candidate;
+      return true;
+    }
+  }
+  return false;
+}
+
 void append_inner_transport_escaped_byte(std::vector<uint8_t> &encoded, uint8_t byte) {
   if (is_inner_transport_reserved_byte(byte)) {
     encoded.push_back(0x1B);
@@ -662,6 +678,36 @@ bool encode_inner_transport_uart_mode0(const std::string &plain, uint8_t key, st
     uint8_t next_position = static_cast<uint8_t>(position + 1);
     if (!find_inner_encoded_nibble_uart_mode0(static_cast<uint8_t>(plain_byte & 0x0F), next_position, key_hi, key_lo,
                                               lo)) {
+      return false;
+    }
+    append_inner_transport_escaped_byte(encoded, static_cast<uint8_t>((hi << 4) | lo));
+    position = static_cast<uint8_t>(position + 2);
+  }
+
+  encoded.push_back('\r');
+  encoded.push_back('\n');
+  return true;
+}
+
+bool encode_ble2_transport_plus(const std::string &plain, std::vector<uint8_t> &encoded) {
+  encoded.clear();
+  encoded.reserve(plain.size() + 8);
+  encoded.push_back('+');
+  append_inner_transport_escaped_byte(encoded, kBle2ProbeKey);
+
+  uint8_t key_hi = static_cast<uint8_t>((kBle2ProbeKey >> 4) & 0x0F);
+  uint8_t key_lo = static_cast<uint8_t>(kBle2ProbeKey & 0x0F);
+  uint8_t position = 0;
+  for (unsigned char plain_byte : plain) {
+    uint8_t hi = 0;
+    uint8_t lo = 0;
+    if (!find_inner_encoded_nibble_with_tables(static_cast<uint8_t>((plain_byte >> 4) & 0x0F), position, key_hi,
+                                               key_lo, INNER_BLE2_A, INNER_BLE2_B, hi)) {
+      return false;
+    }
+    uint8_t next_position = static_cast<uint8_t>(position + 1);
+    if (!find_inner_encoded_nibble_with_tables(static_cast<uint8_t>(plain_byte & 0x0F), next_position, key_hi,
+                                               key_lo, INNER_BLE2_A, INNER_BLE2_B, lo)) {
       return false;
     }
     append_inner_transport_escaped_byte(encoded, static_cast<uint8_t>((hi << 4) | lo));
@@ -1503,6 +1549,7 @@ void JuraComponent::loop() {
   this->process_machine_data_query();
   this->process_xml_polling();
   this->process_status_probe_(esphome::millis());
+  this->process_ble2_transport_probe_(esphome::millis());
   this->poll_settings_once_();
   this->poll_error_cycle_();
 }
@@ -2472,6 +2519,13 @@ void JuraComponent::run_status_probe_command(const std::string &command) {
   this->start_manual_status_probe_(trimmed, now);
 }
 
+void JuraComponent::run_ble2_transport_probe(const std::string &probe) {
+  uint32_t now = esphome::millis();
+  std::string normalized = to_lower_copy(probe);
+  trim_in_place(normalized);
+  this->start_ble2_transport_probe_(normalized, now);
+}
+
 void JuraComponent::start_status_probe_(uint32_t now) {
   this->status_probe_state_ = StatusProbeState::SEND;
   this->status_probe_index_ = 0;
@@ -2706,6 +2760,205 @@ void JuraComponent::process_status_probe_(uint32_t now) {
              static_cast<unsigned>(this->status_probe_frames_));
     this->finish_status_probe_candidate_(now, "timeout");
   }
+}
+
+bool JuraComponent::start_ble2_transport_probe_(const std::string &probe, uint32_t now) {
+  std::string command;
+  if (probe == "ty") {
+    command = "TY:";
+  } else if (probe == "tr37") {
+    command = "@TR:37";
+  } else {
+    ESP_LOGW(TAG, "ble2_probe_skip reason=unsupported_probe probe=%s", probe.c_str());
+    this->publish_status_probe_last_response_("ble2 " + probe + " -> unsupported_probe");
+    return false;
+  }
+
+  if (this->ble2_probe_state_ != Ble2ProbeState::IDLE || this->status_probe_state_ != StatusProbeState::IDLE) {
+    ESP_LOGD(TAG, "ble2_probe_skip reason=uart_busy_or_stats_active probe=%s", probe.c_str());
+    this->publish_status_probe_last_response_("ble2 " + probe + " -> busy");
+    return false;
+  }
+  if (!this->stats_session_ready_ || !this->stats_inner_tx_required_) {
+    ESP_LOGD(TAG, "ble2_probe_skip reason=post_gate_not_ready probe=%s", probe.c_str());
+    this->publish_status_probe_last_response_("ble2 " + probe + " -> post_gate_not_ready");
+    return false;
+  }
+  if (!this->post_gate_tx_ready_event_ || this->xml_inflight_ ||
+      this->db_transaction_owner_ != DbTransactionOwner::NONE || this->is_busy()) {
+    ESP_LOGD(TAG, "ble2_probe_skip reason=uart_busy_or_stats_active probe=%s owner=%s", probe.c_str(),
+             this->db_transaction_owner_name_(this->db_transaction_owner_));
+    this->publish_status_probe_last_response_("ble2 " + probe + " -> busy");
+    return false;
+  }
+
+  ESP_LOGD(TAG, "ble2_probe_start probe=%s", probe.c_str());
+  this->publish_status_probe_last_response_("ble2 " + probe + " -> started");
+  return this->send_ble2_transport_probe_(probe, command, now);
+}
+
+bool JuraComponent::send_ble2_transport_probe_(const std::string &probe, const std::string &command, uint32_t now) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    ESP_LOGD(TAG, "ble2_probe_skip reason=controller_not_ready probe=%s", probe.c_str());
+    return false;
+  }
+
+  std::string framed = command;
+  if (framed.size() < 2 || framed.substr(framed.size() - 2) != "\r\n") {
+    framed.append("\r\n");
+  }
+
+  std::vector<uint8_t> encoded;
+  if (!encode_ble2_transport_plus(framed, encoded)) {
+    ESP_LOGD(TAG, "ble2_probe_done probe=%s result=encode_failed frames=0", probe.c_str());
+    this->publish_status_probe_last_response_("ble2 " + probe + " -> encode_failed");
+    return false;
+  }
+
+  std::string encoded_text(encoded.begin(), encoded.end());
+  InnerTransportDecodeResult roundtrip =
+      decode_inner_transport_with_tables(encoded_text, INNER_BLE2_A, INNER_BLE2_B, "ble2");
+  bool roundtrip_ok = roundtrip.payload == framed;
+  ESP_LOGD(TAG, "ble2_probe_roundtrip plain=\"%s\" ok=%s encoded_hex=\"%s\"",
+           escape_control_text_for_log(command).c_str(), YESNO(roundtrip_ok),
+           compact_hex_string(encoded_text, encoded_text.size()).c_str());
+  if (!roundtrip_ok) {
+    ESP_LOGD(TAG, "ble2_probe_done probe=%s result=roundtrip_failed frames=0", probe.c_str());
+    this->publish_status_probe_last_response_("ble2 " + probe + " -> roundtrip_failed");
+    return false;
+  }
+
+  this->db_transaction_owner_ = DbTransactionOwner::BLE2_PROBE;
+  this->post_gate_tx_ready_event_ = false;
+  this->ble2_probe_state_ = Ble2ProbeState::WAIT;
+  this->ble2_probe_name_ = probe;
+  this->ble2_probe_command_ = command;
+  this->ble2_probe_deadline_ms_ = now + kBle2ProbeTimeoutMs;
+  this->ble2_probe_frames_ = 0;
+  this->coffee_maker_->connection->reset_response_line_buffer();
+
+  ESP_LOGD(TAG, "ble2_probe_tx probe=%s cmd=%s mode=ble2_plus timeout_ms=%u", probe.c_str(), command.c_str(),
+           static_cast<unsigned>(kBle2ProbeTimeoutMs));
+  if (!this->coffee_maker_->connection->write_decoded_no_flush(encoded)) {
+    ESP_LOGD(TAG, "ble2_probe_done probe=%s result=tx_failed frames=0", probe.c_str());
+    this->finish_ble2_transport_probe_(now, "tx_failed");
+    return false;
+  }
+  return true;
+}
+
+bool JuraComponent::handle_ble2_probe_line_(const std::string &line, const char *table_name, uint32_t now) {
+  std::string lower = to_lower_copy(line);
+  trim_in_place(lower);
+  if (lower.empty()) {
+    return false;
+  }
+
+  this->update_dongle_events_from_line_(line);
+  this->publish_status_probe_last_response_("ble2 " + this->ble2_probe_name_ + " -> " + sanitize_text_for_api(line));
+
+  const char *table = table_name != nullptr ? table_name : "ascii";
+  ESP_LOGD(TAG, "ble2_probe_rx_decoded probe=%s line=\"%s\" table=%s", this->ble2_probe_name_.c_str(),
+           sanitize_text_for_api(line).c_str(), table);
+
+  if (this->ble2_probe_name_ == "ty" && lower.rfind("ty:", 0) == 0) {
+    ESP_LOGD(TAG, "ble2_probe_detected_expected probe=ty line=\"%s\"", sanitize_text_for_api(line).c_str());
+    this->finish_ble2_transport_probe_(now, "expected");
+    return true;
+  }
+  if (this->ble2_probe_name_ == "tr37" && lower.rfind("@tr:37", 0) == 0) {
+    ESP_LOGD(TAG, "ble2_probe_detected_expected probe=tr37 line=\"%s\"", sanitize_text_for_api(line).c_str());
+    this->finish_ble2_transport_probe_(now, "expected");
+    return true;
+  }
+  if (lower.rfind("@tf:", 0) == 0) {
+    ESP_LOGD(TAG, "ble2_probe_detected_tf line=\"%s\"", sanitize_text_for_api(line).c_str());
+    this->publish_tf_status_(line);
+    this->finish_ble2_transport_probe_(now, "detected_tf");
+    return true;
+  }
+  if (lower.rfind("@tv:", 0) == 0) {
+    ESP_LOGD(TAG, "ble2_probe_detected_tv line=\"%s\"", sanitize_text_for_api(line).c_str());
+    this->handle_tv_progress_(line);
+    this->finish_ble2_transport_probe_(now, "detected_tv");
+    return true;
+  }
+  if (lower.rfind("@t2", 0) == 0) {
+    ESP_LOGD(TAG, "ble2_probe_detected_t2 line=\"%s\"", sanitize_text_for_api(line).c_str());
+    this->handle_t2_status_debug_(line);
+    return false;
+  }
+  if (lower.rfind("@", 0) == 0) {
+    ESP_LOGD(TAG, "ble2_probe_detected_status_like line=\"%s\"", sanitize_text_for_api(line).c_str());
+  }
+  return false;
+}
+
+void JuraComponent::process_ble2_transport_probe_(uint32_t now) {
+  if (this->ble2_probe_state_ != Ble2ProbeState::WAIT) {
+    return;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    this->finish_ble2_transport_probe_(now, "controller_not_ready");
+    return;
+  }
+
+  std::string raw_line;
+  while (this->coffee_maker_->connection->read_line_until(raw_line)) {
+    this->ble2_probe_frames_++;
+    ESP_LOGD(TAG, "ble2_probe_rx_raw probe=%s hex=\"%s\"", this->ble2_probe_name_.c_str(),
+             compact_hex_string(raw_line, raw_line.size()).c_str());
+    if (!raw_line.empty() && this->xml_decode_inner_transport_ &&
+        is_inner_transport_start(static_cast<uint8_t>(raw_line.front()))) {
+      std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(raw_line);
+      bool had_payload = false;
+      for (const auto &candidate : candidates) {
+        if (candidate.payload.empty()) {
+          continue;
+        }
+        had_payload = true;
+        if (this->handle_ble2_probe_line_(candidate.payload, candidate.table_name, now)) {
+          return;
+        }
+      }
+      if (!had_payload) {
+        ESP_LOGD(TAG, "ble2_probe_rx_noise probe=%s reason=inner_decode_empty",
+                 this->ble2_probe_name_.c_str());
+      }
+    } else if (this->is_printable_status_text_(raw_line)) {
+      if (this->handle_ble2_probe_line_(raw_line, "ascii", now)) {
+        return;
+      }
+    } else {
+      ESP_LOGD(TAG, "ble2_probe_rx_noise probe=%s reason=non_printable hex=\"%s\"",
+               this->ble2_probe_name_.c_str(), compact_hex_string(raw_line, raw_line.size()).c_str());
+    }
+  }
+
+  if (time_reached(now, this->ble2_probe_deadline_ms_)) {
+    ESP_LOGD(TAG, "ble2_probe_timeout probe=%s frames=%u", this->ble2_probe_name_.c_str(),
+             static_cast<unsigned>(this->ble2_probe_frames_));
+    this->finish_ble2_transport_probe_(now, "timeout");
+  }
+}
+
+void JuraComponent::finish_ble2_transport_probe_(uint32_t now, const char *result) {
+  const char *safe_result = result != nullptr ? result : "done";
+  const std::string probe = this->ble2_probe_name_;
+  const uint16_t frames = this->ble2_probe_frames_;
+  ESP_LOGD(TAG, "ble2_probe_done probe=%s result=%s frames=%u", probe.empty() ? "(none)" : probe.c_str(), safe_result,
+           static_cast<unsigned>(frames));
+  if (this->db_transaction_owner_ == DbTransactionOwner::BLE2_PROBE) {
+    this->db_transaction_owner_ = DbTransactionOwner::NONE;
+  }
+  this->post_gate_tx_ready_event_ = true;
+  this->ble2_probe_state_ = Ble2ProbeState::IDLE;
+  this->ble2_probe_name_.clear();
+  this->ble2_probe_command_.clear();
+  this->ble2_probe_deadline_ms_ = 0;
+  this->publish_status_probe_last_response_("ble2 " + probe + " -> " + safe_result +
+                                            " frames=" + std::to_string(frames));
+  (void) now;
 }
 
 void JuraComponent::process_machine_data_query() {
@@ -3175,6 +3428,8 @@ const char *JuraComponent::db_transaction_owner_name_(DbTransactionOwner owner) 
       return "machine_xml";
     case DbTransactionOwner::STATUS_PROBE:
       return "status_probe";
+    case DbTransactionOwner::BLE2_PROBE:
+      return "ble2_probe";
   }
   return "unknown";
 }
@@ -7346,7 +7601,8 @@ void JuraComponent::poll_settings_refresh_() {
 }
 
 void JuraComponent::poll_settings_once_() {
-  if (this->db_transaction_owner_ == DbTransactionOwner::STATUS_PROBE) {
+  if (this->db_transaction_owner_ == DbTransactionOwner::STATUS_PROBE ||
+      this->db_transaction_owner_ == DbTransactionOwner::BLE2_PROBE) {
     return;
   }
   if (!this->is_ready()) {
@@ -7399,7 +7655,8 @@ void JuraComponent::publish_error_state_(uint32_t code) {
 }
 
 void JuraComponent::poll_error_cycle_() {
-  if (this->db_transaction_owner_ == DbTransactionOwner::STATUS_PROBE) {
+  if (this->db_transaction_owner_ == DbTransactionOwner::STATUS_PROBE ||
+      this->db_transaction_owner_ == DbTransactionOwner::BLE2_PROBE) {
     return;
   }
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {

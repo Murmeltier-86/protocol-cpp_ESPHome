@@ -266,6 +266,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_status_probe_enabled(bool enabled) { this->status_probe_enabled_ = enabled; }
   void set_status_probe_interval(uint32_t interval_ms) { this->status_probe_interval_ms_ = interval_ms; }
   void run_status_probe_command(const std::string &command);
+  void run_ble2_transport_probe(const std::string &probe);
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
   void set_xml_mapping_source(const char *data, size_t length) {
     this->xml_mapping_data_ = data;
@@ -311,6 +312,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   enum class XmlCommandProbeState { IDLE, SEND, WAIT, DONE };
   enum class XmlSessionProbeState { IDLE, SEND, WAIT, DONE, FAILED };
   enum class StatusProbeState { IDLE, SEND, WAIT, DONE };
+  enum class Ble2ProbeState { IDLE, WAIT };
   enum class DongleStartupState {
     IDLE,
     START_CLEAR,
@@ -358,6 +360,11 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool handle_status_probe_line_(const std::string &line, bool complete, uint32_t now);
   void finish_status_probe_candidate_(uint32_t now, const char *reason);
   void finish_status_probe_cycle_(uint32_t now, const char *result);
+  bool start_ble2_transport_probe_(const std::string &probe, uint32_t now);
+  bool send_ble2_transport_probe_(const std::string &probe, const std::string &command, uint32_t now);
+  bool handle_ble2_probe_line_(const std::string &line, const char *table_name, uint32_t now);
+  void process_ble2_transport_probe_(uint32_t now);
+  void finish_ble2_transport_probe_(uint32_t now, const char *result);
   bool decode_and_publish_status_(const std::string &response, const char *parser_branch);
   std::string format_decoded_status_(const std::vector<JuraDecodedField> &fields) const;
   bool is_printable_status_text_(const std::string &text) const;
@@ -436,7 +443,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     PARSE_TGC0,
     SLEEP
   };
-  enum class DbTransactionOwner { NONE, XML_POLL, MACHINE_XML, STATUS_PROBE };
+  enum class DbTransactionOwner { NONE, XML_POLL, MACHINE_XML, STATUS_PROBE, BLE2_PROBE };
   size_t xml_command_index_(XmlPollState state) const;
   const char *db_transaction_owner_name_(DbTransactionOwner owner) const;
   bool begin_xml_transaction_(const char *command, uint32_t now);
@@ -565,6 +572,11 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string status_probe_rx_buffer_{};
   uint32_t status_probe_deadline_ms_{0};
   uint16_t status_probe_frames_{0};
+  Ble2ProbeState ble2_probe_state_{Ble2ProbeState::IDLE};
+  std::string ble2_probe_name_{};
+  std::string ble2_probe_command_{};
+  uint32_t ble2_probe_deadline_ms_{0};
+  uint16_t ble2_probe_frames_{0};
 
   bool enable_machine_xml_poll_{true};
   bool enable_xml_poll_{false};
@@ -790,6 +802,17 @@ class ManualStatusProbeAction : public esphome::Action<> {
  protected:
   JuraComponent *parent_;
   std::string command_{};
+};
+
+class Ble2TransportProbeAction : public esphome::Action<> {
+ public:
+  explicit Ble2TransportProbeAction(JuraComponent *parent) : parent_(parent) {}
+  void set_probe(const std::string &probe) { probe_ = probe; }
+  void play() override { this->parent_->run_ble2_transport_probe(probe_); }
+
+ protected:
+  JuraComponent *parent_;
+  std::string probe_{};
 };
 
 }  // namespace jutta_component
