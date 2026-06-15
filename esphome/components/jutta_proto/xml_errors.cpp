@@ -140,11 +140,16 @@ bool load_errors_from_xml(const std::string &xml_content) {
       }
     }
   }
-  std::string block;
-  if (!extract_section(xml_content, "errors", block)) {
-    ESP_LOGW(TAG, "XML enthält keinen <Errors>-Block");
-    block = xml_content;
-  }
+    std::string block;
+    if (!extract_section(xml_content, "errors", block)) {
+      ESP_LOGW(TAG, "XML enthält keinen <Errors>-Block");
+      return true;
+    }
+  //std::string block;
+  //if (!extract_section(xml_content, "errors", block)) {
+  //  ESP_LOGW(TAG, "XML enthält keinen <Errors>-Block");
+  //  block = xml_content;
+  //}
   for_each_error_tag(block, [](const std::string &tag_text) {
     auto attrs = parse_attributes(tag_text);
     ErrorDesc desc;
