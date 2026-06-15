@@ -3405,14 +3405,22 @@ void JuraComponent::process_machine_data_query() {
     return;
   }
   this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
+    std::string xml;
+    if (!this->request_machine_xml_(xml)) {
+      ESP_LOGW(TAG, "Machine-XML konnte nicht abgefragt werden.");
+      return;
+    }
 
-  std::string xml;
-  if (!this->request_machine_xml_(xml)) {
-    ESP_LOGW(TAG, "Machine-XML konnte nicht abgefragt werden.");
-    return;
-  }
+    if (!xml.empty()) {
+      this->handle_machine_xml_(xml);
+    }
+  //std::string xml;
+  //if (!this->request_machine_xml_(xml)) {
+  //  ESP_LOGW(TAG, "Machine-XML konnte nicht abgefragt werden.");
+  //  return;
+  //}
 
-  this->handle_machine_xml_(xml);
+  //this->handle_machine_xml_(xml);
 }
 
 void JuraComponent::publish_machine_data_(const std::string &response) {
@@ -3487,32 +3495,53 @@ bool JuraComponent::request_machine_xml_(std::string &xml) {
       this->clear_db_transaction_(DbTransactionOwner::MACHINE_XML);
       return false;
     }
-    out.assign(decoded.begin(), decoded.end());
-    if (!this->is_printable_status_text_(out)) {
-      ESP_LOGW(TAG, "Machine-XML ignored binary response");
-      connection->reset_db_rx_buffer();
-      out.clear();
-      this->clear_db_transaction_(DbTransactionOwner::MACHINE_XML);
-      return false;
-    }
+      out.assign(decoded.begin(), decoded.end());
+      if (!this->is_printable_status_text_(out)) {
+        ESP_LOGD(TAG, "Machine-XML received binary status response; handled by DB frame decoder");
+        connection->reset_db_rx_buffer();
+        out.clear();
+        this->clear_db_transaction_(DbTransactionOwner::MACHINE_XML);
+        return true;
+      }
+    //out.assign(decoded.begin(), decoded.end());
+    //if (!this->is_printable_status_text_(out)) {
+    //  ESP_LOGW(TAG, "Machine-XML ignored binary response");
+    //  connection->reset_db_rx_buffer();
+    //  out.clear();
+    //  this->clear_db_transaction_(DbTransactionOwner::MACHINE_XML);
+    //  return false;
+    //}
     out.erase(std::remove(out.begin(), out.end(), '\r'), out.end());
     trim_in_place(out);
     bool ok = !out.empty();
     this->clear_db_transaction_(DbTransactionOwner::MACHINE_XML);
     return ok;
   };
-
-  std::string primary;
-  if (send_and_receive(MACHINE_XML_PRIMARY_COMMAND, primary)) {
-    if (primary.size() >= MACHINE_XML_MIN_LENGTH) {
-      xml.swap(primary);
-      return true;
+    std::string primary;
+    if (send_and_receive(MACHINE_XML_PRIMARY_COMMAND, primary)) {
+      if (primary.empty()) {
+        return true;  // binäre Statusantwort wurde bereits über db_frame verarbeitet
+      }
+      if (primary.size() >= MACHINE_XML_MIN_LENGTH) {
+        xml.swap(primary);
+        return true;
+      }
+      ESP_LOGW(TAG, "Machine-XML Antwort zu kurz (%u Byte) – versuche Fallback.",
+               static_cast<unsigned>(primary.size()));
+    } else {
+      ESP_LOGW(TAG, "Machine-XML Primärkommando ohne Antwort – versuche Fallback.");
     }
-    ESP_LOGW(TAG, "Machine-XML Antwort zu kurz (%u Byte) – versuche Fallback.",
-             static_cast<unsigned>(primary.size()));
-  } else {
-    ESP_LOGW(TAG, "Machine-XML Primärkommando ohne Antwort – versuche Fallback.");
-  }
+  //std::string primary;
+  //if (send_and_receive(MACHINE_XML_PRIMARY_COMMAND, primary)) {
+  //  if (primary.size() >= MACHINE_XML_MIN_LENGTH) {
+  //    xml.swap(primary);
+  //    return true;
+  //  }
+  //  ESP_LOGW(TAG, "Machine-XML Antwort zu kurz (%u Byte) – versuche Fallback.",
+  //           static_cast<unsigned>(primary.size()));
+  //} else {
+  //  ESP_LOGW(TAG, "Machine-XML Primärkommando ohne Antwort – versuche Fallback.");
+  //}
 
   std::string fallback;
   if (send_and_receive(MACHINE_XML_FALLBACK_COMMAND, fallback)) {
