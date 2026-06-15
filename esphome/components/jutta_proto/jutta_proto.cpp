@@ -1554,8 +1554,8 @@ void JuraComponent::loop() {
     }
   }
 
-  this->process_machine_data_query();
   this->process_xml_polling();
+  this->process_machine_data_query();
   this->poll_settings_once_();
   this->poll_error_cycle_();
 }

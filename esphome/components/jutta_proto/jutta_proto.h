@@ -622,7 +622,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t debug_command_deadline_ms_{0};
   uint16_t debug_command_frames_{0};
 
-  bool enable_machine_xml_poll_{true};
+  bool enable_machine_xml_poll_{false};
   bool enable_xml_poll_{false};
   bool xml_publish_unstable_{false};
   bool xml_wait_for_ts_ack_{false};
