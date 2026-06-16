@@ -3562,15 +3562,35 @@ void JuraComponent::process_live_db_status_poll_(uint32_t now) {
     ESP_LOGD(TAG, "live_poll_wait_db timeout_ms=%u",
              static_cast<unsigned>(this->live_db_status_response_timeout_ms_));
   }
-  const bool got_frame =
-      connection->read_db_frame(decoded, this->live_db_status_response_timeout_ms_, &had_crlf, &decoded_len);
-  this->clear_db_transaction_(DbTransactionOwner::LIVE_DB_STATUS);
-  this->live_db_status_next_poll_ms_ = now + this->live_db_status_poll_interval_ms_;
+  const uint32_t wait_started_ms = esphome::millis();
+  const uint32_t wait_deadline_ms = wait_started_ms + this->live_db_status_response_timeout_ms_;
+  bool got_frame = false;
+  while (static_cast<int32_t>(esphome::millis() - wait_deadline_ms) < 0) {
+    decoded.clear();
+    had_crlf = false;
+    decoded_len = 0;
+    if (connection->read_db_frame(decoded, 0, &had_crlf, &decoded_len) && !decoded.empty()) {
+      got_frame = true;
+      break;
+    }
+    esphome::delay(5);
+  }
+  if (!got_frame) {
+    decoded.clear();
+    had_crlf = false;
+    decoded_len = 0;
+    got_frame = connection->read_db_frame(decoded, 0, &had_crlf, &decoded_len) && !decoded.empty();
+  }
 
-  if (!got_frame || decoded.empty()) {
+  const uint32_t wait_finished_ms = esphome::millis();
+  this->clear_db_transaction_(DbTransactionOwner::LIVE_DB_STATUS);
+  this->live_db_status_next_poll_ms_ = wait_finished_ms + this->live_db_status_poll_interval_ms_;
+
+  if (!got_frame) {
     if (this->live_db_status_debug_) {
-      ESP_LOGD(TAG, "live_poll_no_response cmd=%s timeout_ms=%u", label,
-               static_cast<unsigned>(this->live_db_status_response_timeout_ms_));
+      ESP_LOGD(TAG, "live_poll_no_response cmd=%s timeout_ms=%u elapsed_ms=%u", label,
+               static_cast<unsigned>(this->live_db_status_response_timeout_ms_),
+               static_cast<unsigned>(wait_finished_ms - wait_started_ms));
     }
     this->live_db_status_use_fallback_next_ = !use_fallback;
     return;
@@ -3578,8 +3598,8 @@ void JuraComponent::process_live_db_status_poll_(uint32_t now) {
 
   if (this->live_db_status_debug_) {
     std::string raw(decoded.begin(), decoded.end());
-    ESP_LOGD(TAG, "live_poll_rx_db len=%u hex=%s", static_cast<unsigned>(decoded.size()),
-             compact_hex_string(raw, 64).c_str());
+    ESP_LOGD(TAG, "live_poll_rx_db len=%u hex=%s elapsed_ms=%u", static_cast<unsigned>(decoded.size()),
+             compact_hex_string(raw, 64).c_str(), static_cast<unsigned>(wait_finished_ms - wait_started_ms));
   }
   this->live_db_status_use_fallback_next_ = false;
   (void) had_crlf;
@@ -6560,13 +6580,23 @@ bool JuraComponent::forward_post_gate_app_command_(const std::string &command, c
     this->xml_expected_prefix_.clear();
     return false;
   }
+  if (!connection->flush_tx_queue_blocking_until_empty(500)) {
+    ESP_LOGW(TAG, "stats_tx_not_idle cmd=%s timeout_ms=500", command.c_str());
+    this->post_gate_tx_ready_event_ = true;
+    this->end_xml_transaction_("stats_tx_not_idle");
+    this->xml_last_command_.clear();
+    this->xml_expected_prefix_.clear();
+    return false;
+  }
+  uint32_t tx_done_ms = esphome::millis();
+  ESP_LOGD(TAG, "stats_tx_idle cmd=%s", command.c_str());
   ESP_LOGD(TAG, "forward_post_gate_no_post_tx_flush cmd=%s", command.c_str());
 
+  this->xml_command_started_ms_ = tx_done_ms;
   this->xml_state_ = wait_state;
   this->xml_inflight_ = true;
-  uint32_t tx_estimate_ms = connection->tx_queue_estimated_ms();
-  this->xml_deadline_ms_ = now + timeout_ms + tx_estimate_ms;
-  this->xml_next_action_ms_ = now;
+  this->xml_deadline_ms_ = tx_done_ms + timeout_ms;
+  this->xml_next_action_ms_ = tx_done_ms;
   return true;
 }
 
