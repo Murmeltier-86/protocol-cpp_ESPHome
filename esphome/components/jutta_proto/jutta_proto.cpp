@@ -1975,10 +1975,54 @@ void JuraComponent::handle_decoded_response_(const std::string &response, const 
   }
 
   if (parser_branch != nullptr && std::string(parser_branch) == "db_frame") {
+    this->publish_live_db_status_raw_(response, parser_branch);
     if (this->decode_and_publish_status_(response, parser_branch)) {
       return;
     }
-    ESP_LOGD(TAG, "DB frame kept raw-only; no verified status text decoded");
+    if (this->live_db_status_debug_ || this->status_debug_) {
+      ESP_LOGD(TAG, "DB frame kept raw-only; no verified status text decoded");
+    }
+  }
+}
+
+void JuraComponent::publish_text_if_changed_(text_sensor::TextSensor *sensor, std::string &last_value,
+                                             const std::string &value) {
+  if (sensor == nullptr || value == last_value) {
+    return;
+  }
+  last_value = value;
+  sensor->publish_state(value);
+}
+
+void JuraComponent::publish_live_db_status_raw_(const std::string &response, const char *parser_branch) {
+  if (!this->live_db_status_enabled_) {
+    return;
+  }
+  const std::string branch = parser_branch != nullptr ? parser_branch : "unknown";
+  if (this->live_db_status_publish_raw_) {
+    this->publish_text_if_changed_(this->live_db_status_raw_hex_sensor_, this->current_live_db_status_raw_hex_,
+                                   compact_hex_string(response, 64));
+  }
+  this->publish_text_if_changed_(this->live_db_status_source_sensor_, this->current_live_db_status_source_, branch);
+  this->publish_text_if_changed_(this->live_db_status_last_update_sensor_, this->current_live_db_status_last_update_,
+                                 "millis=" + std::to_string(esphome::millis()));
+  if (this->live_db_status_debug_) {
+    ESP_LOGD(TAG, "live_db_status_raw branch=%s hex=\"%s\"", branch.c_str(),
+             compact_hex_string(response, 64).c_str());
+  }
+}
+
+void JuraComponent::publish_live_db_status_decoded_(const std::string &summary, const std::string &table_trace) {
+  if (!this->live_db_status_enabled_ || summary.empty()) {
+    return;
+  }
+  this->publish_text_if_changed_(this->live_db_status_decoded_sensor_, this->current_live_db_status_decoded_,
+                                 sanitize_text_for_api(summary));
+  this->publish_text_if_changed_(this->live_db_status_source_sensor_, this->current_live_db_status_source_,
+                                 "db_frame");
+  if (this->live_db_status_debug_) {
+    ESP_LOGD(TAG, "live_db_status_decoded tables=%s text=\"%s\"", table_trace.c_str(),
+             sanitize_text_for_api(summary).c_str());
   }
 }
 
@@ -1998,21 +2042,26 @@ bool JuraComponent::decode_and_publish_status_(const std::string &response, cons
   std::string family = infer_response_family(command);
   std::string payload_hex = format_hex_string(response);
   std::string raw_rx = sanitize_text_for_api(response);
+  const bool log_status_decode = this->status_debug_ || this->live_db_status_debug_;
 
   if (!this->ensure_xml_mapping_loaded_()) {
-    ESP_LOGD(TAG,
-             "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
-             "xml_tables=unknown fields=none final='' fallback=xml_mapping_unavailable",
-             raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str());
+    if (log_status_decode) {
+      ESP_LOGD(TAG,
+               "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
+               "xml_tables=unknown fields=none final='' fallback=xml_mapping_unavailable",
+               raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str());
+    }
     return false;
   }
 
   std::vector<JuraDecodedField> fields;
   if (!decode_status_response(response, branch, fields) || fields.empty()) {
-    ESP_LOGD(TAG,
-             "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
-             "xml_tables=unknown fields=none final='' fallback=decoder_returned_no_fields",
-             raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str());
+    if (log_status_decode) {
+      ESP_LOGD(TAG,
+               "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
+               "xml_tables=unknown fields=none final='' fallback=decoder_returned_no_fields",
+               raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str());
+    }
     return false;
   }
   this->last_decoded_fields_ = fields;
@@ -2021,27 +2070,36 @@ bool JuraComponent::decode_and_publish_status_(const std::string &response, cons
   std::string field_trace = format_decoded_field_trace(fields, tables, has_publishable);
   std::string table_trace = tables.empty() ? "unknown" : join_values(tables, ",");
   if (!has_publishable) {
-    ESP_LOGD(TAG,
-             "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
-             "xml_tables=%s fields=%s final='' fallback=no_verified_status_or_alert_match_raw_only",
-             raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str(),
-             table_trace.c_str(), field_trace.c_str());
+    if (log_status_decode) {
+      ESP_LOGD(TAG,
+               "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
+               "xml_tables=%s fields=%s final='' fallback=no_verified_status_or_alert_match_raw_only",
+               raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str(),
+               table_trace.c_str(), field_trace.c_str());
+    }
     return false;
   }
   std::string summary = this->format_decoded_status_(fields);
   if (summary.empty()) {
-    ESP_LOGD(TAG,
-             "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
-             "xml_tables=%s fields=%s final='' fallback=empty_summary",
-             raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str(),
-             table_trace.c_str(), field_trace.c_str());
+    if (log_status_decode) {
+      ESP_LOGD(TAG,
+               "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
+               "xml_tables=%s fields=%s final='' fallback=empty_summary",
+               raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str(),
+               table_trace.c_str(), field_trace.c_str());
+    }
     return false;
   }
-  ESP_LOGD(TAG,
-           "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
-           "xml_tables=%s fields=%s final='%s' fallback=%s",
-           raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str(),
-           table_trace.c_str(), field_trace.c_str(), sanitize_text_for_api(summary).c_str(), "none");
+  if (log_status_decode) {
+    ESP_LOGD(TAG,
+             "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
+             "xml_tables=%s fields=%s final='%s' fallback=%s",
+             raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str(),
+             table_trace.c_str(), field_trace.c_str(), sanitize_text_for_api(summary).c_str(), "none");
+  }
+  if (branch == "db_frame") {
+    this->publish_live_db_status_decoded_(summary, table_trace);
+  }
   this->publish_machine_status_(summary);
   this->publish_last_command_result_("decoded_status");
   return true;

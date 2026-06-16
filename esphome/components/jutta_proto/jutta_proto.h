@@ -220,6 +220,18 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_machine_warning_sensor(text_sensor::TextSensor *sensor) { this->machine_warning_sensor_ = sensor; }
   void set_active_alerts_sensor(text_sensor::TextSensor *sensor) { this->active_alerts_sensor_ = sensor; }
   void set_live_status_source_sensor(text_sensor::TextSensor *sensor) { this->live_status_source_sensor_ = sensor; }
+  void set_live_db_status_raw_hex_sensor(text_sensor::TextSensor *sensor) {
+    this->live_db_status_raw_hex_sensor_ = sensor;
+  }
+  void set_live_db_status_decoded_sensor(text_sensor::TextSensor *sensor) {
+    this->live_db_status_decoded_sensor_ = sensor;
+  }
+  void set_live_db_status_source_sensor(text_sensor::TextSensor *sensor) {
+    this->live_db_status_source_sensor_ = sensor;
+  }
+  void set_live_db_status_last_update_sensor(text_sensor::TextSensor *sensor) {
+    this->live_db_status_last_update_sensor_ = sensor;
+  }
   void set_status_probe_last_response_sensor(text_sensor::TextSensor *sensor) {
     this->status_probe_last_response_sensor_ = sensor;
   }
@@ -279,6 +291,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     this->status_probe_enabled_ = false;
   }
   void set_status_probe_interval(uint32_t interval_ms) { this->status_probe_interval_ms_ = interval_ms; }
+  void set_live_db_status_enabled(bool enabled) { this->live_db_status_enabled_ = enabled; }
+  void set_live_db_status_debug(bool enabled) { this->live_db_status_debug_ = enabled; }
+  void set_live_db_status_publish_raw(bool enabled) { this->live_db_status_publish_raw_ = enabled; }
   void set_allow_unsafe_debug_commands(bool allow) {
     (void) allow;
     this->allow_unsafe_debug_commands_ = false;
@@ -394,6 +409,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void finish_debug_command_(uint32_t now, const char *result);
   void log_status_forensics_frame_(const std::string &raw, const char *source);
   void log_status_forensics_decoded_(const std::string &line, const char *source, const char *table_name);
+  void publish_live_db_status_raw_(const std::string &response, const char *parser_branch);
+  void publish_live_db_status_decoded_(const std::string &summary, const std::string &table_trace);
+  void publish_text_if_changed_(text_sensor::TextSensor *sensor, std::string &last_value, const std::string &value);
   bool decode_and_publish_status_(const std::string &response, const char *parser_branch);
   std::string format_decoded_status_(const std::vector<JuraDecodedField> &fields) const;
   bool is_printable_status_text_(const std::string &text) const;
@@ -566,6 +584,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   text_sensor::TextSensor *machine_warning_sensor_{nullptr};
   text_sensor::TextSensor *active_alerts_sensor_{nullptr};
   text_sensor::TextSensor *live_status_source_sensor_{nullptr};
+  text_sensor::TextSensor *live_db_status_raw_hex_sensor_{nullptr};
+  text_sensor::TextSensor *live_db_status_decoded_sensor_{nullptr};
+  text_sensor::TextSensor *live_db_status_source_sensor_{nullptr};
+  text_sensor::TextSensor *live_db_status_last_update_sensor_{nullptr};
   text_sensor::TextSensor *status_probe_last_response_sensor_{nullptr};
   text_sensor::TextSensor *debug_command_last_response_sensor_{nullptr};
   text_sensor::TextSensor *last_t2_status_raw_sensor_{nullptr};
@@ -591,6 +613,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string current_machine_warning_{};
   std::string current_active_alerts_{};
   std::string current_live_status_source_{"nicht verfügbar"};
+  std::string current_live_db_status_raw_hex_{};
+  std::string current_live_db_status_decoded_{};
+  std::string current_live_db_status_source_{};
+  std::string current_live_db_status_last_update_{};
   bool machine_online_state_{false};
   bool machine_ready_state_{false};
   bool has_valid_tf_status_{false};
@@ -606,6 +632,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string status_forensics_last_raw_hex_{};
   bool status_forensics_decode_log_allowed_{false};
   bool status_probe_enabled_{false};
+  bool live_db_status_enabled_{true};
+  bool live_db_status_debug_{false};
+  bool live_db_status_publish_raw_{true};
   uint32_t status_probe_interval_ms_{300000};
   bool allow_unsafe_debug_commands_{false};
   uint32_t status_probe_next_ms_{0};

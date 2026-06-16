@@ -33,6 +33,10 @@ CONF_MACHINE_DISPLAY_STATUS = "machine_display_status"
 CONF_MACHINE_WARNING = "machine_warning"
 CONF_ACTIVE_ALERTS = "active_alerts"
 CONF_LIVE_STATUS_SOURCE = "live_status_source"
+CONF_LIVE_DB_STATUS_RAW_HEX = "live_db_status_raw_hex"
+CONF_LIVE_DB_STATUS_DECODED = "live_db_status_decoded"
+CONF_LIVE_DB_STATUS_SOURCE = "live_db_status_source"
+CONF_LIVE_DB_STATUS_LAST_UPDATE = "live_db_status_last_update"
 CONF_STATUS_PROBE_LAST_RESPONSE = "status_probe_last_response"
 CONF_DEBUG_COMMAND_LAST_RESPONSE = "debug_command_last_response"
 CONF_LAST_T2_STATUS_RAW = "last_t2_status_raw"
@@ -78,6 +82,9 @@ CONF_STATUS_FORENSICS_LOG_INTERVAL_MS = "status_forensics_log_interval_ms"
 CONF_STATUS_FORENSICS_VERBOSE_CANDIDATES = "status_forensics_verbose_candidates"
 CONF_STATUS_PROBE_ENABLED = "status_probe_enabled"
 CONF_STATUS_PROBE_INTERVAL_MS = "status_probe_interval_ms"
+CONF_LIVE_DB_STATUS_ENABLED = "live_db_status_enabled"
+CONF_LIVE_DB_STATUS_DEBUG = "live_db_status_debug"
+CONF_LIVE_DB_STATUS_PUBLISH_RAW = "live_db_status_publish_raw"
 CONF_ALLOW_UNSAFE_DEBUG_COMMANDS = "allow_unsafe_debug_commands"
 CONF_TRANSPORT = "transport"
 CONF_XML_SENSORS = "xml_sensors"
@@ -194,6 +201,10 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_MACHINE_WARNING): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_ACTIVE_ALERTS): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_LIVE_STATUS_SOURCE): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_LIVE_DB_STATUS_RAW_HEX): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_LIVE_DB_STATUS_DECODED): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_LIVE_DB_STATUS_SOURCE): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_LIVE_DB_STATUS_LAST_UPDATE): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_STATUS_PROBE_LAST_RESPONSE): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_DEBUG_COMMAND_LAST_RESPONSE): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_LAST_T2_STATUS_RAW): text_sensor.text_sensor_schema(),
@@ -253,6 +264,9 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_STATUS_PROBE_INTERVAL_MS, default=300000): cv.All(
                 cv.positive_int, cv.Range(min=10000)
             ),
+            cv.Optional(CONF_LIVE_DB_STATUS_ENABLED, default=True): cv.boolean,
+            cv.Optional(CONF_LIVE_DB_STATUS_DEBUG, default=False): cv.boolean,
+            cv.Optional(CONF_LIVE_DB_STATUS_PUBLISH_RAW, default=True): cv.boolean,
             cv.Optional(CONF_ALLOW_UNSAFE_DEBUG_COMMANDS, default=False): cv.boolean,
             cv.Optional(CONF_XML_SENSORS, default=[]): cv.ensure_list(XML_SENSOR_SCHEMA),
             cv.Optional(CONF_DEBUG_UART_FRAMES, default=False): cv.boolean,
@@ -478,6 +492,9 @@ async def to_code(config):
     cg.add(var.set_xml_tablet_sequence_mode(config[CONF_XML_TABLET_SEQUENCE_MODE]))
     cg.add(var.set_xml_counter_max(config[CONF_XML_COUNTER_MAX]))
     cg.add(var.set_status_debug(config[CONF_STATUS_DEBUG]))
+    cg.add(var.set_live_db_status_enabled(config[CONF_LIVE_DB_STATUS_ENABLED]))
+    cg.add(var.set_live_db_status_debug(config[CONF_LIVE_DB_STATUS_DEBUG]))
+    cg.add(var.set_live_db_status_publish_raw(config[CONF_LIVE_DB_STATUS_PUBLISH_RAW]))
     mapping_path = config[CONF_XML_MAPPING_PATH]
     if mapping_path == "embedded":
         resolved_path = os.path.join(COMPONENT_DIR, "jura_mapping_embed.xml")
@@ -560,6 +577,22 @@ async def to_code(config):
     if CONF_LIVE_STATUS_SOURCE in config:
         live_status_source_sensor = await text_sensor.new_text_sensor(config[CONF_LIVE_STATUS_SOURCE])
         cg.add(var.set_live_status_source_sensor(live_status_source_sensor))
+
+    if CONF_LIVE_DB_STATUS_RAW_HEX in config:
+        live_db_status_raw_hex_sensor = await text_sensor.new_text_sensor(config[CONF_LIVE_DB_STATUS_RAW_HEX])
+        cg.add(var.set_live_db_status_raw_hex_sensor(live_db_status_raw_hex_sensor))
+
+    if CONF_LIVE_DB_STATUS_DECODED in config:
+        live_db_status_decoded_sensor = await text_sensor.new_text_sensor(config[CONF_LIVE_DB_STATUS_DECODED])
+        cg.add(var.set_live_db_status_decoded_sensor(live_db_status_decoded_sensor))
+
+    if CONF_LIVE_DB_STATUS_SOURCE in config:
+        live_db_status_source_sensor = await text_sensor.new_text_sensor(config[CONF_LIVE_DB_STATUS_SOURCE])
+        cg.add(var.set_live_db_status_source_sensor(live_db_status_source_sensor))
+
+    if CONF_LIVE_DB_STATUS_LAST_UPDATE in config:
+        live_db_status_last_update_sensor = await text_sensor.new_text_sensor(config[CONF_LIVE_DB_STATUS_LAST_UPDATE])
+        cg.add(var.set_live_db_status_last_update_sensor(live_db_status_last_update_sensor))
 
     if CONF_MACHINE_ONLINE in config:
         machine_online_sensor = await binary_sensor.new_binary_sensor(config[CONF_MACHINE_ONLINE])
