@@ -294,6 +294,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_live_db_status_enabled(bool enabled) { this->live_db_status_enabled_ = enabled; }
   void set_live_db_status_debug(bool enabled) { this->live_db_status_debug_ = enabled; }
   void set_live_db_status_publish_raw(bool enabled) { this->live_db_status_publish_raw_ = enabled; }
+  void set_live_db_status_poll_enabled(bool enabled) { this->live_db_status_poll_enabled_ = enabled; }
+  void set_live_db_status_poll_interval(uint32_t interval_ms) { this->live_db_status_poll_interval_ms_ = interval_ms; }
   void set_allow_unsafe_debug_commands(bool allow) {
     (void) allow;
     this->allow_unsafe_debug_commands_ = false;
@@ -416,6 +418,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string format_decoded_status_(const std::vector<JuraDecodedField> &fields) const;
   bool is_printable_status_text_(const std::string &text) const;
   void process_machine_data_query();
+  void process_live_db_status_poll_(uint32_t now);
+  void schedule_live_db_status_retry_(uint32_t now, const char *reason);
   void publish_machine_data_(const std::string &response);
   void process_xml_polling();
   void process_xml_command_probe_scheduler_(uint32_t now);
@@ -490,7 +494,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     PARSE_TGC0,
     SLEEP
   };
-  enum class DbTransactionOwner { NONE, XML_POLL, MACHINE_XML, STATUS_PROBE, BLE2_PROBE, DEBUG_COMMAND };
+  enum class DbTransactionOwner { NONE, XML_POLL, MACHINE_XML, LIVE_DB_STATUS, STATUS_PROBE, BLE2_PROBE, DEBUG_COMMAND };
   size_t xml_command_index_(XmlPollState state) const;
   const char *db_transaction_owner_name_(DbTransactionOwner owner) const;
   bool begin_xml_transaction_(const char *command, uint32_t now);
@@ -635,6 +639,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool live_db_status_enabled_{true};
   bool live_db_status_debug_{false};
   bool live_db_status_publish_raw_{true};
+  bool live_db_status_poll_enabled_{true};
+  bool live_db_status_use_fallback_next_{false};
+  uint32_t live_db_status_poll_interval_ms_{10000};
+  uint32_t live_db_status_next_poll_ms_{0};
   uint32_t status_probe_interval_ms_{300000};
   bool allow_unsafe_debug_commands_{false};
   uint32_t status_probe_next_ms_{0};

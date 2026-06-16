@@ -31,6 +31,7 @@ constexpr uint32_t MACHINE_XML_TIMEOUT_MS = 1500;
 constexpr uint32_t MACHINE_XML_BUSY_BACKOFF_MS = 5000;
 constexpr uint32_t MACHINE_XML_MIN_REQUEST_GAP_MS = 10000;
 constexpr std::size_t MACHINE_XML_MIN_LENGTH = 32;
+constexpr uint32_t LIVE_DB_STATUS_TIMEOUT_MS = 300;
 const char *const MACHINE_XML_PRIMARY_COMMAND = "@hr:00\r\n";
 const char *const MACHINE_XML_FALLBACK_COMMAND = "@hr:05\r\n";
 constexpr uint32_t kXmlRxTimeoutMs = 5000;
@@ -1562,6 +1563,7 @@ void JuraComponent::loop() {
 
   this->process_machine_data_query();
   this->process_xml_polling();
+  this->process_live_db_status_poll_(esphome::millis());
   this->poll_settings_once_();
   this->poll_error_cycle_();
 }
@@ -2076,6 +2078,9 @@ bool JuraComponent::decode_and_publish_status_(const std::string &response, cons
                "xml_tables=%s fields=%s final='' fallback=no_verified_status_or_alert_match_raw_only",
                raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str(),
                table_trace.c_str(), field_trace.c_str());
+      if (branch == "db_frame" && this->live_db_status_debug_) {
+        ESP_LOGD(TAG, "live_poll_decoded table=%s publish=no", table_trace.c_str());
+      }
     }
     return false;
   }
@@ -2098,6 +2103,9 @@ bool JuraComponent::decode_and_publish_status_(const std::string &response, cons
              table_trace.c_str(), field_trace.c_str(), sanitize_text_for_api(summary).c_str(), "none");
   }
   if (branch == "db_frame") {
+    if (this->live_db_status_debug_) {
+      ESP_LOGD(TAG, "live_poll_decoded table=%s publish=yes", table_trace.c_str());
+    }
     this->publish_live_db_status_decoded_(summary, table_trace);
   }
   this->publish_machine_status_(summary);
@@ -3481,6 +3489,98 @@ void JuraComponent::process_machine_data_query() {
   this->handle_machine_xml_(xml);
 }
 
+void JuraComponent::schedule_live_db_status_retry_(uint32_t now, const char *reason) {
+  const char *safe_reason = reason != nullptr && reason[0] != '\0' ? reason : "unknown";
+  if (this->live_db_status_debug_) {
+    ESP_LOGD(TAG, "live_poll_suppressed reason=%s", safe_reason);
+  }
+  this->live_db_status_next_poll_ms_ = now + 1000;
+}
+
+void JuraComponent::process_live_db_status_poll_(uint32_t now) {
+  if (!this->live_db_status_enabled_ || !this->live_db_status_poll_enabled_) {
+    return;
+  }
+  if (!this->is_ready()) {
+    return;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return;
+  }
+  if (this->live_db_status_next_poll_ms_ != 0 && !time_reached(now, this->live_db_status_next_poll_ms_)) {
+    return;
+  }
+
+  auto *connection = this->coffee_maker_->connection.get();
+  if (this->xml_inflight_ || (this->enable_xml_poll_ && this->xml_state_ != XmlPollState::IDLE &&
+                              this->xml_state_ != XmlPollState::SLEEP)) {
+    this->schedule_live_db_status_retry_(now, "stats_busy");
+    return;
+  }
+  if (this->xml_command_probe_ || this->xml_session_probe_ ||
+      (this->enable_xml_poll_ && this->xml_transport_selftest_) ||
+      (this->enable_xml_poll_ && this->xml_dongle_startup_ && !this->stats_session_ready_) ||
+      (this->enable_xml_poll_ && this->xml_run_tablet_start_sequence_ && !this->xml_tablet_start_sequence_done_)) {
+    this->schedule_live_db_status_retry_(now, "xml_busy");
+    return;
+  }
+  if (this->db_transaction_owner_ != DbTransactionOwner::NONE) {
+    this->schedule_live_db_status_retry_(now, "owner_active");
+    return;
+  }
+  if (connection->tx_busy()) {
+    this->schedule_live_db_status_retry_(now, "tx_busy");
+    return;
+  }
+  if (this->is_busy()) {
+    this->schedule_live_db_status_retry_(now, "coffee_maker_locked");
+    return;
+  }
+
+  const bool use_fallback = this->live_db_status_use_fallback_next_;
+  const char *command = use_fallback ? MACHINE_XML_FALLBACK_COMMAND : MACHINE_XML_PRIMARY_COMMAND;
+  const char *label = use_fallback ? "@hr:05" : "@hr:00";
+  if (this->live_db_status_debug_) {
+    ESP_LOGD(TAG, "live_poll_tx cmd=%s", label);
+  }
+
+  this->db_transaction_owner_ = DbTransactionOwner::LIVE_DB_STATUS;
+  connection->reset_db_rx_buffer();
+  if (!connection->write_decoded(command)) {
+    this->clear_db_transaction_(DbTransactionOwner::LIVE_DB_STATUS);
+    if (this->live_db_status_debug_) {
+      ESP_LOGD(TAG, "live_poll_no_response cmd=%s reason=tx_failed", label);
+    }
+    this->live_db_status_next_poll_ms_ = now + this->live_db_status_poll_interval_ms_;
+    this->live_db_status_use_fallback_next_ = !use_fallback;
+    return;
+  }
+
+  std::vector<uint8_t> decoded;
+  bool had_crlf = false;
+  size_t decoded_len = 0;
+  const bool got_frame = connection->read_db_frame(decoded, LIVE_DB_STATUS_TIMEOUT_MS, &had_crlf, &decoded_len);
+  this->clear_db_transaction_(DbTransactionOwner::LIVE_DB_STATUS);
+  this->live_db_status_next_poll_ms_ = now + this->live_db_status_poll_interval_ms_;
+
+  if (!got_frame || decoded.empty()) {
+    if (this->live_db_status_debug_) {
+      ESP_LOGD(TAG, "live_poll_no_response cmd=%s", label);
+    }
+    this->live_db_status_use_fallback_next_ = !use_fallback;
+    return;
+  }
+
+  if (this->live_db_status_debug_) {
+    std::string raw(decoded.begin(), decoded.end());
+    ESP_LOGD(TAG, "live_poll_rx_db len=%u hex=%s", static_cast<unsigned>(decoded.size()),
+             compact_hex_string(raw, 64).c_str());
+  }
+  this->live_db_status_use_fallback_next_ = false;
+  (void) had_crlf;
+  (void) decoded_len;
+}
+
 void JuraComponent::publish_machine_data_(const std::string &response) {
   std::string sanitized = response;
   sanitized.erase(std::remove_if(sanitized.begin(), sanitized.end(),
@@ -3902,6 +4002,14 @@ const char *JuraComponent::db_transaction_owner_name_(DbTransactionOwner owner) 
       return "xml_poll";
     case DbTransactionOwner::MACHINE_XML:
       return "machine_xml";
+    case DbTransactionOwner::LIVE_DB_STATUS:
+      return "live_db_status";
+    case DbTransactionOwner::STATUS_PROBE:
+      return "status_probe";
+    case DbTransactionOwner::BLE2_PROBE:
+      return "ble2_probe";
+    case DbTransactionOwner::DEBUG_COMMAND:
+      return "debug_command";
   }
   return "unknown";
 }
