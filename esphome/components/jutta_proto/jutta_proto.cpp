@@ -31,7 +31,6 @@ constexpr uint32_t MACHINE_XML_TIMEOUT_MS = 1500;
 constexpr uint32_t MACHINE_XML_BUSY_BACKOFF_MS = 5000;
 constexpr uint32_t MACHINE_XML_MIN_REQUEST_GAP_MS = 10000;
 constexpr std::size_t MACHINE_XML_MIN_LENGTH = 32;
-constexpr uint32_t LIVE_DB_STATUS_TIMEOUT_MS = 300;
 const char *const MACHINE_XML_PRIMARY_COMMAND = "@hr:00\r\n";
 const char *const MACHINE_XML_FALLBACK_COMMAND = "@hr:05\r\n";
 constexpr uint32_t kXmlRxTimeoutMs = 5000;
@@ -3559,13 +3558,19 @@ void JuraComponent::process_live_db_status_poll_(uint32_t now) {
   std::vector<uint8_t> decoded;
   bool had_crlf = false;
   size_t decoded_len = 0;
-  const bool got_frame = connection->read_db_frame(decoded, LIVE_DB_STATUS_TIMEOUT_MS, &had_crlf, &decoded_len);
+  if (this->live_db_status_debug_) {
+    ESP_LOGD(TAG, "live_poll_wait_db timeout_ms=%u",
+             static_cast<unsigned>(this->live_db_status_response_timeout_ms_));
+  }
+  const bool got_frame =
+      connection->read_db_frame(decoded, this->live_db_status_response_timeout_ms_, &had_crlf, &decoded_len);
   this->clear_db_transaction_(DbTransactionOwner::LIVE_DB_STATUS);
   this->live_db_status_next_poll_ms_ = now + this->live_db_status_poll_interval_ms_;
 
   if (!got_frame || decoded.empty()) {
     if (this->live_db_status_debug_) {
-      ESP_LOGD(TAG, "live_poll_no_response cmd=%s", label);
+      ESP_LOGD(TAG, "live_poll_no_response cmd=%s timeout_ms=%u", label,
+               static_cast<unsigned>(this->live_db_status_response_timeout_ms_));
     }
     this->live_db_status_use_fallback_next_ = !use_fallback;
     return;

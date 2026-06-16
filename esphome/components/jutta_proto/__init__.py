@@ -87,6 +87,7 @@ CONF_LIVE_DB_STATUS_DEBUG = "live_db_status_debug"
 CONF_LIVE_DB_STATUS_PUBLISH_RAW = "live_db_status_publish_raw"
 CONF_LIVE_DB_STATUS_POLL_ENABLED = "live_db_status_poll_enabled"
 CONF_LIVE_DB_STATUS_POLL_INTERVAL_MS = "live_db_status_poll_interval_ms"
+CONF_LIVE_DB_STATUS_RESPONSE_TIMEOUT_MS = "live_db_status_response_timeout_ms"
 CONF_ALLOW_UNSAFE_DEBUG_COMMANDS = "allow_unsafe_debug_commands"
 CONF_TRANSPORT = "transport"
 CONF_XML_SENSORS = "xml_sensors"
@@ -272,6 +273,9 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_LIVE_DB_STATUS_POLL_ENABLED, default=True): cv.boolean,
             cv.Optional(CONF_LIVE_DB_STATUS_POLL_INTERVAL_MS, default=10000): cv.All(
                 cv.positive_int, cv.Range(min=10000)
+            ),
+            cv.Optional(CONF_LIVE_DB_STATUS_RESPONSE_TIMEOUT_MS, default=1200): cv.All(
+                cv.positive_int, cv.Range(min=1200)
             ),
             cv.Optional(CONF_ALLOW_UNSAFE_DEBUG_COMMANDS, default=False): cv.boolean,
             cv.Optional(CONF_XML_SENSORS, default=[]): cv.ensure_list(XML_SENSOR_SCHEMA),
@@ -503,6 +507,7 @@ async def to_code(config):
     cg.add(var.set_live_db_status_publish_raw(config[CONF_LIVE_DB_STATUS_PUBLISH_RAW]))
     cg.add(var.set_live_db_status_poll_enabled(config[CONF_LIVE_DB_STATUS_POLL_ENABLED]))
     cg.add(var.set_live_db_status_poll_interval(config[CONF_LIVE_DB_STATUS_POLL_INTERVAL_MS]))
+    cg.add(var.set_live_db_status_response_timeout(config[CONF_LIVE_DB_STATUS_RESPONSE_TIMEOUT_MS]))
     mapping_path = config[CONF_XML_MAPPING_PATH]
     if mapping_path == "embedded":
         resolved_path = os.path.join(COMPONENT_DIR, "jura_mapping_embed.xml")

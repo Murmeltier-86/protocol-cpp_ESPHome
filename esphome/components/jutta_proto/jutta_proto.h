@@ -296,6 +296,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_live_db_status_publish_raw(bool enabled) { this->live_db_status_publish_raw_ = enabled; }
   void set_live_db_status_poll_enabled(bool enabled) { this->live_db_status_poll_enabled_ = enabled; }
   void set_live_db_status_poll_interval(uint32_t interval_ms) { this->live_db_status_poll_interval_ms_ = interval_ms; }
+  void set_live_db_status_response_timeout(uint32_t timeout_ms) {
+    this->live_db_status_response_timeout_ms_ = timeout_ms;
+  }
   void set_allow_unsafe_debug_commands(bool allow) {
     (void) allow;
     this->allow_unsafe_debug_commands_ = false;
@@ -642,6 +645,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool live_db_status_poll_enabled_{true};
   bool live_db_status_use_fallback_next_{false};
   uint32_t live_db_status_poll_interval_ms_{10000};
+  uint32_t live_db_status_response_timeout_ms_{1200};
   uint32_t live_db_status_next_poll_ms_{0};
   uint32_t status_probe_interval_ms_{300000};
   bool allow_unsafe_debug_commands_{false};
