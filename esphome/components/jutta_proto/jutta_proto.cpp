@@ -29,6 +29,7 @@ constexpr size_t HANDSHAKE_LOG_PREVIEW_LIMIT = 64;
 constexpr uint32_t MACHINE_DATA_QUERY_INTERVAL_MS = 30000;
 constexpr uint32_t MACHINE_XML_TIMEOUT_MS = 1500;
 constexpr uint32_t MACHINE_XML_BUSY_BACKOFF_MS = 5000;
+constexpr uint32_t MACHINE_XML_MIN_REQUEST_GAP_MS = 10000;
 constexpr std::size_t MACHINE_XML_MIN_LENGTH = 32;
 const char *const MACHINE_XML_PRIMARY_COMMAND = "@hr:00\r\n";
 const char *const MACHINE_XML_FALLBACK_COMMAND = "@hr:05\r\n";
@@ -39,7 +40,7 @@ constexpr uint32_t kPostGateControlTimeoutMs = 5000;
 constexpr uint32_t kTabletSeqRxWindowMs = 1500;
 constexpr size_t kTabletSeqMaxRxBytes = 256;
 constexpr uint32_t kInterCmdGapMs = 250;
-constexpr uint32_t kStatsNextCommandDelayMs = 0;
+constexpr uint32_t kStatsNextCommandDelayMs = 50;
 constexpr uint32_t kXmlQuietMs = 120;
 constexpr uint32_t kCycleSleepMs = 2000;
 constexpr uint8_t kTr32PageCount = 16;
@@ -1487,6 +1488,7 @@ void JuraComponent::setup() {
   this->connection_ = std::make_unique<::jutta_proto::JuttaConnection>(this->parent_);
   this->connection_->set_log_decoded_tx(this->log_decoded_tx_);
   this->connection_->set_log_encoded_uart(this->log_encoded_uart_);
+  this->connection_->set_debug_uart_frames(this->debug_uart_frames_);
   this->connection_->set_response_callback([this](const std::string &response, const char *parser_branch) {
     this->handle_decoded_response_(response, parser_branch);
   });
@@ -1544,18 +1546,22 @@ void JuraComponent::loop() {
 
   if (this->connection_ != nullptr && this->handshake_stage_ != HandshakeStage::DONE &&
       this->handshake_stage_ != HandshakeStage::FAILED) {
+    this->connection_->process_tx_queue();
     this->process_handshake();
   }
 
   if (this->coffee_maker_ != nullptr) {
+    if (this->coffee_maker_->connection != nullptr) {
+      this->coffee_maker_->connection->process_tx_queue();
+    }
     this->coffee_maker_->loop();
     if (!this->coffee_maker_->is_locked()) {
       this->custom_cancel_flag_ = false;
     }
   }
 
-  this->process_xml_polling();
   this->process_machine_data_query();
+  this->process_xml_polling();
   this->poll_settings_once_();
   this->poll_error_cycle_();
 }
@@ -1647,6 +1653,7 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Status probe: %s", YESNO(this->status_probe_enabled_));
   ESP_LOGCONFIG(TAG, "  Status probe interval: %u ms", static_cast<unsigned>(this->status_probe_interval_ms_));
   ESP_LOGCONFIG(TAG, "  Unsafe debug commands: %s", YESNO(this->allow_unsafe_debug_commands_));
+  ESP_LOGCONFIG(TAG, "  Debug UART frames: %s", YESNO(this->debug_uart_frames_));
   ESP_LOGCONFIG(TAG, "  XML dongle startup: %s", YESNO(this->xml_dongle_startup_));
   ESP_LOGCONFIG(TAG, "  XML dongle startup debug: %s", YESNO(this->xml_dongle_startup_debug_));
   ESP_LOGCONFIG(TAG, "  XML dongle startup mode: %s", this->xml_dongle_startup_mode_.c_str());
@@ -1849,6 +1856,7 @@ void JuraComponent::process_handshake() {
     this->coffee_maker_ = std::make_unique<::jutta_proto::CoffeeMaker>(std::move(connection));
     this->coffee_maker_->connection->set_log_decoded_tx(this->log_decoded_tx_);
     this->coffee_maker_->connection->set_log_encoded_uart(this->log_encoded_uart_);
+    this->coffee_maker_->connection->set_debug_uart_frames(this->debug_uart_frames_);
     this->coffee_maker_->connection->set_response_callback([this](const std::string &response,
                                                                   const char *parser_branch) {
       this->handle_decoded_response_(response, parser_branch);
@@ -3405,22 +3413,14 @@ void JuraComponent::process_machine_data_query() {
     return;
   }
   this->machine_data_query_next_ = now + MACHINE_DATA_QUERY_INTERVAL_MS;
-    std::string xml;
-    if (!this->request_machine_xml_(xml)) {
-      ESP_LOGW(TAG, "Machine-XML konnte nicht abgefragt werden.");
-      return;
-    }
 
-    if (!xml.empty()) {
-      this->handle_machine_xml_(xml);
-    }
-  //std::string xml;
-  //if (!this->request_machine_xml_(xml)) {
-  //  ESP_LOGW(TAG, "Machine-XML konnte nicht abgefragt werden.");
-  //  return;
-  //}
+  std::string xml;
+  if (!this->request_machine_xml_(xml)) {
+    ESP_LOGW(TAG, "Machine-XML konnte nicht abgefragt werden.");
+    return;
+  }
 
-  //this->handle_machine_xml_(xml);
+  this->handle_machine_xml_(xml);
 }
 
 void JuraComponent::publish_machine_data_(const std::string &response) {
@@ -3447,6 +3447,10 @@ bool JuraComponent::request_machine_xml_(std::string &xml) {
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     return false;
   }
+  uint32_t now = esphome::millis();
+  if (this->machine_xml_next_request_ms_ != 0 && !time_reached(now, this->machine_xml_next_request_ms_)) {
+    return false;
+  }
   bool xml_poll_active = this->xml_inflight_ || this->db_transaction_owner_ == DbTransactionOwner::XML_POLL ||
                          this->xml_command_probe_ ||
                          this->xml_session_probe_ ||
@@ -3457,7 +3461,6 @@ bool JuraComponent::request_machine_xml_(std::string &xml) {
                          (this->enable_xml_poll_ && this->xml_run_tablet_start_sequence_ &&
                           !this->xml_tablet_start_sequence_done_);
   if (xml_poll_active) {
-    uint32_t now = esphome::millis();
     this->machine_xml_busy_backoff_until_ = now + MACHINE_XML_BUSY_BACKOFF_MS;
     ESP_LOGD(TAG, "Machine-XML query skipped while XML DB polling is active");
     return false;
@@ -3470,7 +3473,6 @@ bool JuraComponent::request_machine_xml_(std::string &xml) {
       return false;
     }
     if (this->db_transaction_owner_ != DbTransactionOwner::NONE) {
-      uint32_t now = esphome::millis();
       this->machine_xml_busy_backoff_until_ = now + MACHINE_XML_BUSY_BACKOFF_MS;
       ESP_LOGD(TAG, "Machine-XML command %s skipped; DB transaction already active", command);
       return false;
@@ -3495,63 +3497,46 @@ bool JuraComponent::request_machine_xml_(std::string &xml) {
       this->clear_db_transaction_(DbTransactionOwner::MACHINE_XML);
       return false;
     }
-      out.assign(decoded.begin(), decoded.end());
-      if (!this->is_printable_status_text_(out)) {
-        ESP_LOGD(TAG, "Machine-XML received binary status response; handled by DB frame decoder");
-        connection->reset_db_rx_buffer();
-        out.clear();
-        this->clear_db_transaction_(DbTransactionOwner::MACHINE_XML);
-        return true;
-      }
-    //out.assign(decoded.begin(), decoded.end());
-    //if (!this->is_printable_status_text_(out)) {
-    //  ESP_LOGW(TAG, "Machine-XML ignored binary response");
-    //  connection->reset_db_rx_buffer();
-    //  out.clear();
-    //  this->clear_db_transaction_(DbTransactionOwner::MACHINE_XML);
-    //  return false;
-    //}
+    out.assign(decoded.begin(), decoded.end());
+    if (!this->is_printable_status_text_(out)) {
+      ESP_LOGW(TAG, "Machine-XML ignored binary response");
+      connection->reset_db_rx_buffer();
+      out.clear();
+      this->clear_db_transaction_(DbTransactionOwner::MACHINE_XML);
+      return false;
+    }
     out.erase(std::remove(out.begin(), out.end(), '\r'), out.end());
     trim_in_place(out);
     bool ok = !out.empty();
     this->clear_db_transaction_(DbTransactionOwner::MACHINE_XML);
     return ok;
   };
-    std::string primary;
-    if (send_and_receive(MACHINE_XML_PRIMARY_COMMAND, primary)) {
-      if (primary.empty()) {
-        return true;  // binäre Statusantwort wurde bereits über db_frame verarbeitet
-      }
-      if (primary.size() >= MACHINE_XML_MIN_LENGTH) {
-        xml.swap(primary);
-        return true;
-      }
-      ESP_LOGW(TAG, "Machine-XML Antwort zu kurz (%u Byte) – versuche Fallback.",
-               static_cast<unsigned>(primary.size()));
-    } else {
-      ESP_LOGW(TAG, "Machine-XML Primärkommando ohne Antwort – versuche Fallback.");
-    }
-  //std::string primary;
-  //if (send_and_receive(MACHINE_XML_PRIMARY_COMMAND, primary)) {
-  //  if (primary.size() >= MACHINE_XML_MIN_LENGTH) {
-  //    xml.swap(primary);
-  //    return true;
-  //  }
-  //  ESP_LOGW(TAG, "Machine-XML Antwort zu kurz (%u Byte) – versuche Fallback.",
-  //           static_cast<unsigned>(primary.size()));
-  //} else {
-  //  ESP_LOGW(TAG, "Machine-XML Primärkommando ohne Antwort – versuche Fallback.");
-  //}
 
-  std::string fallback;
-  if (send_and_receive(MACHINE_XML_FALLBACK_COMMAND, fallback)) {
-    xml.swap(fallback);
-    return true;
+  this->machine_xml_next_request_ms_ = now + MACHINE_XML_MIN_REQUEST_GAP_MS;
+
+  const bool use_fallback = this->machine_xml_use_fallback_next_;
+  const char *command = use_fallback ? MACHINE_XML_FALLBACK_COMMAND : MACHINE_XML_PRIMARY_COMMAND;
+  std::string response;
+  if (send_and_receive(command, response)) {
+    if (use_fallback || response.size() >= MACHINE_XML_MIN_LENGTH) {
+      xml.swap(response);
+      this->machine_xml_use_fallback_next_ = false;
+      return true;
+    }
+    ESP_LOGW(TAG, "Machine-XML Antwort zu kurz (%u Byte) – Fallback wird zeitversetzt geplant.",
+             static_cast<unsigned>(response.size()));
+    this->machine_xml_use_fallback_next_ = true;
+    this->machine_data_query_next_ = now + MACHINE_XML_MIN_REQUEST_GAP_MS;
+    return false;
   }
 
-  if (!primary.empty()) {
-    xml.swap(primary);
-    return true;
+  if (use_fallback) {
+    ESP_LOGW(TAG, "Machine-XML Fallbackkommando ohne Antwort.");
+    this->machine_xml_use_fallback_next_ = false;
+  } else {
+    ESP_LOGW(TAG, "Machine-XML Primärkommando ohne Antwort – Fallback wird zeitversetzt geplant.");
+    this->machine_xml_use_fallback_next_ = true;
+    this->machine_data_query_next_ = now + MACHINE_XML_MIN_REQUEST_GAP_MS;
   }
 
   return false;
@@ -5430,8 +5415,10 @@ bool JuraComponent::write_inner_uart0_command_(const std::string &command, uint3
   }
 
   if (no_rx_flush) {
+    this->coffee_maker_->connection->set_next_tx_label(command);
     return this->coffee_maker_->connection->write_decoded_no_flush(encoded);
   }
+  this->coffee_maker_->connection->set_next_tx_label(command);
   return this->coffee_maker_->connection->write_decoded(encoded);
 }
 
@@ -6296,6 +6283,11 @@ bool JuraComponent::write_stats_command_(const std::string &command, uint32_t no
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     return false;
   }
+  auto *connection = this->coffee_maker_->connection.get();
+  if (connection->tx_busy()) {
+    this->xml_next_action_ms_ = now + kStatsNextCommandDelayMs;
+    return false;
+  }
 
   if (this->stats_inner_tx_required_) {
     ESP_LOGD(TAG, "stats_tx cmd=%s mode=inner_uart0%s", command.c_str(),
@@ -6314,7 +6306,8 @@ bool JuraComponent::write_stats_command_(const std::string &command, uint32_t no
   }
 
   ESP_LOGD(TAG, "stats_tx cmd=%s mode=plaintext%s", command.c_str(), fire_and_forget ? " fire_and_forget=true" : "");
-  return this->coffee_maker_->connection->write_decoded(command + "\r\n");
+  connection->set_next_tx_label(command);
+  return connection->write_decoded(command + "\r\n");
 }
 
 bool JuraComponent::forward_post_gate_app_command_(const std::string &command, const std::string &expected_prefix,
@@ -6340,6 +6333,13 @@ bool JuraComponent::forward_post_gate_app_command_(const std::string &command, c
     this->xml_next_action_ms_ = now + kInterCmdGapMs;
     return false;
   }
+  auto *connection = this->coffee_maker_->connection.get();
+  if (connection->tx_busy()) {
+    ESP_LOGD(TAG, "forward_post_gate_wait_tx_ready event_0x200=WAIT cmd=%s reason=tx_queue_busy bytes_left=%u",
+             command.c_str(), static_cast<unsigned>(connection->tx_queue_size() * 4U));
+    this->xml_next_action_ms_ = now + kStatsNextCommandDelayMs;
+    return false;
+  }
   if (this->db_transaction_owner_ != DbTransactionOwner::NONE &&
       this->db_transaction_owner_ != DbTransactionOwner::XML_POLL) {
     ESP_LOGD(TAG, "forward_post_gate_wait_tx_ready event_0x200=WAIT cmd=%s reason=busy busy_owner=%s", command.c_str(),
@@ -6351,8 +6351,6 @@ bool JuraComponent::forward_post_gate_app_command_(const std::string &command, c
     this->xml_next_action_ms_ = now + kInterCmdGapMs;
     return false;
   }
-
-  auto *connection = this->coffee_maker_->connection.get();
   if (command == "@TS:01") {
     connection->reset_response_line_buffer();
     connection->reset_db_rx_buffer();
@@ -6395,7 +6393,8 @@ bool JuraComponent::forward_post_gate_app_command_(const std::string &command, c
 
   this->xml_state_ = wait_state;
   this->xml_inflight_ = true;
-  this->xml_deadline_ms_ = now + timeout_ms;
+  uint32_t tx_estimate_ms = connection->tx_queue_estimated_ms();
+  this->xml_deadline_ms_ = now + timeout_ms + tx_estimate_ms;
   this->xml_next_action_ms_ = now;
   return true;
 }
@@ -6428,11 +6427,17 @@ bool JuraComponent::send_stats_ascii_command_(const std::string &command, XmlPol
     this->xml_next_action_ms_ = now + kInterCmdGapMs;
     return false;
   }
+  auto *connection = this->coffee_maker_->connection.get();
+  if (connection->tx_busy()) {
+    ESP_LOGD(TAG, "xml_tx_skip cmd=%s reason=tx_queue_busy bytes_left=%u", command.c_str(),
+             static_cast<unsigned>(connection->tx_queue_size() * 4U));
+    this->xml_next_action_ms_ = now + kStatsNextCommandDelayMs;
+    return false;
+  }
   if (this->db_transaction_owner_ == DbTransactionOwner::NONE && !this->begin_xml_transaction_(command.c_str(), now)) {
     this->xml_next_action_ms_ = now + kInterCmdGapMs;
     return false;
   }
-  auto *connection = this->coffee_maker_->connection.get();
   connection->reset_response_line_buffer();
   connection->reset_db_rx_buffer();
   this->xml_rx_buffer_.clear();
@@ -6485,12 +6490,18 @@ bool JuraComponent::send_stats_fire_and_forget_(const std::string &command, XmlP
     this->xml_next_action_ms_ = now + kInterCmdGapMs;
     return false;
   }
+  auto *connection = this->coffee_maker_->connection.get();
+  if (connection->tx_busy()) {
+    ESP_LOGD(TAG, "xml_tx_skip cmd=%s reason=tx_queue_busy bytes_left=%u", command.c_str(),
+             static_cast<unsigned>(connection->tx_queue_size() * 4U));
+    this->xml_next_action_ms_ = now + kStatsNextCommandDelayMs;
+    return false;
+  }
   if (this->db_transaction_owner_ == DbTransactionOwner::NONE && !this->begin_xml_transaction_(command.c_str(), now)) {
     this->xml_next_action_ms_ = now + kInterCmdGapMs;
     return false;
   }
 
-  auto *connection = this->coffee_maker_->connection.get();
   connection->reset_response_line_buffer();
   connection->reset_db_rx_buffer();
   this->xml_rx_line_.clear();

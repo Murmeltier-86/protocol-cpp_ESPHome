@@ -19,7 +19,10 @@ static const char* TAG = "jutta_connection";
 
 namespace {
 constexpr uint32_t JUTTA_SERIAL_GAP_MS = 8;
+constexpr uint32_t JUTTA_TX_LOOP_WARN_MS = 30;
 constexpr uint32_t JUTTA_TX_ECHO_WINDOW_MS = 200;
+constexpr size_t JUTTA_MAX_FRAMES_PER_READ = 3;
+constexpr size_t JUTTA_MAX_FLUSH_READS = 3;
 constexpr uint8_t JUTTA_ENCODE_BASE = 0xFF;
 constexpr uint8_t JUTTA_BIT0_MASK = static_cast<uint8_t>(1u << 2);
 constexpr uint8_t JUTTA_BIT1_MASK = static_cast<uint8_t>(1u << 5);
@@ -178,28 +181,38 @@ bool JuttaConnection::read_decoded(uint8_t* byte) {
 }
 
 bool JuttaConnection::read_decoded_unsafe(uint8_t* byte) const {
-    ESP_LOGVV(TAG, "Attempting to read single decoded byte (encoded buffer size=%zu, decoded buffer size=%zu).",
-              this->encoded_rx_buffer_.size(), this->decoded_rx_buffer_.size());
+    if (this->debug_uart_frames_) {
+        ESP_LOGVV(TAG, "Attempting to read single decoded byte (encoded buffer size=%zu, decoded buffer size=%zu).",
+                  this->encoded_rx_buffer_.size(), this->decoded_rx_buffer_.size());
+    }
     if (!this->decoded_rx_buffer_.empty()) {
         *byte = this->decoded_rx_buffer_.front();
         this->decoded_rx_buffer_.pop_front();
-        ESP_LOGD(TAG, "Decoded byte from buffer: '%s' (%s)", format_printable(*byte).c_str(),
-                 format_hex(*byte).c_str());
+        if (this->debug_uart_frames_) {
+            ESP_LOGD(TAG, "Decoded byte from buffer: '%s' (%s)", format_printable(*byte).c_str(),
+                     format_hex(*byte).c_str());
+        }
         return true;
     }
     std::array<uint8_t, 4> buffer{};
     if (!read_encoded_unsafe(buffer)) {
-        ESP_LOGVV(TAG, "Unable to read encoded frame for single byte - waiting for more data.");
+        if (this->debug_uart_frames_) {
+            ESP_LOGVV(TAG, "Unable to read encoded frame for single byte - waiting for more data.");
+        }
         return false;
     }
     *byte = decode(buffer);
-    ESP_LOGD(TAG, "Decoded byte: '%s' (%s)", format_printable(*byte).c_str(), format_hex(*byte).c_str());
+    if (this->debug_uart_frames_) {
+        ESP_LOGD(TAG, "Decoded byte: '%s' (%s)", format_printable(*byte).c_str(), format_hex(*byte).c_str());
+    }
     return true;
 }
 
 bool JuttaConnection::read_decoded_unsafe(std::vector<uint8_t>& data) const {
-    ESP_LOGVV(TAG, "Attempting to read decoded bytes (encoded buffer size=%zu, decoded buffer size=%zu).",
-              this->encoded_rx_buffer_.size(), this->decoded_rx_buffer_.size());
+    if (this->debug_uart_frames_) {
+        ESP_LOGVV(TAG, "Attempting to read decoded bytes (encoded buffer size=%zu, decoded buffer size=%zu).",
+                  this->encoded_rx_buffer_.size(), this->decoded_rx_buffer_.size());
+    }
     bool any_data = false;
 
     if (!this->decoded_rx_buffer_.empty()) {
@@ -215,10 +228,15 @@ bool JuttaConnection::read_decoded_unsafe(std::vector<uint8_t>& data) const {
     size_t frames_read = read_encoded_unsafe(dataBuffer);
     if (frames_read == 0) {
         if (any_data) {
-            ESP_LOGV(TAG, "Read decoded payload from buffer (%zu byte%s).", data.size(), data.size() == 1 ? "" : "s");
+            if (this->debug_uart_frames_) {
+                ESP_LOGV(TAG, "Read decoded payload from buffer (%zu byte%s).", data.size(),
+                         data.size() == 1 ? "" : "s");
+            }
             return true;
         }
-        ESP_LOGVV(TAG, "No complete encoded frames available to decode yet.");
+        if (this->debug_uart_frames_) {
+            ESP_LOGVV(TAG, "No complete encoded frames available to decode yet.");
+        }
         return false;
     }
 
@@ -229,42 +247,131 @@ bool JuttaConnection::read_decoded_unsafe(std::vector<uint8_t>& data) const {
         uint8_t decoded_byte = decode(buffer);
         data.push_back(decoded_byte);
         newly_decoded.push_back(decoded_byte);
-        ESP_LOGVV(TAG, "Decoded frame %zu: %s -> '%s' (%s)", index, format_hex(buffer).c_str(),
-                  format_printable(decoded_byte).c_str(), format_hex(decoded_byte).c_str());
+        if (this->debug_uart_frames_) {
+            ESP_LOGVV(TAG, "Decoded frame %zu: %s -> '%s' (%s)", index, format_hex(buffer).c_str(),
+                      format_printable(decoded_byte).c_str(), format_hex(decoded_byte).c_str());
+        }
         ++index;
     }
-    std::string decoded = vec_to_string(newly_decoded);
-    ESP_LOGV(TAG, "Read decoded payload (%zu byte%s): '%s' (hex %s)", dataBuffer.size(),
-             dataBuffer.size() == 1 ? "" : "s", format_printable(decoded).c_str(), format_hex(newly_decoded).c_str());
+    if (this->debug_uart_frames_) {
+        std::string decoded = vec_to_string(newly_decoded);
+        ESP_LOGV(TAG, "Read decoded payload (%zu byte%s): '%s' (hex %s)", dataBuffer.size(),
+                 dataBuffer.size() == 1 ? "" : "s", format_printable(decoded).c_str(), format_hex(newly_decoded).c_str());
+    }
     return true;
 }
 
-bool JuttaConnection::write_decoded_unsafe(const uint8_t& byte) const {
-    if (this->log_decoded_tx_) {
+uint32_t JuttaConnection::tx_queue_estimated_ms() const {
+    size_t frames = this->tx_queue_.size() + (this->tx_queue_active_ ? 1U : 0U);
+    return static_cast<uint32_t>(frames * JUTTA_SERIAL_GAP_MS + 10U);
+}
+
+void JuttaConnection::process_tx_queue(uint32_t budget_ms) {
+    if (this->tx_queue_.empty()) {
+        if (this->tx_queue_active_) {
+            uint32_t duration = esphome::millis() - this->tx_frame_started_ms_;
+            if (this->debug_uart_frames_) {
+                ESP_LOGD(TAG, "tx_queue_frame_done cmd=\"%s\" duration_ms=%u frames=%u bytes=%u",
+                         this->tx_active_label_.empty() ? "unknown" : this->tx_active_label_.c_str(),
+                         static_cast<unsigned>(duration), static_cast<unsigned>(this->tx_frame_total_frames_),
+                         static_cast<unsigned>(this->tx_frame_total_frames_ * 4U));
+            }
+            this->tx_queue_active_ = false;
+            this->tx_active_label_.clear();
+            this->tx_frame_total_frames_ = 0;
+        }
+        return;
+    }
+
+    uint32_t start_ms = esphome::millis();
+    auto warn_if_slow = [&]() {
+        uint32_t elapsed = esphome::millis() - start_ms;
+        if (elapsed > JUTTA_TX_LOOP_WARN_MS) {
+            ESP_LOGW(TAG, "tx_blocking_warning cmd=\"%s\" duration_ms=%u bytes_left=%u",
+                     this->tx_active_label_.empty() ? "unknown" : this->tx_active_label_.c_str(),
+                     static_cast<unsigned>(elapsed), static_cast<unsigned>(this->tx_queue_.size() * 4U));
+        }
+    };
+
+    while (!this->tx_queue_.empty()) {
+        uint32_t now_ms = esphome::millis();
+        if (this->tx_next_write_ms_ != 0 && static_cast<int32_t>(now_ms - this->tx_next_write_ms_) < 0) {
+            warn_if_slow();
+            return;
+        }
+        if (static_cast<uint32_t>(now_ms - start_ms) >= budget_ms) {
+            if (this->debug_uart_frames_) {
+                ESP_LOGV(TAG, "tx_queue_busy bytes_left=%u",
+                         static_cast<unsigned>(this->tx_queue_.size() * 4U));
+            }
+            warn_if_slow();
+            return;
+        }
+
+        if (!this->tx_queue_active_) {
+            this->tx_queue_active_ = true;
+            this->tx_frame_started_ms_ = esphome::millis();
+            this->tx_frame_total_frames_ = this->tx_queue_.size();
+            this->tx_active_label_ = this->next_tx_label_.empty() ? "unknown" : this->next_tx_label_;
+            this->next_tx_label_.clear();
+            if (this->debug_uart_frames_) {
+                ESP_LOGD(TAG, "tx_queue_frame_start cmd=\"%s\" frames=%u bytes=%u",
+                         this->tx_active_label_.c_str(), static_cast<unsigned>(this->tx_frame_total_frames_),
+                         static_cast<unsigned>(this->tx_frame_total_frames_ * 4U));
+            }
+        }
+
+        const auto frame = this->tx_queue_.front();
+        this->tx_queue_.pop_front();
+        if (!serial.write_serial(frame)) {
+            ESP_LOGE(TAG, "Failed to write queued encoded frame to UART.");
+            this->tx_queue_.clear();
+            this->tx_queue_active_ = false;
+            this->tx_next_write_ms_ = 0;
+            warn_if_slow();
+            return;
+        }
+        this->tx_next_write_ms_ = esphome::millis() + JUTTA_SERIAL_GAP_MS;
+    }
+    warn_if_slow();
+}
+
+bool JuttaConnection::write_decoded_unsafe(const uint8_t& byte) {
+    if (this->debug_uart_frames_ && this->log_decoded_tx_) {
         ESP_LOGV(TAG, "TX decoded byte: '%s' (%s)", format_printable(byte).c_str(), format_hex(byte).c_str());
     }
     auto encoded = encode(byte);
-    if (this->log_encoded_uart_) {
+    if (this->debug_uart_frames_ && this->log_encoded_uart_) {
         ESP_LOGD(TAG, "TX encoded UART frame: %s", format_hex(encoded).c_str());
-    } else {
+    } else if (this->debug_uart_frames_) {
         ESP_LOGVV(TAG, "Encoded representation: %s", format_hex(encoded).c_str());
     }
     bool result = write_encoded_unsafe(encoded);
-    ESP_LOGVV(TAG, "Transmission of decoded byte %s", result ? "succeeded" : "failed");
+    if (this->debug_uart_frames_) {
+        ESP_LOGVV(TAG, "Queueing of decoded byte %s", result ? "succeeded" : "failed");
+    }
     return result;
 }
 
-bool JuttaConnection::write_decoded_unsafe(const std::vector<uint8_t>& data) const {
+bool JuttaConnection::write_decoded_unsafe(const std::vector<uint8_t>& data) {
     // Bad compiler support:
     // return std::ranges::all_of(data.begin(), data.end(), [this](uint8_t byte) { return write_decoded_unsafe(byte); });
     // So we use this until it gets better:
     if (!data.empty()) {
-        if (this->log_decoded_tx_) {
+        if (this->debug_uart_frames_ && this->log_decoded_tx_) {
             ESP_LOGV(TAG, "Queueing %zu decoded byte%s for transmission: '%s' (hex %s)", data.size(),
                      data.size() == 1 ? "" : "s", format_printable(data).c_str(), format_hex(data).c_str());
         }
-    } else {
+    } else if (this->debug_uart_frames_) {
         ESP_LOGVV(TAG, "Requested to write an empty decoded payload.");
+    }
+    if (this->next_tx_label_.empty() && !data.empty()) {
+        std::string label = format_printable(data);
+        constexpr size_t LABEL_LIMIT = 40;
+        if (label.size() > LABEL_LIMIT) {
+            label = label.substr(0, LABEL_LIMIT) + "...";
+        }
+        this->next_tx_label_ = label;
     }
     bool result = true;
     for (uint8_t byte : data) {
@@ -275,7 +382,7 @@ bool JuttaConnection::write_decoded_unsafe(const std::vector<uint8_t>& data) con
     return result;
 }
 
-bool JuttaConnection::write_decoded_unsafe(const std::string& data) const {
+bool JuttaConnection::write_decoded_unsafe(const std::string& data) {
     // Bad compiler support:
     // return std::ranges::all_of(data.begin(), data.end(), [this](char c) { return write_decoded_unsafe(static_cast<uint8_t>(c)); });
     // So we use this until it gets better:
@@ -376,24 +483,18 @@ uint8_t JuttaConnection::decode(const std::array<uint8_t, 4>& encData) {
     return decData;
 }
 
-bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData) const {
-    ESP_LOGVV(TAG, "Writing encoded frame: %s", format_hex(encData).c_str());
-
-    if (!serial.write_serial(encData)) {
-        ESP_LOGE(TAG, "Failed to write encoded frame to UART.");
-        return false;
+bool JuttaConnection::write_encoded_unsafe(const std::array<uint8_t, 4>& encData) {
+    if (this->debug_uart_frames_) {
+        ESP_LOGVV(TAG, "Queue encoded frame: %s", format_hex(encData).c_str());
     }
-
-    ESP_LOGVV(TAG, " -> Flushing UART TX buffer after encoded frame");
-    serial.flush();
-    ESP_LOGVV(TAG, " -> Waiting %u ms for inter-frame gap", JUTTA_SERIAL_GAP_MS);
-    wait_for_jutta_gap();
-    ESP_LOGVV(TAG, "Encoded frame transmitted successfully.");
+    this->tx_queue_.push_back(encData);
     return true;
 }
 
 bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const {
-    ESP_LOGVV(TAG, "Attempting to read encoded frame (buffered bytes=%zu).", this->encoded_rx_buffer_.size());
+    if (this->debug_uart_frames_) {
+        ESP_LOGVV(TAG, "Attempting to read encoded frame (buffered bytes=%zu).", this->encoded_rx_buffer_.size());
+    }
     if (this->encoded_rx_buffer_.size() < buffer.size()) {
         wait_for_jutta_gap();
         std::array<uint8_t, 4> chunk{};
@@ -406,16 +507,22 @@ bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const 
         if (read > 0) {
             this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.end(), chunk.begin(), chunk.begin() + read);
             std::vector<uint8_t> chunk_vec(chunk.begin(), chunk.begin() + read);
-            ESP_LOGVV(TAG, "Read %zu encoded byte%s from UART: %s (buffer now %zu bytes)", read,
-                      read == 1 ? "" : "s", format_hex(chunk_vec).c_str(), this->encoded_rx_buffer_.size());
+            if (this->debug_uart_frames_) {
+                ESP_LOGVV(TAG, "Read %zu encoded byte%s from UART: %s (buffer now %zu bytes)", read,
+                          read == 1 ? "" : "s", format_hex(chunk_vec).c_str(), this->encoded_rx_buffer_.size());
+            }
         } else if (this->encoded_rx_buffer_.empty()) {
-            ESP_LOGV(TAG, "No serial data found.");
+            if (this->debug_uart_frames_) {
+                ESP_LOGV(TAG, "No serial data found.");
+            }
             return false;
         }
     }
 
     if (this->encoded_rx_buffer_.size() < buffer.size()) {
-        ESP_LOGVV(TAG, "Not enough encoded bytes buffered yet (size=%zu).", this->encoded_rx_buffer_.size());
+        if (this->debug_uart_frames_) {
+            ESP_LOGVV(TAG, "Not enough encoded bytes buffered yet (size=%zu).", this->encoded_rx_buffer_.size());
+        }
         return false;
     }
 
@@ -429,49 +536,65 @@ bool JuttaConnection::read_encoded_unsafe(std::array<uint8_t, 4>& buffer) const 
     this->encoded_rx_buffer_.erase(this->encoded_rx_buffer_.begin(),
                                    this->encoded_rx_buffer_.begin() + buffer.size());
 
-    ESP_LOGV(TAG, "Read encoded frame: %s (buffer remaining %zu bytes)", format_hex(buffer).c_str(),
-             this->encoded_rx_buffer_.size());
+    if (this->debug_uart_frames_) {
+        ESP_LOGV(TAG, "Read encoded frame: %s (buffer remaining %zu bytes)", format_hex(buffer).c_str(),
+                 this->encoded_rx_buffer_.size());
+    }
     return true;
 }
 
 size_t JuttaConnection::read_encoded_unsafe(std::vector<std::array<uint8_t, 4>>& data) const {
-    ESP_LOGVV(TAG, "Attempting to read sequence of encoded frames.");
+    if (this->debug_uart_frames_) {
+        ESP_LOGVV(TAG, "Attempting to read sequence of encoded frames.");
+    }
     size_t count = 0;
-    while (true) {
+    while (count < JUTTA_MAX_FRAMES_PER_READ) {
         std::array<uint8_t, 4> buffer{};
         if (!read_encoded_unsafe(buffer)) {
-            ESP_LOGVV(TAG, "Stopping encoded frame read loop after %zu frame%s.", count, count == 1 ? "" : "s");
+            if (this->debug_uart_frames_) {
+                ESP_LOGVV(TAG, "Stopping encoded frame read loop after %zu frame%s.", count, count == 1 ? "" : "s");
+            }
             break;
         }
         data.push_back(buffer);
         ++count;
-        ESP_LOGVV(TAG, "Buffered encoded frame %zu: %s", count, format_hex(buffer).c_str());
+        if (this->debug_uart_frames_) {
+            ESP_LOGVV(TAG, "Buffered encoded frame %zu: %s", count, format_hex(buffer).c_str());
+        }
     }
     return count;
 }
 
 void JuttaConnection::flush_serial_input() const {
-    ESP_LOGD(TAG, "Flushing serial input (discarding %zu buffered encoded bytes).",
-             this->encoded_rx_buffer_.size());
+    if (this->debug_uart_frames_) {
+        ESP_LOGD(TAG, "Flushing serial input (discarding %zu buffered encoded bytes).",
+                 this->encoded_rx_buffer_.size());
+    }
     this->encoded_rx_buffer_.clear();
     if (!this->decoded_rx_buffer_.empty()) {
-        ESP_LOGD(TAG, "Discarding %zu buffered decoded byte%s.", this->decoded_rx_buffer_.size(),
-                 this->decoded_rx_buffer_.size() == 1 ? "" : "s");
+        if (this->debug_uart_frames_) {
+            ESP_LOGD(TAG, "Discarding %zu buffered decoded byte%s.", this->decoded_rx_buffer_.size(),
+                     this->decoded_rx_buffer_.size() == 1 ? "" : "s");
+        }
         this->decoded_rx_buffer_.clear();
     }
 
     std::array<uint8_t, 4> discard{};
-    while (true) {
+    size_t reads = 0;
+    while (reads < JUTTA_MAX_FLUSH_READS) {
         size_t read = serial.read_serial(discard);
         if (read == 0) {
             break;
         }
+        ++reads;
         if (read > discard.size()) {
             ESP_LOGW(TAG, "Invalid amount of UART data found while flushing (%zu byte).", read);
         }
-        std::vector<uint8_t> discard_vec(discard.begin(), discard.begin() + std::min(read, discard.size()));
-        ESP_LOGVV(TAG, "Flushed %zu encoded byte%s from UART: %s", read, read == 1 ? "" : "s",
-                  format_hex(discard_vec).c_str());
+        if (this->debug_uart_frames_) {
+            std::vector<uint8_t> discard_vec(discard.begin(), discard.begin() + std::min(read, discard.size()));
+            ESP_LOGVV(TAG, "Flushed %zu encoded byte%s from UART: %s", read, read == 1 ? "" : "s",
+                      format_hex(discard_vec).c_str());
+        }
         wait_for_jutta_gap();
     }
 }
@@ -487,19 +610,21 @@ void JuttaConnection::flush_db_rx_queue() {
     this->db_frame_last_activity_ = 0;
 
     std::array<uint8_t, 4> discard{};
-    while (true) {
+    size_t reads = 0;
+    while (reads < JUTTA_MAX_FLUSH_READS) {
         size_t read = this->serial.read_serial(discard);
         if (read == 0) {
             break;
         }
+        ++reads;
         std::vector<uint8_t> filtered;
         filtered.reserve(read);
         size_t dropped = this->filter_tx_echo_(discard.data(), read, filtered);
-        if (dropped > 0) {
+        if (this->debug_uart_frames_ && dropped > 0) {
             ESP_LOGVV(TAG, "During DB flush dropped %zu echo byte%s.", dropped,
                       dropped == 1 ? "" : "s");
         }
-        if (!filtered.empty()) {
+        if (this->debug_uart_frames_ && !filtered.empty()) {
             ESP_LOGVV(TAG, "Discarded %zu DB byte%s while flushing.", filtered.size(),
                       filtered.size() == 1 ? "" : "s");
         }
@@ -524,13 +649,19 @@ void JuttaConnection::reinject_decoded_front(const std::string& data) const {
     }
 
     this->encoded_rx_buffer_.insert(this->encoded_rx_buffer_.begin(), encoded.begin(), encoded.end());
-    ESP_LOGV(TAG, "Re-injected %zu decoded byte%s (encoded %zu bytes) to front of buffer: '%s' (hex %s)", data.size(),
-             data.size() == 1 ? "" : "s", encoded.size(), format_printable(data).c_str(), format_hex(encoded).c_str());
+    if (this->debug_uart_frames_) {
+        ESP_LOGV(TAG, "Re-injected %zu decoded byte%s (encoded %zu bytes) to front of buffer: '%s' (hex %s)",
+                 data.size(), data.size() == 1 ? "" : "s", encoded.size(), format_printable(data).c_str(),
+                 format_hex(encoded).c_str());
+    }
 }
 
 bool JuttaConnection::read_line_until(std::string& line) {
+    this->process_tx_queue();
     if (try_extract_line(this->response_line_buffer_, line)) {
-        ESP_LOGV(TAG, "Polled buffered response line: '%s'", format_printable(line).c_str());
+        if (this->debug_uart_frames_) {
+            ESP_LOGV(TAG, "Polled buffered response line: '%s'", format_printable(line).c_str());
+        }
         this->emit_response_(line, "line_buffer");
         return true;
     }
@@ -542,12 +673,16 @@ bool JuttaConnection::read_line_until(std::string& line) {
 
     std::string incoming = vec_to_string(buffer);
     this->response_line_buffer_.append(incoming);
-    ESP_LOGV(TAG, "Received chunk while polling for response line: '%s' (hex %s) -> buffer '%s'",
-             format_printable(incoming).c_str(), format_hex(buffer).c_str(),
-             format_printable(this->response_line_buffer_).c_str());
+    if (this->debug_uart_frames_) {
+        ESP_LOGV(TAG, "Received chunk while polling for response line: '%s' (hex %s) -> buffer '%s'",
+                 format_printable(incoming).c_str(), format_hex(buffer).c_str(),
+                 format_printable(this->response_line_buffer_).c_str());
+    }
 
     if (try_extract_line(this->response_line_buffer_, line)) {
-        ESP_LOGV(TAG, "Polled response line: '%s'", format_printable(line).c_str());
+        if (this->debug_uart_frames_) {
+            ESP_LOGV(TAG, "Polled response line: '%s'", format_printable(line).c_str());
+        }
         this->emit_response_(line, "line");
         return true;
     }
@@ -588,22 +723,26 @@ void JuttaConnection::tx_db_command(const std::string& ascii, bool flush) {
     encoded.insert(encoded.end(), TERMINATOR.begin(), TERMINATOR.end());
 
     this->activate_tx_echo_suppressor_(encoded);
-    ESP_LOGD(TAG, "TX_DB \"%s\"", ascii.c_str());
-
-    for (uint8_t byte : encoded) {
-        if (!this->serial.write_serial_byte(byte)) {
-            ESP_LOGW(TAG, "Failed to write DB byte 0x%02X", static_cast<unsigned>(byte));
-            this->deactivate_tx_echo_suppressor_();
-            return;
-        }
+    if (this->debug_uart_frames_) {
+        ESP_LOGD(TAG, "TX_DB \"%s\"", ascii.c_str());
     }
-    if (flush) {
-        this->serial.flush();
+
+    if (this->next_tx_label_.empty()) {
+        this->next_tx_label_ = "db:" + ascii;
+    }
+    for (size_t offset = 0; offset + 3 < encoded.size(); offset += 4) {
+        std::array<uint8_t, 4> frame{{encoded[offset], encoded[offset + 1], encoded[offset + 2], encoded[offset + 3]}};
+        this->tx_queue_.push_back(frame);
+    }
+    if (this->debug_uart_frames_) {
+        ESP_LOGD(TAG, "TX_DB queued \"%s\" bytes=%u flush_deferred=%s", ascii.c_str(),
+                 static_cast<unsigned>(encoded.size()), flush ? "YES" : "NO");
     }
 }
 
 bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t timeout_ms, bool* had_crlf,
                                     size_t* decoded_len) {
+    this->process_tx_queue();
     decoded.clear();
 
     bool frame_had_crlf = false;
@@ -657,7 +796,9 @@ bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t time
             }
         }
 
-        ESP_LOGD(TAG, "RX_DB decoded_len=%u reason=%s", static_cast<unsigned>(decoded.size()), reason);
+        if (this->debug_uart_frames_) {
+            ESP_LOGD(TAG, "RX_DB decoded_len=%u reason=%s", static_cast<unsigned>(decoded.size()), reason);
+        }
         if (!decoded.empty()) {
             this->emit_response_(vec_to_string(decoded), "db_frame");
         }
@@ -711,16 +852,19 @@ bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t time
     }
 
     std::array<uint8_t, 4> raw{};
-    while (true) {
+    size_t reads = 0;
+    while (reads < JUTTA_MAX_FRAMES_PER_READ) {
+        this->process_tx_queue();
         size_t read = this->serial.read_serial(raw);
         if (read == 0) {
             break;
         }
+        ++reads;
         now = esphome::millis();
         std::vector<uint8_t> filtered;
         filtered.reserve(read);
         size_t dropped = this->filter_tx_echo_(raw.data(), read, filtered);
-        if (dropped > 0) {
+        if (this->debug_uart_frames_ && dropped > 0) {
             ESP_LOGV(TAG, "Dropped %zu echo byte%s while reading DB frame.", dropped,
                      dropped == 1 ? "" : "s");
         }
@@ -851,8 +995,10 @@ std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const 
             return nullptr;
         }
     }
-    ESP_LOGD(TAG, "Waiting for response after writing decoded payload (timeout=%lld ms).",
-             static_cast<long long>(timeout.count()));
+    if (this->debug_uart_frames_) {
+        ESP_LOGD(TAG, "Waiting for response after writing decoded payload (timeout=%lld ms).",
+                 static_cast<long long>(timeout.count()));
+    }
     return wait_for_str_unsafe(timeout);
 }
 
@@ -864,18 +1010,23 @@ std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const 
             return nullptr;
         }
     }
-    ESP_LOGD(TAG, "Waiting for response after writing string payload (timeout=%lld ms).",
-             static_cast<long long>(timeout.count()));
+    if (this->debug_uart_frames_) {
+        ESP_LOGD(TAG, "Waiting for response after writing string payload (timeout=%lld ms).",
+                 static_cast<long long>(timeout.count()));
+    }
     return wait_for_str_unsafe(timeout);
 }
 
 std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chrono::milliseconds& timeout) {
+    this->process_tx_queue();
     if (!this->wait_string_context_.active) {
         this->wait_string_context_.active = true;
         this->wait_string_context_.timeout = timeout;
         this->wait_string_context_.start_time = esphome::millis();
         this->wait_string_context_.buffer.clear();
-        ESP_LOGD(TAG, "Waiting for any response (timeout=%lld ms).", static_cast<long long>(timeout.count()));
+        if (this->debug_uart_frames_) {
+            ESP_LOGD(TAG, "Waiting for any response (timeout=%lld ms).", static_cast<long long>(timeout.count()));
+        }
     }
 
     auto try_complete = [&]() -> std::shared_ptr<std::string> {
@@ -892,13 +1043,17 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
             for (auto it = remainder.rbegin(); it != remainder.rend(); ++it) {
                 this->decoded_rx_buffer_.push_front(static_cast<uint8_t>(static_cast<unsigned char>(*it)));
             }
-            ESP_LOGV(TAG, "Re-queued %zu byte%s of trailing response data for later processing.", remainder.size(),
-                     remainder.size() == 1 ? "" : "s");
+            if (this->debug_uart_frames_) {
+                ESP_LOGV(TAG, "Re-queued %zu byte%s of trailing response data for later processing.", remainder.size(),
+                         remainder.size() == 1 ? "" : "s");
+            }
         }
 
         this->wait_string_context_.active = false;
         auto shared_response = std::make_shared<std::string>(response);
-        ESP_LOGD(TAG, "Received response line: '%s'", format_printable(*shared_response).c_str());
+        if (this->debug_uart_frames_) {
+            ESP_LOGD(TAG, "Received response line: '%s'", format_printable(*shared_response).c_str());
+        }
         this->emit_response_(*shared_response, "string_wait");
         return shared_response;
     };
@@ -911,9 +1066,11 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
     if (read_decoded_unsafe(buffer) && !buffer.empty()) {
         std::string incoming = vec_to_string(buffer);
         this->wait_string_context_.buffer.append(incoming);
-        ESP_LOGD(TAG, "Received chunk while waiting for response: '%s' (hex %s) -> buffer '%s'",
-                 format_printable(incoming).c_str(), format_hex(buffer).c_str(),
-                 format_printable(this->wait_string_context_.buffer).c_str());
+        if (this->debug_uart_frames_) {
+            ESP_LOGD(TAG, "Received chunk while waiting for response: '%s' (hex %s) -> buffer '%s'",
+                     format_printable(incoming).c_str(), format_hex(buffer).c_str(),
+                     format_printable(this->wait_string_context_.buffer).c_str());
+        }
 
         if (auto ready = try_complete(); ready != nullptr) {
             return ready;
@@ -930,9 +1087,11 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
                      it != this->wait_string_context_.buffer.rend(); ++it) {
                     this->decoded_rx_buffer_.push_front(static_cast<uint8_t>(static_cast<unsigned char>(*it)));
                 }
-                ESP_LOGV(TAG, "Timeout while waiting for generic response - re-queued %zu buffered byte%s.",
-                         this->wait_string_context_.buffer.size(),
-                         this->wait_string_context_.buffer.size() == 1 ? "" : "s");
+                if (this->debug_uart_frames_) {
+                    ESP_LOGV(TAG, "Timeout while waiting for generic response - re-queued %zu buffered byte%s.",
+                             this->wait_string_context_.buffer.size(),
+                             this->wait_string_context_.buffer.size() == 1 ? "" : "s");
+                }
                 this->wait_string_context_.buffer.clear();
             }
             ESP_LOGW(TAG, "Timeout while waiting for generic response after %u ms.", elapsed);
@@ -944,14 +1103,17 @@ std::shared_ptr<std::string> JuttaConnection::wait_for_str_unsafe(const std::chr
 
 JuttaConnection::WaitResult JuttaConnection::wait_for_response_unsafe(const std::string& response,
                                                                       const std::chrono::milliseconds& timeout) {
+    this->process_tx_queue();
     if (!this->wait_context_.active || this->wait_context_.expected != response) {
         this->wait_context_.active = true;
         this->wait_context_.expected = response;
         this->wait_context_.recent.clear();
         this->wait_context_.timeout = timeout;
         this->wait_context_.start_time = esphome::millis();
-        ESP_LOGD(TAG, "Waiting for response '%s' (timeout=%lld ms).", format_printable(response).c_str(),
-                 static_cast<long long>(timeout.count()));
+        if (this->debug_uart_frames_) {
+            ESP_LOGD(TAG, "Waiting for response '%s' (timeout=%lld ms).", format_printable(response).c_str(),
+                     static_cast<long long>(timeout.count()));
+        }
     }
 
     if (response.empty()) {
@@ -975,13 +1137,17 @@ JuttaConnection::WaitResult JuttaConnection::wait_for_response_unsafe(const std:
     if (read_decoded_unsafe(buffer) && !buffer.empty()) {
         std::string incoming(buffer.begin(), buffer.end());
         this->wait_context_.recent.append(incoming);
-        ESP_LOGD(TAG, "Received chunk while waiting for '%s': '%s' (hex %s) -> recent buffer '%s'",
-                 format_printable(response).c_str(), format_printable(incoming).c_str(), format_hex(buffer).c_str(),
-                 format_printable(this->wait_context_.recent).c_str());
+        if (this->debug_uart_frames_) {
+            ESP_LOGD(TAG, "Received chunk while waiting for '%s': '%s' (hex %s) -> recent buffer '%s'",
+                     format_printable(response).c_str(), format_printable(incoming).c_str(), format_hex(buffer).c_str(),
+                     format_printable(this->wait_context_.recent).c_str());
+        }
         if (this->wait_context_.recent.find(response) != std::string::npos) {
             this->wait_context_.active = false;
             this->wait_context_.recent.clear();
-            ESP_LOGD(TAG, "Response '%s' detected.", format_printable(response).c_str());
+            if (this->debug_uart_frames_) {
+                ESP_LOGD(TAG, "Response '%s' detected.", format_printable(response).c_str());
+            }
             std::string detected = response;
             if (detected.size() >= 2 && detected[detected.size() - 2] == '\r' && detected.back() == '\n') {
                 detected.resize(detected.size() - 2);

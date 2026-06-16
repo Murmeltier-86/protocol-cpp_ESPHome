@@ -242,6 +242,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_tf_status_bits_sensor(text_sensor::TextSensor *sensor) { this->tf_status_bits_sensor_ = sensor; }
   void set_log_decoded_tx(bool enabled) { this->log_decoded_tx_ = enabled; }
   void set_log_encoded_uart(bool enabled) { this->log_encoded_uart_ = enabled; }
+  void set_debug_uart_frames(bool enabled) { this->debug_uart_frames_ = enabled; }
   void set_enable_machine_xml_poll(bool enabled) { this->enable_machine_xml_poll_ = enabled; }
   void set_enable_xml_poll(bool enabled) { this->enable_xml_poll_ = enabled; }
   void set_xml_publish_unstable(bool enabled) { this->xml_publish_unstable_ = enabled; }
@@ -579,8 +580,11 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   text_sensor::TextSensor *tf_status_bits_sensor_{nullptr};
   bool log_decoded_tx_{true};
   bool log_encoded_uart_{false};
+  bool debug_uart_frames_{false};
   uint32_t machine_data_query_next_{0};
   uint32_t machine_xml_busy_backoff_until_{0};
+  uint32_t machine_xml_next_request_ms_{0};
+  bool machine_xml_use_fallback_next_{false};
   std::string machine_xml_cache_{};
   uint32_t machine_xml_timestamp_{0};
   std::string current_display_status_{};
@@ -622,7 +626,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t debug_command_deadline_ms_{0};
   uint16_t debug_command_frames_{0};
 
-  bool enable_machine_xml_poll_{false};
+  bool enable_machine_xml_poll_{true};
   bool enable_xml_poll_{false};
   bool xml_publish_unstable_{false};
   bool xml_wait_for_ts_ack_{false};

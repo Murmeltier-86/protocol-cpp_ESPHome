@@ -41,6 +41,12 @@ class JuttaConnection {
     }
     void set_log_decoded_tx(bool enabled) { this->log_decoded_tx_ = enabled; }
     void set_log_encoded_uart(bool enabled) { this->log_encoded_uart_ = enabled; }
+    void set_debug_uart_frames(bool enabled) { this->debug_uart_frames_ = enabled; }
+    void process_tx_queue(uint32_t budget_ms = 2);
+    bool tx_busy() const { return !this->tx_queue_.empty() || this->tx_queue_active_; }
+    size_t tx_queue_size() const { return this->tx_queue_.size(); }
+    uint32_t tx_queue_estimated_ms() const;
+    void set_next_tx_label(const std::string& label) { this->next_tx_label_ = label; }
 
     /**
      * Tries to read a single decoded byte.
@@ -214,9 +220,9 @@ class JuttaConnection {
      **/
     static uint8_t decode(const std::array<uint8_t, 4>& encData);
     /**
-     * Writes four bytes of encoded data to the coffee maker and then waits 8ms.
+     * Queues four bytes of encoded data for non-blocking transmission with the configured inter-frame gap.
      **/
-    [[nodiscard]] bool write_encoded_unsafe(const std::array<uint8_t, 4>& encData) const;
+    [[nodiscard]] bool write_encoded_unsafe(const std::array<uint8_t, 4>& encData);
     /**
      * Reads four bytes of encoded data which represent one byte of actual data.
      * Returns true on success.
@@ -252,12 +258,12 @@ class JuttaConnection {
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
      * Not thread safe!
      **/
-    [[nodiscard]] bool write_decoded_unsafe(const uint8_t& byte) const;
+    [[nodiscard]] bool write_decoded_unsafe(const uint8_t& byte);
     /**
      * Encodes each byte of the given bytes into 4 JUTTA bytes and writes them to the coffee maker.
      * Not thread safe!
      **/
-    [[nodiscard]] bool write_decoded_unsafe(const std::vector<uint8_t>& data) const;
+    [[nodiscard]] bool write_decoded_unsafe(const std::vector<uint8_t>& data);
     /**
      * Encodes each character into 4 JUTTA bytes and writes them to the coffee maker.
      *
@@ -265,7 +271,7 @@ class JuttaConnection {
      * This would request the device type from the coffee maker.
      * Not thread safe!
      **/
-    [[nodiscard]] bool write_decoded_unsafe(const std::string& data) const;
+    [[nodiscard]] bool write_decoded_unsafe(const std::string& data);
 
     /**
      * Waits until the coffee maker responded with the given response.
@@ -334,9 +340,17 @@ class JuttaConnection {
     size_t last_tx_echo_progress_{0};
     uint32_t last_tx_deadline_{0};
     bool last_tx_echo_active_{false};
+    std::deque<std::array<uint8_t, 4>> tx_queue_{};
+    uint32_t tx_next_write_ms_{0};
+    uint32_t tx_frame_started_ms_{0};
+    size_t tx_frame_total_frames_{0};
+    bool tx_queue_active_{false};
+    std::string next_tx_label_{};
+    std::string tx_active_label_{};
     std::function<void(const std::string&, const char*)> response_callback_{};
     bool log_decoded_tx_{true};
     bool log_encoded_uart_{false};
+    bool debug_uart_frames_{false};
 };
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto

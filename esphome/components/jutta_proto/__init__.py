@@ -81,6 +81,7 @@ CONF_STATUS_PROBE_INTERVAL_MS = "status_probe_interval_ms"
 CONF_ALLOW_UNSAFE_DEBUG_COMMANDS = "allow_unsafe_debug_commands"
 CONF_TRANSPORT = "transport"
 CONF_XML_SENSORS = "xml_sensors"
+CONF_DEBUG_UART_FRAMES = "debug_uart_frames"
 CONF_FIELD = "field"
 CONF_LOG_DECODED_TX = "log_decoded_tx"
 CONF_LOG_ENCODED_UART = "log_encoded_uart"
@@ -254,6 +255,7 @@ CONFIG_SCHEMA = (
             ),
             cv.Optional(CONF_ALLOW_UNSAFE_DEBUG_COMMANDS, default=False): cv.boolean,
             cv.Optional(CONF_XML_SENSORS, default=[]): cv.ensure_list(XML_SENSOR_SCHEMA),
+            cv.Optional(CONF_DEBUG_UART_FRAMES, default=False): cv.boolean,
             cv.Optional(CONF_LOG_DECODED_TX, default=True): cv.boolean,
             cv.Optional(CONF_LOG_ENCODED_UART, default=False): cv.boolean,
         }
@@ -447,11 +449,11 @@ async def to_code(config):
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
 
+    cg.add(var.set_debug_uart_frames(config[CONF_DEBUG_UART_FRAMES]))
     cg.add(var.set_log_decoded_tx(config[CONF_LOG_DECODED_TX]))
     cg.add(var.set_log_encoded_uart(config[CONF_LOG_ENCODED_UART]))
     cg.add(var.set_enable_xml_poll(config[CONF_ENABLE_XML_POLL]))
-    machine_xml_default = False
-    #machine_xml_default = not config[CONF_ENABLE_XML_POLL]
+    machine_xml_default = not config[CONF_ENABLE_XML_POLL]
     cg.add(var.set_enable_machine_xml_poll(config.get(CONF_ENABLE_MACHINE_XML_POLL, machine_xml_default)))
     cg.add(var.set_xml_publish_unstable(config[CONF_XML_PUBLISH_UNSTABLE]))
     cg.add(var.set_xml_wait_for_ts_ack(config[CONF_XML_WAIT_FOR_TS_ACK]))
