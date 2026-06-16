@@ -607,6 +607,28 @@ bool payload_starts_with_tf(const std::string &line) {
   return lower == "@tf";
 }
 
+bool is_db_ascii_control_frame(const std::string &response) {
+  std::string lower = lower_trimmed_transport_payload(response);
+  if (lower.empty()) {
+    return false;
+  }
+  static const char *const kExactFrames[] = {
+      "@t0", "@t1", "@t2", "@t3", "ty:"};
+  for (const char *frame : kExactFrames) {
+    if (lower == frame) {
+      return true;
+    }
+  }
+  static const char *const kPrefixFrames[] = {
+      "@ts", "@tr:", "@tg:"};
+  for (const char *prefix : kPrefixFrames) {
+    if (lower.rfind(prefix, 0) == 0) {
+      return true;
+    }
+  }
+  return !response.empty() && response.front() == '@';
+}
+
 uint8_t fw_mod8(int value) {
   value %= 256;
   if (value < 0) {
@@ -2031,6 +2053,20 @@ bool JuraComponent::decode_and_publish_status_(const std::string &response, cons
   if (response.find('<') != std::string::npos || response.find('>') != std::string::npos) {
     return false;
   }
+  std::string branch = parser_branch != nullptr ? parser_branch : "unknown";
+  const bool log_status_decode = this->status_debug_ || this->live_db_status_debug_;
+  if (branch == "db_frame" && is_db_ascii_control_frame(response)) {
+    if (log_status_decode) {
+      ESP_LOGD(TAG, "status_decode_skip reason=ascii_control_frame raw=\"%s\"",
+               sanitize_text_for_api(response).c_str());
+      if (this->live_db_status_debug_) {
+        ESP_LOGD(TAG, "live_poll_skip_decode reason=ascii_control_frame raw=\"%s\"",
+                 sanitize_text_for_api(lower_trimmed_transport_payload(response)).c_str());
+        ESP_LOGD(TAG, "live_poll_decoded table=unknown publish=no");
+      }
+    }
+    return false;
+  }
   std::string active_command_raw = this->xml_last_command_;
   std::string active_command = active_command_raw;
   std::transform(active_command.begin(), active_command.end(), active_command.begin(),
@@ -2038,12 +2074,10 @@ bool JuraComponent::decode_and_publish_status_(const std::string &response, cons
   if (active_command == "@tr:32" || active_command == "@tg:43" || active_command == "@tg:c0") {
     return false;
   }
-  std::string branch = parser_branch != nullptr ? parser_branch : "unknown";
   std::string command = infer_response_command(response, active_command_raw);
   std::string family = infer_response_family(command);
   std::string payload_hex = format_hex_string(response);
   std::string raw_rx = sanitize_text_for_api(response);
-  const bool log_status_decode = this->status_debug_ || this->live_db_status_debug_;
 
   if (!this->ensure_xml_mapping_loaded_()) {
     if (log_status_decode) {
