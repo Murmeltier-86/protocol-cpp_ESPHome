@@ -270,7 +270,7 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_LIVE_DB_STATUS_ENABLED, default=True): cv.boolean,
             cv.Optional(CONF_LIVE_DB_STATUS_DEBUG, default=False): cv.boolean,
             cv.Optional(CONF_LIVE_DB_STATUS_PUBLISH_RAW, default=True): cv.boolean,
-            cv.Optional(CONF_LIVE_DB_STATUS_POLL_ENABLED, default=True): cv.boolean,
+            cv.Optional(CONF_LIVE_DB_STATUS_POLL_ENABLED, default=False): cv.boolean,
             cv.Optional(CONF_LIVE_DB_STATUS_POLL_INTERVAL_MS, default=10000): cv.All(
                 cv.positive_int, cv.Range(min=10000)
             ),

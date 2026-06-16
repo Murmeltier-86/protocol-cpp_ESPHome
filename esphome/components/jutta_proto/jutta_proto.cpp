@@ -2048,12 +2048,12 @@ void JuraComponent::handle_decoded_response_(const std::string &response, const 
 
   if (parser_branch != nullptr && std::string(parser_branch) == "db_frame") {
     this->publish_live_db_status_raw_(response, parser_branch);
-    if (this->decode_and_publish_status_(response, parser_branch)) {
-      return;
-    }
     if (this->live_db_status_debug_ || this->status_debug_) {
-      ESP_LOGD(TAG, "DB frame kept raw-only; no verified status text decoded");
+      ESP_LOGD(TAG, "live_poll_skip_decode reason=unverified_db_raw hex=\"%s\"",
+               compact_hex_string(response, 64).c_str());
+      ESP_LOGD(TAG, "live_poll_experimental_raw_only");
     }
+    return;
   }
 }
 
@@ -2106,8 +2106,8 @@ bool JuraComponent::decode_and_publish_status_(const std::string &response, cons
   const bool log_status_decode = this->status_debug_ || this->live_db_status_debug_;
   if (branch == "db_frame") {
     const char *reject_reason = live_db_status_candidate_reject_reason(response);
-    if (reject_reason != nullptr) {
-      if (log_status_decode) {
+    if (log_status_decode) {
+      if (reject_reason != nullptr) {
         ESP_LOGD(TAG, "status_decode_skip reason=%s raw=\"%s\"", reject_reason,
                  sanitize_text_for_api(response).c_str());
         if (this->live_db_status_debug_) {
@@ -2115,9 +2115,17 @@ bool JuraComponent::decode_and_publish_status_(const std::string &response, cons
                    static_cast<unsigned>(response.size()), compact_hex_string(response, 64).c_str());
           ESP_LOGD(TAG, "live_poll_decoded table=unknown publish=no");
         }
+      } else {
+        ESP_LOGD(TAG, "status_decode_skip reason=unverified_db_raw raw=\"%s\"",
+                 sanitize_text_for_api(response).c_str());
+        if (this->live_db_status_debug_) {
+          ESP_LOGD(TAG, "live_poll_skip_decode reason=unverified_db_raw hex=\"%s\"",
+                   compact_hex_string(response, 64).c_str());
+          ESP_LOGD(TAG, "live_poll_decoded table=unknown publish=no");
+        }
       }
-      return false;
     }
+    return false;
   }
   std::string active_command_raw = this->xml_last_command_;
   std::string active_command = active_command_raw;

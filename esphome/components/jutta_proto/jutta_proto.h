@@ -642,7 +642,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool live_db_status_enabled_{true};
   bool live_db_status_debug_{false};
   bool live_db_status_publish_raw_{true};
-  bool live_db_status_poll_enabled_{true};
+  bool live_db_status_poll_enabled_{false};
   bool live_db_status_use_fallback_next_{false};
   uint32_t live_db_status_poll_interval_ms_{10000};
   uint32_t live_db_status_response_timeout_ms_{1200};
