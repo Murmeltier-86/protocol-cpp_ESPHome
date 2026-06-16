@@ -629,6 +629,47 @@ bool is_db_ascii_control_frame(const std::string &response) {
   return !response.empty() && response.front() == '@';
 }
 
+const char *live_db_status_candidate_reject_reason(const std::string &response) {
+  if (response.size() < 3) {
+    return "invalid_short_frame";
+  }
+  if (is_db_ascii_control_frame(response)) {
+    return "ascii_control_frame";
+  }
+
+  bool has_non_ascii_binary = false;
+  bool has_payload_byte = false;
+  for (unsigned char c : response) {
+    if (c == '\r' || c == '\n') {
+      continue;
+    }
+    has_payload_byte = true;
+    if (c < 0x20 || c >= 0x7F) {
+      has_non_ascii_binary = true;
+    }
+  }
+  if (!has_payload_byte) {
+    return "invalid_short_frame";
+  }
+  if (!has_non_ascii_binary) {
+    return "ascii_control_frame";
+  }
+  return nullptr;
+}
+
+size_t count_verified_status_fields(const std::vector<JuraDecodedField> &fields) {
+  size_t count = 0;
+  for (const auto &field : fields) {
+    if (field.category == "raw" || field.category == "unknown" || field.category == "product_candidate") {
+      continue;
+    }
+    if (!field.decoded_text.empty()) {
+      ++count;
+    }
+  }
+  return count;
+}
+
 uint8_t fw_mod8(int value) {
   value %= 256;
   if (value < 0) {
@@ -2055,17 +2096,20 @@ bool JuraComponent::decode_and_publish_status_(const std::string &response, cons
   }
   std::string branch = parser_branch != nullptr ? parser_branch : "unknown";
   const bool log_status_decode = this->status_debug_ || this->live_db_status_debug_;
-  if (branch == "db_frame" && is_db_ascii_control_frame(response)) {
-    if (log_status_decode) {
-      ESP_LOGD(TAG, "status_decode_skip reason=ascii_control_frame raw=\"%s\"",
-               sanitize_text_for_api(response).c_str());
-      if (this->live_db_status_debug_) {
-        ESP_LOGD(TAG, "live_poll_skip_decode reason=ascii_control_frame raw=\"%s\"",
-                 sanitize_text_for_api(lower_trimmed_transport_payload(response)).c_str());
-        ESP_LOGD(TAG, "live_poll_decoded table=unknown publish=no");
+  if (branch == "db_frame") {
+    const char *reject_reason = live_db_status_candidate_reject_reason(response);
+    if (reject_reason != nullptr) {
+      if (log_status_decode) {
+        ESP_LOGD(TAG, "status_decode_skip reason=%s raw=\"%s\"", reject_reason,
+                 sanitize_text_for_api(response).c_str());
+        if (this->live_db_status_debug_) {
+          ESP_LOGD(TAG, "live_poll_skip_decode reason=%s len=%u hex=%s", reject_reason,
+                   static_cast<unsigned>(response.size()), compact_hex_string(response, 64).c_str());
+          ESP_LOGD(TAG, "live_poll_decoded table=unknown publish=no");
+        }
       }
+      return false;
     }
-    return false;
   }
   std::string active_command_raw = this->xml_last_command_;
   std::string active_command = active_command_raw;
@@ -2104,6 +2148,19 @@ bool JuraComponent::decode_and_publish_status_(const std::string &response, cons
   bool has_publishable = false;
   std::string field_trace = format_decoded_field_trace(fields, tables, has_publishable);
   std::string table_trace = tables.empty() ? "unknown" : join_values(tables, ",");
+  if (branch == "db_frame" && count_verified_status_fields(fields) < 2) {
+    if (log_status_decode) {
+      ESP_LOGD(TAG,
+               "status_decode raw_rx='%s' family=%s command=%s payload_hex=%s branch=%s decoder=status_xml "
+               "xml_tables=%s fields=%s final='' fallback=insufficient_verified_fields",
+               raw_rx.c_str(), family.c_str(), command.c_str(), payload_hex.c_str(), branch.c_str(),
+               table_trace.c_str(), field_trace.c_str());
+      if (this->live_db_status_debug_) {
+        ESP_LOGD(TAG, "live_poll_decoded table=%s publish=no", table_trace.c_str());
+      }
+    }
+    return false;
+  }
   if (!has_publishable) {
     if (log_status_decode) {
       ESP_LOGD(TAG,
@@ -3578,6 +3635,7 @@ void JuraComponent::process_live_db_status_poll_(uint32_t now) {
   }
 
   this->db_transaction_owner_ = DbTransactionOwner::LIVE_DB_STATUS;
+  connection->reset_response_line_buffer();
   connection->reset_db_rx_buffer();
   if (!connection->write_decoded(command)) {
     this->clear_db_transaction_(DbTransactionOwner::LIVE_DB_STATUS);
@@ -8062,6 +8120,7 @@ void JuraComponent::finish_stats_cycle_(uint32_t now, const char *reason) {
                 (!tgc0_expected || this->xml_tgc0_ok_);
   const char *result = all_ok ? "success" : (any_ok ? "partial" : "failed");
   this->end_xml_transaction_(end_reason);
+  this->clear_db_transaction_(DbTransactionOwner::NONE);
   this->xml_inflight_ = false;
   this->post_gate_tx_ready_event_ = true;
   this->xml_stats_locked_ = false;
@@ -8069,8 +8128,18 @@ void JuraComponent::finish_stats_cycle_(uint32_t now, const char *reason) {
   this->xml_expected_prefix_.clear();
   this->xml_rx_line_.clear();
   this->xml_stats_capture_start_ms_ = 0;
+  this->xml_stats_reject_reason_.clear();
+  this->xml_stats_reject_decoded_.clear();
+  this->xml_stats_binary_response_ = false;
+  this->xml_command_started_ms_ = 0;
+  this->xml_command_frames_ = 0;
+  this->xml_command_noise_frames_ = 0;
   this->xml_rx_buffer_.clear();
   this->xml_stats_.clear();
+  if (this->coffee_maker_ != nullptr && this->coffee_maker_->connection != nullptr) {
+    this->coffee_maker_->connection->reset_response_line_buffer();
+    this->coffee_maker_->connection->reset_db_rx_buffer();
+  }
   uint32_t sleep = std::max(this->xml_poll_interval_ms_, kCycleSleepMs);
   this->transition_to_state_(XmlPollState::SLEEP, now);
   this->xml_deadline_ms_ = now + sleep;
