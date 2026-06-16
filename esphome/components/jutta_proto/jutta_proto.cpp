@@ -43,6 +43,8 @@ constexpr uint32_t kInterCmdGapMs = 250;
 constexpr uint32_t kStatsNextCommandDelayMs = 50;
 constexpr uint32_t kXmlQuietMs = 120;
 constexpr uint32_t kCycleSleepMs = 2000;
+constexpr uint32_t kLiveDbPollAfterStatsDelayMs = 2000;
+constexpr uint32_t kLiveDbPollStatsGuardMs = 2000;
 constexpr uint8_t kTr32PageCount = 16;
 constexpr uint8_t kTr32ProductsPerPage = 4;
 constexpr uint8_t kTr32BytesPerProduct = 2;
@@ -612,15 +614,14 @@ bool is_db_ascii_control_frame(const std::string &response) {
   if (lower.empty()) {
     return false;
   }
-  static const char *const kExactFrames[] = {
-      "@t0", "@t1", "@t2", "@t3", "ty:"};
+  static const char *const kExactFrames[] = {"@t0", "@t1", "@t2", "@t3", "ty:"};
   for (const char *frame : kExactFrames) {
     if (lower == frame) {
       return true;
     }
   }
-  static const char *const kPrefixFrames[] = {
-      "@ts", "@tr:", "@tg:"};
+  static const char *const kPrefixFrames[] = {"@t0", "@t1", "@t2", "@t3", "@ts", "@tr", "@tg",
+                                             "@tf", "@tv", "ty:"};
   for (const char *prefix : kPrefixFrames) {
     if (lower.rfind(prefix, 0) == 0) {
       return true;
@@ -639,17 +640,24 @@ const char *live_db_status_candidate_reject_reason(const std::string &response) 
 
   bool has_non_ascii_binary = false;
   bool has_payload_byte = false;
+  bool has_non_control_payload = false;
   for (unsigned char c : response) {
     if (c == '\r' || c == '\n') {
       continue;
     }
     has_payload_byte = true;
+    if (c != '@' && c != '\0') {
+      has_non_control_payload = true;
+    }
     if (c < 0x20 || c >= 0x7F) {
       has_non_ascii_binary = true;
     }
   }
   if (!has_payload_byte) {
     return "invalid_short_frame";
+  }
+  if (!has_non_control_payload) {
+    return "ascii_control_frame";
   }
   if (!has_non_ascii_binary) {
     return "ascii_control_frame";
@@ -3599,6 +3607,18 @@ void JuraComponent::process_live_db_status_poll_(uint32_t now) {
   }
   if (this->live_db_status_next_poll_ms_ != 0 && !time_reached(now, this->live_db_status_next_poll_ms_)) {
     return;
+  }
+  if (this->live_db_status_after_stats_hold_until_ms_ != 0 &&
+      !time_reached(now, this->live_db_status_after_stats_hold_until_ms_)) {
+    this->schedule_live_db_status_retry_(now, "after_stats_guard");
+    return;
+  }
+  if (this->enable_xml_poll_ && this->xml_next_poll_ != 0) {
+    const int32_t stats_due_in_ms = static_cast<int32_t>(this->xml_next_poll_ - now);
+    if (stats_due_in_ms > 0 && static_cast<uint32_t>(stats_due_in_ms) <= kLiveDbPollStatsGuardMs) {
+      this->schedule_live_db_status_retry_(now, "stats_due_soon");
+      return;
+    }
   }
 
   auto *connection = this->coffee_maker_->connection.get();
@@ -8137,9 +8157,20 @@ void JuraComponent::finish_stats_cycle_(uint32_t now, const char *reason) {
   this->xml_rx_buffer_.clear();
   this->xml_stats_.clear();
   if (this->coffee_maker_ != nullptr && this->coffee_maker_->connection != nullptr) {
+    if (this->coffee_maker_->connection->tx_busy() &&
+        !this->coffee_maker_->connection->flush_tx_queue_blocking_until_empty(500)) {
+      ESP_LOGW(TAG, "stats_tx_not_idle cmd=@TS:00 timeout_ms=500 reason=finish_cycle");
+    }
     this->coffee_maker_->connection->reset_response_line_buffer();
     this->coffee_maker_->connection->reset_db_rx_buffer();
+    this->coffee_maker_->connection->drain_serial_input_nonblocking();
   }
+  this->live_db_status_after_stats_hold_until_ms_ = now + kLiveDbPollAfterStatsDelayMs;
+  if (this->live_db_status_next_poll_ms_ == 0 ||
+      static_cast<int32_t>(this->live_db_status_next_poll_ms_ - this->live_db_status_after_stats_hold_until_ms_) < 0) {
+    this->live_db_status_next_poll_ms_ = this->live_db_status_after_stats_hold_until_ms_;
+  }
+  this->live_db_status_use_fallback_next_ = false;
   uint32_t sleep = std::max(this->xml_poll_interval_ms_, kCycleSleepMs);
   this->transition_to_state_(XmlPollState::SLEEP, now);
   this->xml_deadline_ms_ = now + sleep;
