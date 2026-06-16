@@ -13,6 +13,77 @@ Since newer models **do not use** this old V1-Protocol any more I started this p
 3. [Requirements](#requirements)
 4. [Building](#building)
 
+## ESPHome-Integration (Kurzüberblick)
+
+### Aktivierung des XML-Pollings
+
+- `enable_xml_poll`: Schaltet den zusätzlichen XML-Pfad frei (Standard `false`).
+- `xml_poll_interval_ms`: Abstand zwischen zwei Abfragen in Millisekunden (Standard `30000`).
+
+Beispiel-Konfiguration in ESPHome:
+
+```yaml
+uart:
+  id: uart_bus
+  baud_rate: 9600
+
+jutta_proto:
+  id: jura_e6
+  uart_id: uart_bus
+  enable_xml_poll: true
+  xml_mapping_path: joe_export.xml  # Pfad zur exportierten J.O.E.-XML
+  xml_poll_interval_ms: 30000
+```
+
+### Mapping-Datei
+
+- Die Komponente liest die angegebene J.O.E.-Exportdatei bereits beim Generieren des C++-Codes ein und bettet den Inhalt als PROGMEM-String in die Firmware ein.
+- Standardmäßig wird `esphome/components/jutta_proto/jura_mapping_embed.xml` verwendet (eine unveränderte Original-Exportdatei, die dem Repo beiliegt).
+- Über den YAML-Parameter `xml_mapping_path` kann ein alternativer Pfad angegeben werden; Pfade dürfen absolut oder relativ zum YAML-Verzeichnis sein.
+- Die Datei muss nicht angepasst werden – einfach die unveränderte App-Exportdatei referenzieren.
+- Der tatsächlich genutzte Pfad wird in der Konfigurationsausgabe als `XML mapping Quelle` protokolliert.
+
+#### CODEX-Anweisung (J.O.E.-XML ohne `includes`)
+
+1. J.O.E.-XML in der App exportieren und unverändert ins ESPHome-Projekt legen.
+2. In der YAML `xml_mapping_path: <dateiname>.xml` setzen. Relativpfade beziehen sich auf den YAML-Ordner.
+3. Keine `esphome: includes:` und keine Laufzeit-Dateisysteme verwenden – die Komponente konvertiert die Datei beim Build automatisch in einen PROGMEM-String.
+4. Beim Start werden ausschließlich die Statistik-Banks `@TR:32`, `@TG:43` und `@TG:C0` geladen; Produkt-Kommandos aus der XML bleiben unberührt, damit bestehende Legacy-Abläufe unverändert weiterlaufen.
+5. Details zum C-/C#-Bundle und zur manuellen Abfrage findest du im Ordner `jura_joe_xml_bundle_final` (README & Beispiele).
+
+**Kurz-Dokumentation**
+
+1. XML in der J.O.E.-App exportieren.
+2. Datei ins ESPHome-Projekt kopieren (oder absoluten Pfad merken).
+3. Keine zusätzlichen `includes:` erforderlich – der Pfad unter `xml_mapping_path` genügt.
+4. Beim Kompilieren wird die Datei automatisch eingebunden, vom Parser ausgewertet und anschließend als numerische Sensorwerte veröffentlicht.
+
+### Statische Sensoren in YAML
+
+- Alle benötigten XML-Felder müssen als `sensor`-Einträge in der YAML vorkonfiguriert werden (IDs exakt wie im Mapping).
+- Die Komponente verknüpft nur vorhandene Sensor-IDs – dynamisches Erzeugen zur Laufzeit findet nicht mehr statt.
+- Für Zähler (`@TR:32`, `@TG:43`) setzt die Firmware automatisch `state_class: total_increasing`, `entity_category: diagnostic` sowie `force_update: true`.
+- Prozentfelder (`@TG:C0`) behalten die im Mapping hinterlegte Skalierung und erscheinen als numerische Sensoren mit Prozent-Einheit.
+
+### Ablauf & Logging
+
+- Nach erfolgreichem Handshake sendet die Firmware alle `xml_poll_interval_ms` nacheinander `@TR:32`, `@TG:43` und `@TG:C0`.
+- Jeder Befehl wird als `TX_DB` geloggt, Antworten erscheinen als `RX_DB <Frame> decoded_len=<N> reason=<gap|CRLF>`.
+- Zeitüberschreitungen führen lediglich zu einer Warnung; beim nächsten Intervall wird automatisch weiter versucht.
+- Erfolgreich geparste Felder werden mit `XML publish: <Name>=<Wert>` protokolliert.
+
+#### Sequenzieller Ablauf & Validierung (aktuelle Firmware)
+
+- Pro Poll-Zyklus werden die XML-Kommandos strikt nacheinander gesendet: `@TR:32 → @TG:43 → @TG:C0`, dazwischen liegt eine feste Ruhezeit von 120 ms.
+- Jeder Befehl erhält ein Timeout von 1000 ms und genau einen Retry. Nach zwei Fehlschlägen wird zum nächsten Kommando gewechselt; UART-Flushs finden während des Polls nicht statt.
+- Eingehende Frames müssen mit CRLF enden, mindestens die erwartete Länge besitzen und bei `0x26` starten. Alle Kriterien werden vor dem Dekodieren geprüft und im Log (`cmd/decoded_len/expected_min_len/head0`) ausgegeben.
+- Zählerwerte aus `@TR:32` und `@TG:43` werden unverändert als Ganzzahlen veröffentlicht – es erfolgt keine Monotonie- oder Summenprüfung.
+- `@TG:C0` wird mit dem im Mapping hinterlegten Faktor skaliert. Werte < 0 % oder > 130 % führen zur Verwerfung des gesamten Frames; Ausreißer zwischen 100 % und 110 % werden sanft auf 100 % geglättet.
+- Bei drei aufeinanderfolgenden TGC0-Timeouts wird das Prozent-Kommando einmalig ausgelassen; TR32/TG43 laufen weiter.
+- Für jede veröffentlichte Größe protokolliert die Firmware Offset, Länge, Endianness und den dekodierten Wert. Home Assistant erhält ausschließlich statisch konfigurierte Sensoren mit stabilen IDs.
+
+**Kurztest:** Gerät starten, Logs beobachten (`TR32 → TG43 → TGC0 → sleep`). In Home Assistant sollten die Sensoren erscheinen und regelmäßig Werte aktualisieren.
+
 ## Example
 The following example shows the interaction with a JURA coffee maker over [XMPP](https://xmpp.org/).
 The complete implementation for this demo can be found [here](https://github.com/COM8/esp32-jura).
@@ -245,5 +316,43 @@ an example) run:
 esphome run your_config.yaml
 ```
 ESPHome handles dependency management, compilation, and flashing of the firmware for you.
+
+### XML-Zähler automatisch bereitstellen
+
+Die Firmware kann die JURA-internen XML-Zähler zyklisch abfragen und als numerische Sensoren in Home Assistant zur Verfügung stellen. Dafür ist keine zusätzliche YAML-Konfiguration nötig – alle Sensorinstanzen werden während `setup()` angelegt, registriert und bleiben dauerhaft sichtbar.
+
+**Konfiguration**
+
+* Die J.O.E.-XML (nur `@TR:32`, `@TG:43`, `@TG:C0`) wird automatisch als Binärressource eingebettet.
+* In der ESPHome-YAML muss lediglich `xml_mapping_path` auf die exportierte Datei zeigen.
+* Keine Dateisysteme erforderlich.
+
+**Ablauf**
+
+* Nach Legacy-Handshake wird das Mapping aus dem eingebetteten String geladen.
+* Alle 30 s werden die drei DB-Kommandos gepollt; Frames werden ohne feste Länge gelesen (CRLF oder Gap).
+* Die numerischen Felder werden gemäß Mapping (offset/size/endian/scale) extrahiert und als Sensoren veröffentlicht.
+
+**Troubleshooting**
+
+* Log sollte **keine** „expected length“-Warnungen mehr enthalten.
+* Bei „RX_DB timeout @TG:43/@TG:C0“: `xml_poll_interval_ms` erhöhen und inter-Command-Delay (150–200 ms) prüfen.
+* Wenn Sensoren in HA fehlen: prüfen, ob `publish_state` nach Parse wirklich aufgerufen wird (Log hinzufügen).
+
+#### Datenrahmen-Handling
+
+**Beschreibung:** Der Jura-Dongle sendet auf DB-Kommandos wie `@TR:32` oft zuerst ein Echo-Frame mit dem ASCII des Befehls
+und danach das Daten-Frame. Der Reader erkennt den encoded Trailer `DF FF DB DB FB FB DB DB`, entfernt ihn, unescaped
+`0xDB xx → xx^0x20`, verwirft Echo-Frames und liest weiter, bis ein Daten-Frame mit der erwarteten Decoded-Länge vorliegt:
+TR32=21, TG43=13, TGC0=13. Eine Echo-Unterdrückung bleibt bis zu 200 ms aktiv und verlängert sich bei jedem passenden Byte,
+damit auch späte Antworten der Legacy-Bridge nicht fälschlich ausgewertet werden. Sensoren werden beim Start registriert,
+Werte nur bei vollständigem Erfolg publiziert. Keine Textsensoren, keine HA-Templates erforderlich.
+
+**Troubleshooting:**
+
+* `decoded_len ≠ erwartet` → Reader wartet weiter innerhalb des Gesamt-Timeouts.
+* `RX_DB timeout` → `JUTTA_XML_RX_TIMEOUT_MS` erhöhen und sicherstellen, dass während des Polls kein anderer Code
+  `uart.read()` konsumiert.
+* Sensoren fehlen → Pools in `setup()` registrieren, `set_internal(false)`.
 
 `[1]`: https://uk.jura.com/en/homeproducts/accessories/SmartConnect-Main-72167

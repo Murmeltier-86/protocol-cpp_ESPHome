@@ -2,8 +2,11 @@
 
 #include <array>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 #include <deque>
 
@@ -32,6 +35,19 @@ class JuttaConnection {
      * [Thread Safe]
      **/
     void init();
+
+    void set_response_callback(std::function<void(const std::string&, const char*)> callback) {
+        this->response_callback_ = std::move(callback);
+    }
+    void set_log_decoded_tx(bool enabled) { this->log_decoded_tx_ = enabled; }
+    void set_log_encoded_uart(bool enabled) { this->log_encoded_uart_ = enabled; }
+    void set_debug_uart_frames(bool enabled) { this->debug_uart_frames_ = enabled; }
+    void process_tx_queue(uint32_t budget_ms = 2);
+    bool tx_busy() const { return !this->tx_queue_.empty() || this->tx_queue_active_; }
+    size_t tx_queue_size() const { return this->tx_queue_.size(); }
+    uint32_t tx_queue_estimated_ms() const;
+    bool flush_tx_queue_blocking_until_empty(uint32_t timeout_ms);
+    void set_next_tx_label(const std::string& label) { this->next_tx_label_ = label; }
 
     /**
      * Tries to read a single decoded byte.
@@ -101,16 +117,30 @@ class JuttaConnection {
                                                                  std::chrono::milliseconds{5000});
 
     /**
-     * Polls for the next CRLF-terminated response line.
+     * Reads the next CRLF-terminated response line if available.
      * Returns true if a complete line became available and stores it in "line" without the trailing CRLF.
      * Returns false when no complete line has been received yet.
      */
-    bool poll_response_line(std::string& line);
+    bool read_line_until(std::string& line);
 
     /**
      * Clears buffered fragments collected while polling for response lines.
-     */
+    */
     void reset_response_line_buffer();
+
+    /**
+     * Sends an escaped DB command ("@..." without trailing CRLF) with the fixed trailer required for XML frames.
+     */
+    void tx_db_command(const std::string& ascii, bool flush = true);
+    bool read_db_frame(std::vector<uint8_t>& decoded, uint32_t timeout_ms, bool* had_crlf = nullptr,
+                       size_t* decoded_len = nullptr);
+
+    /** Spült ausschließlich den DB-Puffer, um vor einem neuen Frame altes Echo zu verwerfen. */
+    void reset_db_rx_buffer();
+    /** Leert alle Empfangspuffer (Legacy- und DB-Teil). */
+    void reset_all_rx_buffers();
+    /** Verwirft nicht abgeholte Bytes aus dem UART-Puffer ohne zu blockieren. */
+    void drain_serial_input_nonblocking();
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
@@ -122,6 +152,12 @@ class JuttaConnection {
      * [Thread Safe]
      **/
     bool write_decoded(const std::vector<uint8_t>& data);
+    /**
+     * Writes decoded bytes without discarding already received UART data first.
+     * This is used for firmware-like transparent forwarding paths where the
+     * caller owns RX serialization and must not flush around TX.
+     **/
+    bool write_decoded_no_flush(const std::vector<uint8_t>& data);
     /**
      * Encodes each character into 4 JUTTA bytes and writes them to the coffee maker.
      *
@@ -163,8 +199,11 @@ class JuttaConnection {
      * Converts the given binary vector to a string and returns it.
      **/
     static std::string vec_to_string(const std::vector<uint8_t>& data);
+    static std::vector<uint8_t> encode_decoded_bytes(const std::string& data);
 
  private:
+    void emit_response_(const std::string& response, const char* parser_branch) const;
+
     /**
      * Encodes the given byte into four bytes that the coffee maker understands.
      * Based on: http://protocoljura.wiki-site.com/index.php/Protocol_to_coffeemaker
@@ -182,9 +221,9 @@ class JuttaConnection {
      **/
     static uint8_t decode(const std::array<uint8_t, 4>& encData);
     /**
-     * Writes four bytes of encoded data to the coffee maker and then waits 8ms.
+     * Queues four bytes of encoded data for non-blocking transmission with the configured inter-frame gap.
      **/
-    [[nodiscard]] bool write_encoded_unsafe(const std::array<uint8_t, 4>& encData) const;
+    [[nodiscard]] bool write_encoded_unsafe(const std::array<uint8_t, 4>& encData);
     /**
      * Reads four bytes of encoded data which represent one byte of actual data.
      * Returns true on success.
@@ -213,17 +252,19 @@ class JuttaConnection {
     [[nodiscard]] bool read_decoded_unsafe(std::vector<uint8_t>& data) const;
 
     void flush_serial_input() const;
+    void flush_db_rx_queue();
+    void flush_all_rx();
 
     /**
      * Encodes the given byte into 4 JUTTA bytes and writes them to the coffee maker.
      * Not thread safe!
      **/
-    [[nodiscard]] bool write_decoded_unsafe(const uint8_t& byte) const;
+    [[nodiscard]] bool write_decoded_unsafe(const uint8_t& byte);
     /**
      * Encodes each byte of the given bytes into 4 JUTTA bytes and writes them to the coffee maker.
      * Not thread safe!
      **/
-    [[nodiscard]] bool write_decoded_unsafe(const std::vector<uint8_t>& data) const;
+    [[nodiscard]] bool write_decoded_unsafe(const std::vector<uint8_t>& data);
     /**
      * Encodes each character into 4 JUTTA bytes and writes them to the coffee maker.
      *
@@ -231,7 +272,7 @@ class JuttaConnection {
      * This would request the device type from the coffee maker.
      * Not thread safe!
      **/
-    [[nodiscard]] bool write_decoded_unsafe(const std::string& data) const;
+    [[nodiscard]] bool write_decoded_unsafe(const std::string& data);
 
     /**
      * Waits until the coffee maker responded with the given response.
@@ -288,6 +329,29 @@ class JuttaConnection {
 
     void reinject_decoded_front(const std::string& data) const;
 
+    void activate_tx_echo_suppressor_(const std::vector<uint8_t>& frame);
+    void deactivate_tx_echo_suppressor_();
+    void update_tx_echo_suppressor_();
+    size_t filter_tx_echo_(const uint8_t* data, size_t length, std::vector<uint8_t>& filtered);
+
+    std::vector<uint8_t> db_rx_buffer_{};
+    uint32_t db_frame_last_activity_{0};
+    bool db_frame_active_{false};
+    std::vector<uint8_t> last_tx_frame_{};
+    size_t last_tx_echo_progress_{0};
+    uint32_t last_tx_deadline_{0};
+    bool last_tx_echo_active_{false};
+    std::deque<std::array<uint8_t, 4>> tx_queue_{};
+    uint32_t tx_next_write_ms_{0};
+    uint32_t tx_frame_started_ms_{0};
+    size_t tx_frame_total_frames_{0};
+    bool tx_queue_active_{false};
+    std::string next_tx_label_{};
+    std::string tx_active_label_{};
+    std::function<void(const std::string&, const char*)> response_callback_{};
+    bool log_decoded_tx_{true};
+    bool log_encoded_uart_{false};
+    bool debug_uart_frames_{false};
 };
 //---------------------------------------------------------------------------
 }  // namespace jutta_proto

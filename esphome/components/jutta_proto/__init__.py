@@ -1,11 +1,16 @@
+import os
+
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
-from esphome.components import text_sensor, uart
+from esphome.components import binary_sensor, sensor, text_sensor, uart
 from esphome.const import CONF_ID
+from esphome.core import CORE
+
+COMPONENT_DIR = os.path.dirname(__file__)
 
 DEPENDENCIES = ["uart"]
-AUTO_LOAD = ["uart"]
+AUTO_LOAD = ["uart", "sensor", "text_sensor", "binary_sensor"]
 
 CONF_COFFEE = "coffee"
 CONF_GRIND_DURATION = "grind_duration"
@@ -13,12 +18,73 @@ CONF_WATER_DURATION = "water_duration"
 CONF_PAGE = "page"
 CONF_SEQUENCE = "sequence"
 CONF_COMMAND = "command"
+CONF_PROBE = "probe"
 CONF_RAW = "raw"
 CONF_SLEEP = "sleep"
 CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
+CONF_RAW_RX = "raw_rx"
+CONF_LAST_COMMAND_RESULT = "last_command_result"
+CONF_MACHINE_TYPE = "machine_type"
+CONF_MACHINE_STATUS = "machine_status"
+CONF_MACHINE_DISPLAY_STATUS = "machine_display_status"
+CONF_MACHINE_WARNING = "machine_warning"
+CONF_ACTIVE_ALERTS = "active_alerts"
+CONF_LIVE_STATUS_SOURCE = "live_status_source"
+CONF_STATUS_PROBE_LAST_RESPONSE = "status_probe_last_response"
+CONF_DEBUG_COMMAND_LAST_RESPONSE = "debug_command_last_response"
+CONF_LAST_T2_STATUS_RAW = "last_t2_status_raw"
+CONF_LAST_T2_STATUS_DECODED = "last_t2_status_decoded"
+CONF_MACHINE_ONLINE = "machine_online"
+CONF_MACHINE_READY = "machine_ready"
+CONF_FILL_WATER_REQUIRED = "fill_water_required"
+CONF_TF_WELCOME = "tf_welcome"
+CONF_TF_COFFEE_READY = "tf_coffee_ready"
+CONF_TF_ENERGY_SAFE = "tf_energy_safe"
+CONF_TF_ACTIVE_RF_FILTER = "tf_active_rf_filter"
+CONF_TF_STATUS_BITS = "tf_status_bits"
+CONF_ENABLE_MACHINE_XML_POLL = "enable_machine_xml_poll"
+CONF_ENABLE_XML_POLL = "enable_xml_poll"
+CONF_XML_MAPPING_PATH = "xml_mapping_path"
+CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
+CONF_XML_STARTUP_DELAY_MS = "xml_startup_delay_ms"
+CONF_XML_PUBLISH_UNSTABLE = "xml_publish_unstable"
+CONF_XML_WAIT_FOR_TS_ACK = "xml_wait_for_ts_ack"
+CONF_XML_STATS_USE_TS_LOCK = "xml_stats_use_ts_lock"
+CONF_XML_DEBUG_COMPACT = "xml_debug_compact"
+CONF_XML_DECODE_INNER_TRANSPORT = "xml_decode_inner_transport"
+CONF_XML_INNER_DECODE_TRACE = "xml_inner_decode_trace"
+CONF_XML_BINARY_PROBE = "xml_binary_probe"
+CONF_XML_KEY_PROBE = "xml_key_probe"
+CONF_XML_DEEP_DEBUG = "xml_deep_debug"
+CONF_XML_TRANSPORT_SELFTEST = "xml_transport_selftest"
+CONF_XML_COMMAND_PROBE = "xml_command_probe"
+CONF_XML_COMMAND_PROBE_WITH_TS_LOCK = "xml_command_probe_with_ts_lock"
+CONF_XML_SESSION_PROBE = "xml_session_probe"
+CONF_XML_SESSION_PROBE_VARIANT = "xml_session_probe_variant"
+CONF_XML_DONGLE_STARTUP = "xml_dongle_startup"
+CONF_XML_DONGLE_STARTUP_DEBUG = "xml_dongle_startup_debug"
+CONF_XML_DONGLE_STARTUP_MODE = "xml_dongle_startup_mode"
+CONF_XML_DONGLE_WAIT_T0_AFTER_T3 = "xml_dongle_wait_t0_after_t3"
+CONF_XML_DONGLE_INNER_TX_DEBUG = "xml_dongle_inner_tx_debug"
+CONF_XML_RUN_TABLET_START_SEQUENCE = "xml_run_tablet_start_sequence"
+CONF_XML_TABLET_SEQUENCE_MODE = "xml_tablet_sequence_mode"
+CONF_XML_COUNTER_MAX = "xml_counter_max"
+CONF_STATUS_DEBUG = "status_debug"
+CONF_STATUS_FORENSICS = "status_forensics"
+CONF_STATUS_FORENSICS_LOG_INTERVAL_MS = "status_forensics_log_interval_ms"
+CONF_STATUS_FORENSICS_VERBOSE_CANDIDATES = "status_forensics_verbose_candidates"
+CONF_STATUS_PROBE_ENABLED = "status_probe_enabled"
+CONF_STATUS_PROBE_INTERVAL_MS = "status_probe_interval_ms"
+CONF_ALLOW_UNSAFE_DEBUG_COMMANDS = "allow_unsafe_debug_commands"
+CONF_TRANSPORT = "transport"
+CONF_XML_SENSORS = "xml_sensors"
+CONF_DEBUG_UART_FRAMES = "debug_uart_frames"
+CONF_FIELD = "field"
+CONF_LOG_DECODED_TX = "log_decoded_tx"
+CONF_LOG_ENCODED_UART = "log_encoded_uart"
 
 jutta_component_ns = cg.esphome_ns.namespace("jutta_component")
 jutta_proto_ns = cg.global_ns.namespace("jutta_proto")
@@ -35,6 +101,15 @@ CancelCustomBrewAction = jutta_component_ns.class_(
 )
 SwitchPageAction = jutta_component_ns.class_("SwitchPageAction", automation.Action)
 RunSequenceAction = jutta_component_ns.class_("RunSequenceAction", automation.Action)
+ManualStatusProbeAction = jutta_component_ns.class_(
+    "ManualStatusProbeAction", automation.Action
+)
+Ble2TransportProbeAction = jutta_component_ns.class_(
+    "Ble2TransportProbeAction", automation.Action
+)
+SendDebugCommandAction = jutta_component_ns.class_(
+    "SendDebugCommandAction", automation.Action
+)
 
 COFFEE_TYPES = {
     "espresso": CoffeeType.ESPRESSO,
@@ -83,7 +158,27 @@ SEQUENCE_COMMAND_EXPRESSIONS = {
     "water_pump_off": cg.RawExpression("::jutta_proto::JUTTA_COFFEE_WATER_PUMP_OFF"),
 }
 
+STATUS_PROBE_COMMANDS = {
+    "hf": "@hf",
+    "ha_0": "@ha:03,20",
+    "ha_1": "@ha:03,21",
+    "ha_2": "@ha:03,22",
+    "ha_3": "@ha:03,23",
+}
+
+BLE2_TRANSPORT_PROBES = {
+    "ty": "ty",
+    "tr37": "tr37",
+}
+
+DEBUG_COMMAND_TRANSPORTS = {
+    "inner_uart0": "inner_uart0",
+}
+
 JURA_COMPONENT_IDS = []
+
+
+XML_SENSOR_SCHEMA = sensor.sensor_schema().extend({cv.Required(CONF_FIELD): cv.string})
 
 
 CONFIG_SCHEMA = (
@@ -91,6 +186,78 @@ CONFIG_SCHEMA = (
         {
             cv.GenerateID(): cv.declare_id(JuraComponent),
             cv.Optional(CONF_MACHINE_DATA): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_RAW_RX): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_LAST_COMMAND_RESULT): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_TYPE): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_STATUS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_DISPLAY_STATUS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_WARNING): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_ACTIVE_ALERTS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_LIVE_STATUS_SOURCE): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_STATUS_PROBE_LAST_RESPONSE): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_DEBUG_COMMAND_LAST_RESPONSE): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_LAST_T2_STATUS_RAW): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_LAST_T2_STATUS_DECODED): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_MACHINE_ONLINE): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_MACHINE_READY): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_FILL_WATER_REQUIRED): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_TF_WELCOME): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_TF_COFFEE_READY): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_TF_ENERGY_SAFE): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_TF_ACTIVE_RF_FILTER): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_TF_STATUS_BITS): text_sensor.text_sensor_schema(),
+            cv.Optional(CONF_ENABLE_MACHINE_XML_POLL): cv.boolean,
+            cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
+            cv.Optional(CONF_XML_MAPPING_PATH, default="embedded"): cv.string,
+            cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=30000): cv.All(
+                cv.positive_int, cv.Range(min=25000)
+            ),
+            cv.Optional(CONF_XML_STARTUP_DELAY_MS, default=10000): cv.All(
+                cv.positive_int, cv.Range(min=10000)
+            ),
+            cv.Optional(CONF_XML_PUBLISH_UNSTABLE, default=False): cv.boolean,
+            cv.Optional(CONF_XML_WAIT_FOR_TS_ACK, default=False): cv.boolean,
+            cv.Optional(CONF_XML_STATS_USE_TS_LOCK, default=False): cv.boolean,
+            cv.Optional(CONF_XML_DEBUG_COMPACT, default=True): cv.boolean,
+            cv.Optional(CONF_XML_DECODE_INNER_TRANSPORT, default=True): cv.boolean,
+            cv.Optional(CONF_XML_INNER_DECODE_TRACE, default=False): cv.boolean,
+            cv.Optional(CONF_XML_BINARY_PROBE, default=False): cv.boolean,
+            cv.Optional(CONF_XML_KEY_PROBE, default=False): cv.boolean,
+            cv.Optional(CONF_XML_DEEP_DEBUG, default=False): cv.boolean,
+            cv.Optional(CONF_XML_TRANSPORT_SELFTEST, default=False): cv.boolean,
+            cv.Optional(CONF_XML_COMMAND_PROBE, default=False): cv.boolean,
+            cv.Optional(CONF_XML_COMMAND_PROBE_WITH_TS_LOCK, default=True): cv.boolean,
+            cv.Optional(CONF_XML_SESSION_PROBE, default=False): cv.boolean,
+            cv.Optional(CONF_XML_SESSION_PROBE_VARIANT, default="minimal"): cv.one_of(
+                "minimal", "dongle_full", "no_d1", lower=True
+            ),
+            cv.Optional(CONF_XML_DONGLE_STARTUP, default=False): cv.boolean,
+            cv.Optional(CONF_XML_DONGLE_STARTUP_DEBUG, default=False): cv.boolean,
+            cv.Optional(CONF_XML_DONGLE_STARTUP_MODE, default="full"): cv.one_of(
+                "full", "gate_only", lower=True
+            ),
+            cv.Optional(CONF_XML_DONGLE_WAIT_T0_AFTER_T3, default=False): cv.boolean,
+            cv.Optional(CONF_XML_DONGLE_INNER_TX_DEBUG, default=False): cv.boolean,
+            cv.Optional(CONF_XML_RUN_TABLET_START_SEQUENCE, default=False): cv.boolean,
+            cv.Optional(CONF_XML_TABLET_SEQUENCE_MODE, default="minimal"): cv.one_of(
+                "minimal", "minimal_tr37", lower=True
+            ),
+            cv.Optional(CONF_XML_COUNTER_MAX, default=20000): cv.positive_int,
+            cv.Optional(CONF_STATUS_DEBUG, default=False): cv.boolean,
+            cv.Optional(CONF_STATUS_FORENSICS, default=False): cv.boolean,
+            cv.Optional(CONF_STATUS_FORENSICS_LOG_INTERVAL_MS, default=2000): cv.All(
+                cv.positive_int, cv.Range(min=250)
+            ),
+            cv.Optional(CONF_STATUS_FORENSICS_VERBOSE_CANDIDATES, default=False): cv.boolean,
+            cv.Optional(CONF_STATUS_PROBE_ENABLED, default=False): cv.boolean,
+            cv.Optional(CONF_STATUS_PROBE_INTERVAL_MS, default=300000): cv.All(
+                cv.positive_int, cv.Range(min=10000)
+            ),
+            cv.Optional(CONF_ALLOW_UNSAFE_DEBUG_COMMANDS, default=False): cv.boolean,
+            cv.Optional(CONF_XML_SENSORS, default=[]): cv.ensure_list(XML_SENSOR_SCHEMA),
+            cv.Optional(CONF_DEBUG_UART_FRAMES, default=False): cv.boolean,
+            cv.Optional(CONF_LOG_DECODED_TX, default=True): cv.boolean,
+            cv.Optional(CONF_LOG_ENCODED_UART, default=False): cv.boolean,
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
@@ -227,15 +394,210 @@ def _normalize_sequence(value):
     )(value)
 
 
+def _normalize_status_probe(value):
+    if isinstance(value, str):
+        value = {CONF_PROBE: value}
+    if value is None:
+        value = {}
+    return cv.Schema(
+        {
+            cv.Optional(CONF_ID): cv.use_id(JuraComponent),
+            cv.Required(CONF_PROBE): cv.enum(STATUS_PROBE_COMMANDS, lower=True),
+        }
+    )(value)
+
+
+def _normalize_ble2_transport_probe(value):
+    if isinstance(value, str):
+        value = {CONF_PROBE: value}
+    if value is None:
+        value = {}
+    return cv.Schema(
+        {
+            cv.Optional(CONF_ID): cv.use_id(JuraComponent),
+            cv.Required(CONF_PROBE): cv.enum(BLE2_TRANSPORT_PROBES, lower=True),
+        }
+    )(value)
+
+
+def _normalize_send_debug_command(value):
+    if isinstance(value, str):
+        value = {CONF_COMMAND: value}
+    if value is None:
+        value = {}
+    return cv.Schema(
+        {
+            cv.Optional(CONF_ID): cv.use_id(JuraComponent),
+            cv.Required(CONF_COMMAND): cv.templatable(cv.string_strict),
+            cv.Optional(CONF_TRANSPORT, default="inner_uart0"): cv.templatable(
+                cv.enum(DEBUG_COMMAND_TRANSPORTS, lower=True)
+            ),
+        }
+    )(value)
+
+
+def _make_raw_string_literal(text):
+    delimiter = "JUTTA_XML"
+    while f"){delimiter}\"" in text:
+        delimiter += "_X"
+    return 'R"' + delimiter + '(' + text + ')' + delimiter + '"'
+
+
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     JURA_COMPONENT_IDS.append(config[CONF_ID])
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
 
+    cg.add(var.set_debug_uart_frames(config[CONF_DEBUG_UART_FRAMES]))
+    cg.add(var.set_log_decoded_tx(config[CONF_LOG_DECODED_TX]))
+    cg.add(var.set_log_encoded_uart(config[CONF_LOG_ENCODED_UART]))
+    cg.add(var.set_enable_xml_poll(config[CONF_ENABLE_XML_POLL]))
+    machine_xml_default = not config[CONF_ENABLE_XML_POLL]
+    cg.add(var.set_enable_machine_xml_poll(config.get(CONF_ENABLE_MACHINE_XML_POLL, machine_xml_default)))
+    cg.add(var.set_xml_publish_unstable(config[CONF_XML_PUBLISH_UNSTABLE]))
+    cg.add(var.set_xml_wait_for_ts_ack(config[CONF_XML_WAIT_FOR_TS_ACK]))
+    cg.add(var.set_xml_stats_use_ts_lock(config[CONF_XML_STATS_USE_TS_LOCK]))
+    cg.add(var.set_xml_debug_compact(config[CONF_XML_DEBUG_COMPACT]))
+    cg.add(var.set_xml_decode_inner_transport(config[CONF_XML_DECODE_INNER_TRANSPORT]))
+    cg.add(var.set_xml_inner_decode_trace(config[CONF_XML_INNER_DECODE_TRACE]))
+    cg.add(var.set_xml_binary_probe(config[CONF_XML_BINARY_PROBE]))
+    cg.add(var.set_xml_key_probe(config[CONF_XML_KEY_PROBE]))
+    cg.add(var.set_xml_deep_debug(config[CONF_XML_DEEP_DEBUG]))
+    cg.add(var.set_xml_transport_selftest(config[CONF_XML_TRANSPORT_SELFTEST]))
+    cg.add(var.set_xml_command_probe(config[CONF_XML_COMMAND_PROBE]))
+    cg.add(var.set_xml_command_probe_with_ts_lock(config[CONF_XML_COMMAND_PROBE_WITH_TS_LOCK]))
+    cg.add(var.set_xml_session_probe(config[CONF_XML_SESSION_PROBE]))
+    cg.add(var.set_xml_session_probe_variant(config[CONF_XML_SESSION_PROBE_VARIANT]))
+    cg.add(var.set_xml_dongle_startup(config[CONF_XML_DONGLE_STARTUP]))
+    cg.add(var.set_xml_dongle_startup_debug(config[CONF_XML_DONGLE_STARTUP_DEBUG]))
+    cg.add(var.set_xml_dongle_startup_mode(config[CONF_XML_DONGLE_STARTUP_MODE]))
+    cg.add(var.set_xml_dongle_wait_t0_after_t3(config[CONF_XML_DONGLE_WAIT_T0_AFTER_T3]))
+    cg.add(var.set_xml_dongle_inner_tx_debug(config[CONF_XML_DONGLE_INNER_TX_DEBUG]))
+    cg.add(var.set_xml_run_tablet_start_sequence(config[CONF_XML_RUN_TABLET_START_SEQUENCE]))
+    cg.add(var.set_xml_tablet_sequence_mode(config[CONF_XML_TABLET_SEQUENCE_MODE]))
+    cg.add(var.set_xml_counter_max(config[CONF_XML_COUNTER_MAX]))
+    cg.add(var.set_status_debug(config[CONF_STATUS_DEBUG]))
+    mapping_path = config[CONF_XML_MAPPING_PATH]
+    if mapping_path == "embedded":
+        resolved_path = os.path.join(COMPONENT_DIR, "jura_mapping_embed.xml")
+    else:
+        resolved_path = mapping_path
+        if not os.path.isabs(resolved_path):
+            resolved_path = os.path.join(CORE.relative_config_path, resolved_path)
+
+    if not os.path.exists(resolved_path):
+        raise cv.Invalid(
+            "Die angegebene XML-Datei '{}' (aufgelöst zu '{}') wurde nicht gefunden".format(
+                mapping_path, resolved_path
+            )
+        )
+
+    try:
+        with open(resolved_path, "r", encoding="utf-8") as xml_file:
+            xml_content = xml_file.read()
+    except OSError as err:
+        raise cv.Invalid(
+            "XML-Datei '{}' konnte nicht gelesen werden: {}".format(
+                resolved_path, err
+            )
+        ) from err
+
+    cg.add(var.set_xml_mapping_path(cg.std_string(resolved_path)))
+
+    component_index = len(JURA_COMPONENT_IDS)
+    symbol_base = f"jutta_proto_xml_blob_{component_index}"
+    raw_literal = _make_raw_string_literal(xml_content)
+    cg.add_global(
+        cg.RawExpression(
+            "namespace esphome {\nnamespace jutta_component {\n"
+            f"constexpr char {symbol_base}[] = {raw_literal};\n"
+            f"constexpr size_t {symbol_base}_len = sizeof({symbol_base}) - 1;\n"
+            "}\n}\n"
+        )
+    )
+    cg.add(
+        var.set_xml_mapping_source(
+            cg.RawExpression(f"::esphome::jutta_component::{symbol_base}"),
+            cg.RawExpression(f"::esphome::jutta_component::{symbol_base}_len")
+        )
+    )
+    cg.add(var.set_xml_poll_interval(config[CONF_XML_POLL_INTERVAL_MS]))
+    cg.add(var.set_xml_startup_delay(config[CONF_XML_STARTUP_DELAY_MS]))
+
     if CONF_MACHINE_DATA in config:
-        sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
-        cg.add(var.set_machine_data_sensor(sensor))
+        machine_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
+        cg.add(var.set_machine_data_sensor(machine_sensor))
+
+    if CONF_RAW_RX in config:
+        raw_rx_sensor = await text_sensor.new_text_sensor(config[CONF_RAW_RX])
+        cg.add(var.set_raw_rx_sensor(raw_rx_sensor))
+
+    if CONF_LAST_COMMAND_RESULT in config:
+        result_sensor = await text_sensor.new_text_sensor(config[CONF_LAST_COMMAND_RESULT])
+        cg.add(var.set_last_command_result_sensor(result_sensor))
+
+    if CONF_MACHINE_TYPE in config:
+        machine_type_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_TYPE])
+        cg.add(var.set_machine_type_sensor(machine_type_sensor))
+
+    if CONF_MACHINE_STATUS in config:
+        machine_status_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_STATUS])
+        cg.add(var.set_machine_status_sensor(machine_status_sensor))
+
+    if CONF_MACHINE_DISPLAY_STATUS in config:
+        machine_display_status_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DISPLAY_STATUS])
+        cg.add(var.set_machine_display_status_sensor(machine_display_status_sensor))
+
+    if CONF_MACHINE_WARNING in config:
+        machine_warning_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_WARNING])
+        cg.add(var.set_machine_warning_sensor(machine_warning_sensor))
+
+    if CONF_ACTIVE_ALERTS in config:
+        active_alerts_sensor = await text_sensor.new_text_sensor(config[CONF_ACTIVE_ALERTS])
+        cg.add(var.set_active_alerts_sensor(active_alerts_sensor))
+
+    if CONF_LIVE_STATUS_SOURCE in config:
+        live_status_source_sensor = await text_sensor.new_text_sensor(config[CONF_LIVE_STATUS_SOURCE])
+        cg.add(var.set_live_status_source_sensor(live_status_source_sensor))
+
+    if CONF_MACHINE_ONLINE in config:
+        machine_online_sensor = await binary_sensor.new_binary_sensor(config[CONF_MACHINE_ONLINE])
+        cg.add(var.set_machine_online_sensor(machine_online_sensor))
+
+    if CONF_MACHINE_READY in config:
+        machine_ready_sensor = await binary_sensor.new_binary_sensor(config[CONF_MACHINE_READY])
+        cg.add(var.set_machine_ready_sensor(machine_ready_sensor))
+
+    if CONF_FILL_WATER_REQUIRED in config:
+        fill_water_required_sensor = await binary_sensor.new_binary_sensor(config[CONF_FILL_WATER_REQUIRED])
+        cg.add(var.set_fill_water_required_sensor(fill_water_required_sensor))
+
+    if CONF_TF_WELCOME in config:
+        tf_welcome_sensor = await binary_sensor.new_binary_sensor(config[CONF_TF_WELCOME])
+        cg.add(var.set_tf_welcome_sensor(tf_welcome_sensor))
+
+    if CONF_TF_COFFEE_READY in config:
+        tf_coffee_ready_sensor = await binary_sensor.new_binary_sensor(config[CONF_TF_COFFEE_READY])
+        cg.add(var.set_tf_coffee_ready_sensor(tf_coffee_ready_sensor))
+
+    if CONF_TF_ENERGY_SAFE in config:
+        tf_energy_safe_sensor = await binary_sensor.new_binary_sensor(config[CONF_TF_ENERGY_SAFE])
+        cg.add(var.set_tf_energy_safe_sensor(tf_energy_safe_sensor))
+
+    if CONF_TF_ACTIVE_RF_FILTER in config:
+        tf_active_rf_filter_sensor = await binary_sensor.new_binary_sensor(config[CONF_TF_ACTIVE_RF_FILTER])
+        cg.add(var.set_tf_active_rf_filter_sensor(tf_active_rf_filter_sensor))
+
+    if CONF_TF_STATUS_BITS in config:
+        tf_status_bits_sensor = await text_sensor.new_text_sensor(config[CONF_TF_STATUS_BITS])
+        cg.add(var.set_tf_status_bits_sensor(tf_status_bits_sensor))
+
+    for xml_sensor in config.get(CONF_XML_SENSORS, []):
+        sensor_conf = xml_sensor.copy()
+        field_name = sensor_conf.pop(CONF_FIELD)
+        sens = await sensor.new_sensor(sensor_conf)
+        cg.add(var.add_configured_xml_sensor(cg.std_string(field_name), sens))
 
 
 async def _get_parent(config):
@@ -248,7 +610,7 @@ async def _get_parent(config):
     return await cg.get_variable(JURA_COMPONENT_IDS[0])
 
 
-@automation.register_action("jutta_proto.start_brew", StartBrewAction, _normalize_start_brew)
+@automation.register_action("jutta_proto.start_brew", StartBrewAction, _normalize_start_brew, synchronous=False)
 async def start_brew_action_to_code(config, action_id, template_args, args):
     _ = args
     parent = await _get_parent(config)
@@ -257,7 +619,7 @@ async def start_brew_action_to_code(config, action_id, template_args, args):
     return var
 
 
-@automation.register_action("jutta_proto.custom_brew", CustomBrewAction, _normalize_custom_brew)
+@automation.register_action("jutta_proto.custom_brew", CustomBrewAction, _normalize_custom_brew, synchronous=False)
 async def custom_brew_action_to_code(config, action_id, template_args, args):
     _ = args
     parent = await _get_parent(config)
@@ -269,7 +631,7 @@ async def custom_brew_action_to_code(config, action_id, template_args, args):
     return var
 
 
-@automation.register_action("jutta_proto.cancel_custom_brew", CancelCustomBrewAction, _normalize_cancel)
+@automation.register_action("jutta_proto.cancel_custom_brew", CancelCustomBrewAction, _normalize_cancel, synchronous=False)
 async def cancel_brew_action_to_code(config, action_id, template_args, args):
     _ = args
     parent = await _get_parent(config)
@@ -277,7 +639,7 @@ async def cancel_brew_action_to_code(config, action_id, template_args, args):
     return var
 
 
-@automation.register_action("jutta_proto.switch_page", SwitchPageAction, _normalize_switch_page)
+@automation.register_action("jutta_proto.switch_page", SwitchPageAction, _normalize_switch_page, synchronous=False)
 async def switch_page_action_to_code(config, action_id, template_args, args):
     _ = args
     parent = await _get_parent(config)
@@ -286,7 +648,7 @@ async def switch_page_action_to_code(config, action_id, template_args, args):
     return var
 
 
-@automation.register_action("jutta_proto.run_sequence", RunSequenceAction, _normalize_sequence)
+@automation.register_action("jutta_proto.run_sequence", RunSequenceAction, _normalize_sequence, synchronous=False)
 async def run_sequence_action_to_code(config, action_id, template_args, args):
     _ = args
     parent = await _get_parent(config)
@@ -311,3 +673,41 @@ async def run_sequence_action_to_code(config, action_id, template_args, args):
 
     return var
 
+
+@automation.register_action("jutta_proto.status_probe", ManualStatusProbeAction, _normalize_status_probe, synchronous=False)
+async def status_probe_action_to_code(config, action_id, template_args, args):
+    _ = args
+    parent = await _get_parent(config)
+    var = cg.new_Pvariable(action_id, parent)
+    cg.add(var.set_command(cg.std_string(STATUS_PROBE_COMMANDS[config[CONF_PROBE]])))
+    return var
+
+
+@automation.register_action(
+    "jutta_proto.ble2_transport_probe",
+    Ble2TransportProbeAction,
+    _normalize_ble2_transport_probe,
+    synchronous=False,
+)
+async def ble2_transport_probe_action_to_code(config, action_id, template_args, args):
+    _ = args
+    parent = await _get_parent(config)
+    var = cg.new_Pvariable(action_id, parent)
+    cg.add(var.set_probe(cg.std_string(config[CONF_PROBE])))
+    return var
+
+
+@automation.register_action(
+    "jutta_proto.send_debug_command",
+    SendDebugCommandAction,
+    _normalize_send_debug_command,
+    synchronous=False,
+)
+async def send_debug_command_action_to_code(config, action_id, template_args, args):
+    parent = await _get_parent(config)
+    var = cg.new_Pvariable(action_id, template_args, parent)
+    command = await cg.templatable(config[CONF_COMMAND], args, cg.std_string)
+    transport = await cg.templatable(config[CONF_TRANSPORT], args, cg.std_string)
+    cg.add(var.set_command(command))
+    cg.add(var.set_transport(transport))
+    return var
