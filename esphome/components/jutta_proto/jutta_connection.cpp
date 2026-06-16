@@ -331,9 +331,28 @@ void JuttaConnection::process_tx_queue(uint32_t budget_ms) {
             warn_if_slow();
             return;
         }
+        serial.flush();
         this->tx_next_write_ms_ = esphome::millis() + JUTTA_SERIAL_GAP_MS;
     }
     warn_if_slow();
+}
+
+bool JuttaConnection::flush_tx_queue_blocking_until_empty(uint32_t timeout_ms) {
+    uint32_t start_ms = esphome::millis();
+    while (this->tx_busy()) {
+        this->process_tx_queue(2);
+        if (!this->tx_busy()) {
+            return true;
+        }
+        uint32_t elapsed = esphome::millis() - start_ms;
+        if (timeout_ms != 0 && elapsed >= timeout_ms) {
+            ESP_LOGW(TAG, "tx_queue_flush_timeout duration_ms=%u bytes_left=%u",
+                     static_cast<unsigned>(elapsed), static_cast<unsigned>(this->tx_queue_.size() * 4U));
+            return false;
+        }
+        esphome::delay(1);
+    }
+    return true;
 }
 
 bool JuttaConnection::write_decoded_unsafe(const uint8_t& byte) {
@@ -394,25 +413,37 @@ bool JuttaConnection::write_decoded(const uint8_t& byte) {
     if (!this->wait_context_.active && !this->wait_string_context_.active) {
         flush_serial_input();
     }
-    return write_decoded_unsafe(byte);
+    if (!write_decoded_unsafe(byte)) {
+        return false;
+    }
+    return this->flush_tx_queue_blocking_until_empty(std::max<uint32_t>(250, this->tx_queue_estimated_ms() + 250));
 }
 
 bool JuttaConnection::write_decoded(const std::vector<uint8_t>& data) {
     if (!this->wait_context_.active && !this->wait_string_context_.active) {
         flush_serial_input();
     }
-    return write_decoded_unsafe(data);
+    if (!write_decoded_unsafe(data)) {
+        return false;
+    }
+    return this->flush_tx_queue_blocking_until_empty(std::max<uint32_t>(250, this->tx_queue_estimated_ms() + 250));
 }
 
 bool JuttaConnection::write_decoded_no_flush(const std::vector<uint8_t>& data) {
-    return write_decoded_unsafe(data);
+    if (!write_decoded_unsafe(data)) {
+        return false;
+    }
+    return this->flush_tx_queue_blocking_until_empty(std::max<uint32_t>(250, this->tx_queue_estimated_ms() + 250));
 }
 
 bool JuttaConnection::write_decoded(const std::string& data) {
     if (!this->wait_context_.active && !this->wait_string_context_.active) {
         flush_serial_input();
     }
-    return write_decoded_unsafe(data);
+    if (!write_decoded_unsafe(data)) {
+        return false;
+    }
+    return this->flush_tx_queue_blocking_until_empty(std::max<uint32_t>(250, this->tx_queue_estimated_ms() + 250));
 }
 
 void JuttaConnection::print_byte(const uint8_t& byte) {
@@ -657,7 +688,9 @@ void JuttaConnection::reinject_decoded_front(const std::string& data) const {
 }
 
 bool JuttaConnection::read_line_until(std::string& line) {
-    this->process_tx_queue();
+    if (!this->flush_tx_queue_blocking_until_empty(std::max<uint32_t>(250, this->tx_queue_estimated_ms() + 250))) {
+        return false;
+    }
     if (try_extract_line(this->response_line_buffer_, line)) {
         if (this->debug_uart_frames_) {
             ESP_LOGV(TAG, "Polled buffered response line: '%s'", format_printable(line).c_str());
@@ -742,7 +775,9 @@ void JuttaConnection::tx_db_command(const std::string& ascii, bool flush) {
 
 bool JuttaConnection::read_db_frame(std::vector<uint8_t>& decoded, uint32_t timeout_ms, bool* had_crlf,
                                     size_t* decoded_len) {
-    this->process_tx_queue();
+    if (!this->flush_tx_queue_blocking_until_empty(std::max<uint32_t>(250, this->tx_queue_estimated_ms() + 250))) {
+        return false;
+    }
     decoded.clear();
 
     bool frame_had_crlf = false;
@@ -994,6 +1029,9 @@ std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const 
         if (!write_decoded_unsafe(data)) {
             return nullptr;
         }
+        if (!this->flush_tx_queue_blocking_until_empty(std::max<uint32_t>(250, this->tx_queue_estimated_ms() + 250))) {
+            return nullptr;
+        }
     }
     if (this->debug_uart_frames_) {
         ESP_LOGD(TAG, "Waiting for response after writing decoded payload (timeout=%lld ms).",
@@ -1007,6 +1045,9 @@ std::shared_ptr<std::string> JuttaConnection::write_decoded_with_response(const 
     if (!this->wait_string_context_.active) {
         flush_serial_input();
         if (!write_decoded_unsafe(data)) {
+            return nullptr;
+        }
+        if (!this->flush_tx_queue_blocking_until_empty(std::max<uint32_t>(250, this->tx_queue_estimated_ms() + 250))) {
             return nullptr;
         }
     }
@@ -1171,6 +1212,9 @@ JuttaConnection::WaitResult JuttaConnection::write_decoded_wait_for(const std::v
         if (!write_decoded_unsafe(data)) {
             return WaitResult::Error;
         }
+        if (!this->flush_tx_queue_blocking_until_empty(std::max<uint32_t>(250, this->tx_queue_estimated_ms() + 250))) {
+            return WaitResult::Error;
+        }
     }
     return wait_for_response_unsafe(response, timeout);
 }
@@ -1180,6 +1224,9 @@ JuttaConnection::WaitResult JuttaConnection::write_decoded_wait_for(const std::s
     if (!this->wait_context_.active || this->wait_context_.expected != response) {
         flush_serial_input();
         if (!write_decoded_unsafe(data)) {
+            return WaitResult::Error;
+        }
+        if (!this->flush_tx_queue_blocking_until_empty(std::max<uint32_t>(250, this->tx_queue_estimated_ms() + 250))) {
             return WaitResult::Error;
         }
     }

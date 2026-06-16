@@ -46,6 +46,7 @@ class JuttaConnection {
     bool tx_busy() const { return !this->tx_queue_.empty() || this->tx_queue_active_; }
     size_t tx_queue_size() const { return this->tx_queue_.size(); }
     uint32_t tx_queue_estimated_ms() const;
+    bool flush_tx_queue_blocking_until_empty(uint32_t timeout_ms);
     void set_next_tx_label(const std::string& label) { this->next_tx_label_ = label; }
 
     /**
