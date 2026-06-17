@@ -261,6 +261,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_counter_max(uint32_t max_value) { this->xml_counter_max_ = max_value; }
   void set_xml_wait_for_ts_ack(bool enabled) { this->xml_wait_for_ts_ack_ = enabled; }
   void set_xml_stats_use_ts_lock(bool enabled) { this->xml_stats_use_ts_lock_ = enabled; }
+  void set_xml_stats_reprime_tr37_before_cycle(bool enabled) {
+    this->xml_stats_reprime_tr37_before_cycle_ = enabled;
+  }
   void set_xml_debug_compact(bool enabled) { this->xml_debug_compact_ = enabled; }
   void set_xml_decode_inner_transport(bool enabled) { this->xml_decode_inner_transport_ = enabled; }
   void set_xml_inner_decode_trace(bool enabled) { this->xml_inner_decode_trace_ = enabled; }
@@ -477,6 +480,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void start_new_xml_cycle_(uint32_t now);
   enum class XmlPollState {
     IDLE,
+    REPRIME_TR37,
+    WAIT_REPRIME_TR37,
     TS_LOCK,
     WAIT_TS_LOCK,
     TR32_PAGE,
@@ -673,6 +678,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_publish_unstable_{false};
   bool xml_wait_for_ts_ack_{false};
   bool xml_stats_use_ts_lock_{false};
+  bool xml_stats_reprime_tr37_before_cycle_{true};
   bool xml_debug_compact_{true};
   bool xml_decode_inner_transport_{true};
   bool xml_inner_decode_trace_{false};
@@ -693,6 +699,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool stats_session_ready_{false};
   bool stats_inner_tx_required_{false};
   bool post_gate_tx_ready_event_{true};
+  bool post_gate_reprime_required_for_next_stats_{true};
   uint16_t startup_t2_word_{0};
   std::string dongle_machine_identity_{};
   std::string dongle_tr_payload_{};

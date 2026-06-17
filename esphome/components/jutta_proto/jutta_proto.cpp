@@ -43,7 +43,7 @@ constexpr uint32_t kInterCmdGapMs = 250;
 constexpr uint32_t kStatsNextCommandDelayMs = 50;
 constexpr uint32_t kXmlQuietMs = 120;
 constexpr uint32_t kCycleSleepMs = 2000;
-constexpr uint32_t kLiveDbPollAfterStatsDelayMs = 2000;
+constexpr uint32_t kLiveDbPollAfterStatsDelayMs = 5000;
 constexpr uint32_t kLiveDbPollStatsGuardMs = 2000;
 constexpr uint8_t kTr32PageCount = 16;
 constexpr uint8_t kTr32ProductsPerPage = 4;
@@ -503,6 +503,9 @@ std::string expected_stats_prefix_for_command(const std::string &command) {
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   if (lower.rfind("@tr:32", 0) == 0) {
     return "@tr:32";
+  }
+  if (lower.rfind("@tr:37", 0) == 0) {
+    return "@tr:37,";
   }
   if (lower.rfind("@tg:43", 0) == 0) {
     return "@tg:43";
@@ -4882,6 +4885,7 @@ void JuraComponent::reset_xml_poll_state_() {
   this->xml_command_probe_last_wait_reason_.clear();
   this->stats_session_ready_ = !this->xml_dongle_startup_;
   this->stats_inner_tx_required_ = false;
+  this->post_gate_reprime_required_for_next_stats_ = true;
   this->dongle_startup_state_ = DongleStartupState::IDLE;
   this->dongle_startup_rx_buffer_.clear();
       this->dongle_startup_deadline_ms_ = 0;
@@ -6213,6 +6217,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         this->stats_session_ready_ = true;
         this->stats_inner_tx_required_ = true;
         this->post_gate_tx_ready_event_ = true;
+        this->post_gate_reprime_required_for_next_stats_ = true;
         ESP_LOGD(TAG, "dongle_startup_ready events=0x%02X all_events=0x%02X",
                  static_cast<unsigned>(this->dongle_events_ & DONGLE_STARTUP_READY_MASK),
                  static_cast<unsigned>(this->dongle_events_));
@@ -6336,6 +6341,11 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
     ESP_LOGD(TAG, "stats_cycle_start mode=%s inner_tx=%s ts_lock=%s",
              this->stats_session_ready_ && this->stats_inner_tx_required_ ? "post_gate" : "legacy",
              YESNO(this->stats_inner_tx_required_), YESNO(this->xml_stats_use_ts_lock_));
+    if (this->xml_stats_reprime_tr37_before_cycle_ && this->stats_session_ready_ &&
+        this->stats_inner_tx_required_ && this->post_gate_reprime_required_for_next_stats_) {
+      this->transition_to_state_(XmlPollState::REPRIME_TR37, now);
+      return;
+    }
     this->transition_to_state_(this->xml_stats_use_ts_lock_ ? XmlPollState::TS_LOCK : XmlPollState::TR32_PAGE, now);
   }
 
@@ -6344,6 +6354,14 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
   }
 
   switch (this->xml_state_) {
+    case XmlPollState::REPRIME_TR37:
+      if (!this->xml_inflight_) {
+        ESP_LOGD(TAG, "stats_reprime_tr37_begin");
+        if (this->send_stats_ascii_command_("@TR:37", XmlPollState::WAIT_REPRIME_TR37, now)) {
+          ESP_LOGD(TAG, "stats_reprime_tr37_tx");
+        }
+      }
+      return;
     case XmlPollState::TS_LOCK:
       if (!this->xml_inflight_) {
         if (this->stats_inner_tx_required_ || this->xml_wait_for_ts_ack_) {
@@ -6405,6 +6423,7 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         }
       }
       return;
+    case XmlPollState::WAIT_REPRIME_TR37:
     case XmlPollState::WAIT_TS_LOCK:
     case XmlPollState::WAIT_TR32_PAGE:
     case XmlPollState::WAIT_TG43:
@@ -6435,6 +6454,10 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
                  this->xml_last_command_.c_str(), static_cast<unsigned>(now - this->xml_command_started_ms_),
                  static_cast<unsigned>(this->xml_command_frames_),
                  static_cast<unsigned>(this->xml_command_noise_frames_));
+        if (this->xml_state_ == XmlPollState::WAIT_REPRIME_TR37) {
+          ESP_LOGD(TAG, "stats_reprime_tr37_failed");
+          ESP_LOGD(TAG, "stats_cycle_abort reason=tr37_reprime_failed");
+        }
         if (this->xml_state_ == XmlPollState::WAIT_TGC0) {
           if (this->xml_tgc0_timeout_streak_ < std::numeric_limits<uint8_t>::max()) {
             this->xml_tgc0_timeout_streak_ += 1;
@@ -6492,6 +6515,8 @@ bool JuraComponent::xml_state_has_mapping_(XmlPollState state) const {
       return !this->xml_mapping_.tgc0.empty();
     case XmlPollState::TS_LOCK:
     case XmlPollState::WAIT_TS_LOCK:
+    case XmlPollState::REPRIME_TR37:
+    case XmlPollState::WAIT_REPRIME_TR37:
     case XmlPollState::TS_UNLOCK:
     case XmlPollState::WAIT_TS_UNLOCK:
     case XmlPollState::DONE:
@@ -6518,6 +6543,9 @@ const char *JuraComponent::xml_state_command_(XmlPollState state) const {
     case XmlPollState::TS_LOCK:
     case XmlPollState::WAIT_TS_LOCK:
       return "@TS:01";
+    case XmlPollState::REPRIME_TR37:
+    case XmlPollState::WAIT_REPRIME_TR37:
+      return "@TR:37";
     case XmlPollState::TR32_PAGE:
     case XmlPollState::WAIT_TR32_PAGE:
     case XmlPollState::SEND_TR32:
@@ -6548,6 +6576,9 @@ const char *JuraComponent::xml_state_label_(XmlPollState state) const {
     case XmlPollState::TS_LOCK:
     case XmlPollState::WAIT_TS_LOCK:
       return "TS_LOCK";
+    case XmlPollState::REPRIME_TR37:
+    case XmlPollState::WAIT_REPRIME_TR37:
+      return "REPRIME_TR37";
     case XmlPollState::TR32_PAGE:
     case XmlPollState::WAIT_TR32_PAGE:
       return "TR32_PAGE";
@@ -6583,8 +6614,8 @@ const char *JuraComponent::xml_state_label_(XmlPollState state) const {
 void JuraComponent::transition_to_state_(XmlPollState state, uint32_t now, uint32_t delay_ms) {
   this->xml_state_ = state;
   this->xml_next_action_ms_ = delay_ms > 0 ? now + delay_ms : 0;
-  if (state != XmlPollState::WAIT_TS_LOCK && state != XmlPollState::WAIT_TR32_PAGE &&
-      state != XmlPollState::WAIT_TG43 && state != XmlPollState::WAIT_TGC0 &&
+  if (state != XmlPollState::WAIT_REPRIME_TR37 && state != XmlPollState::WAIT_TS_LOCK &&
+      state != XmlPollState::WAIT_TR32_PAGE && state != XmlPollState::WAIT_TG43 && state != XmlPollState::WAIT_TGC0 &&
       state != XmlPollState::WAIT_TS_UNLOCK && state != XmlPollState::WAIT_TR32) {
     this->xml_deadline_ms_ = 0;
   }
@@ -7527,6 +7558,29 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
   }
 
   switch (this->xml_state_) {
+    case XmlPollState::WAIT_REPRIME_TR37:
+      if (lower.rfind("@tr:37,", 0) == 0) {
+        ESP_LOGD(TAG, "stats_reprime_tr37_match response=\"%s\"", sanitize_text_for_api(line).c_str());
+        this->post_gate_reprime_required_for_next_stats_ = false;
+        this->xml_inflight_ = false;
+        if (post_gate) {
+          this->post_gate_tx_ready_event_ = true;
+        }
+        this->xml_deadline_ms_ = 0;
+        ESP_LOGD(TAG, "stats_command_perf cmd=@TR:37 result=ok duration_ms=%u frames=%u noise=%u",
+                 static_cast<unsigned>(now - this->xml_command_started_ms_),
+                 static_cast<unsigned>(this->xml_command_frames_),
+                 static_cast<unsigned>(this->xml_command_noise_frames_));
+        ESP_LOGD(TAG, "stats_reprime_tr37_done");
+        ESP_LOGD(TAG, "stats_cycle_start_after_reprime");
+        this->transition_to_state_(this->xml_stats_use_ts_lock_ ? XmlPollState::TS_LOCK : XmlPollState::TR32_PAGE, now,
+                                   kStatsNextCommandDelayMs);
+        return true;
+      }
+      ESP_LOGD(TAG, "stats_reject cmd=@TR:37 reason=unexpected_response raw='%s'",
+               sanitize_text_for_api(line).c_str());
+      return false;
+
     case XmlPollState::WAIT_TS_LOCK:
       if (lower.rfind("@ts", 0) == 0 || lower == "ok") {
         ESP_LOGV(TAG, "stats_parse cmd=@TS:01 payload=lock_ack");
@@ -7673,6 +7727,7 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
         ESP_LOGV(TAG, "stats_parse cmd=@TS:00 payload=unlock_ack raw='%s'", sanitize_text_for_api(line).c_str());
         this->xml_stats_locked_ = false;
         this->xml_inflight_ = false;
+        this->post_gate_reprime_required_for_next_stats_ = true;
         if (post_gate) {
           this->post_gate_tx_ready_event_ = true;
         }
@@ -7805,6 +7860,11 @@ void JuraComponent::advance_after_stats_reject_(uint32_t now) {
 
 void JuraComponent::advance_after_stats_timeout_(uint32_t now) {
   switch (this->xml_state_) {
+    case XmlPollState::WAIT_REPRIME_TR37:
+      this->post_gate_reprime_required_for_next_stats_ = true;
+      this->finish_stats_cycle_(now, "tr37_reprime_failed");
+      return;
+
     case XmlPollState::WAIT_TS_LOCK:
       if (this->stats_inner_tx_required_ || this->xml_wait_for_ts_ack_) {
         this->xml_cycle_failed_ = true;
@@ -8174,6 +8234,9 @@ void JuraComponent::finish_stats_cycle_(uint32_t now, const char *reason) {
     this->coffee_maker_->connection->drain_serial_input_nonblocking();
   }
   this->live_db_status_after_stats_hold_until_ms_ = now + kLiveDbPollAfterStatsDelayMs;
+  if (this->stats_session_ready_ && this->stats_inner_tx_required_) {
+    this->post_gate_reprime_required_for_next_stats_ = true;
+  }
   if (this->live_db_status_next_poll_ms_ == 0 ||
       static_cast<int32_t>(this->live_db_status_next_poll_ms_ - this->live_db_status_after_stats_hold_until_ms_) < 0) {
     this->live_db_status_next_poll_ms_ = this->live_db_status_after_stats_hold_until_ms_;
