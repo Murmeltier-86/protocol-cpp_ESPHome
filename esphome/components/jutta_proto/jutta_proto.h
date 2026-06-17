@@ -450,6 +450,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void finish_debug_command_(uint32_t now, const char *result);
   void log_status_forensics_frame_(const std::string &raw, const char *source);
   void log_status_forensics_decoded_(const std::string &line, const char *source, const char *table_name);
+  bool handle_live_db_transport_frame_(const std::string &response);
   void publish_live_db_status_raw_(const std::string &response, const char *parser_branch);
   void publish_live_db_status_decoded_(const std::string &summary, const std::string &table_trace);
   void publish_text_if_changed_(text_sensor::TextSensor *sensor, std::string &last_value, const std::string &value);

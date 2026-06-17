@@ -641,6 +641,21 @@ bool is_db_ascii_control_frame(const std::string &response) {
   return !response.empty() && response.front() == '@';
 }
 
+bool is_live_poll_control_or_handshake_frame(const std::string &response) {
+  std::string lower = lower_trimmed_transport_payload(response);
+  if (lower.empty()) {
+    return false;
+  }
+  static const char *const kPrefixFrames[] = {"@t0", "@t1", "@t2", "@t3", "@ts", "@tr", "@tg",
+                                             "ty:"};
+  for (const char *prefix : kPrefixFrames) {
+    if (lower.rfind(prefix, 0) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const char *live_db_status_candidate_reject_reason(const std::string &response) {
   if (response.size() < 3) {
     return "invalid_short_frame";
@@ -2062,23 +2077,7 @@ void JuraComponent::handle_decoded_response_(const std::string &response, const 
   }
 
   if (parser_branch != nullptr && std::string(parser_branch) == "db_frame") {
-    const char *reject_reason = live_db_status_candidate_reject_reason(response);
-    if (reject_reason != nullptr) {
-      if (std::string(reject_reason) == "ascii_control_frame") {
-        ESP_LOGD(TAG, "live_poll_skip reason=ascii_fragment ascii=\"%s\"",
-                 transport_payload_log_text(response).c_str());
-      } else if (this->live_db_status_debug_ || this->status_debug_) {
-        ESP_LOGD(TAG, "live_poll_skip_decode reason=%s len=%u hex=%s", reject_reason,
-                 static_cast<unsigned>(response.size()), compact_hex_string(response, 64).c_str());
-      }
-      return;
-    }
-    this->publish_live_db_status_raw_(response, parser_branch);
-    if (this->live_db_status_debug_ || this->status_debug_) {
-      ESP_LOGD(TAG, "live_poll_skip_decode reason=unverified_db_raw hex=\"%s\"",
-               compact_hex_string(response, 64).c_str());
-      ESP_LOGD(TAG, "live_poll_experimental_raw_only");
-    }
+    this->handle_live_db_transport_frame_(response);
     return;
   }
 }
@@ -2090,6 +2089,75 @@ void JuraComponent::publish_text_if_changed_(text_sensor::TextSensor *sensor, st
   }
   last_value = value;
   sensor->publish_state(value);
+}
+
+bool JuraComponent::handle_live_db_transport_frame_(const std::string &response) {
+  if (response.empty() || static_cast<uint8_t>(response.front()) != 0x26) {
+    ESP_LOGD(TAG, "live_poll_skip reason=non_frame_fragment len=%u hex=%s",
+             static_cast<unsigned>(response.size()), compact_hex_string(response, 64).c_str());
+    return false;
+  }
+
+  std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(response);
+  const InnerTransportDecodeResult *selected = nullptr;
+  for (const auto &candidate : candidates) {
+    if (candidate.payload.empty() || !is_printable_transport_payload(candidate.payload)) {
+      continue;
+    }
+    std::string lower = lower_trimmed_transport_payload(candidate.payload);
+    if (lower.rfind("@tf", 0) == 0 || lower.rfind("@tv", 0) == 0 ||
+        is_live_poll_control_or_handshake_frame(candidate.payload)) {
+      selected = &candidate;
+      break;
+    }
+    if (selected == nullptr) {
+      selected = &candidate;
+    }
+  }
+
+  if (selected == nullptr || selected->payload.empty() || !is_printable_transport_payload(selected->payload)) {
+    if (this->live_db_status_debug_ || this->status_debug_) {
+      ESP_LOGD(TAG, "live_poll_skip reason=unknown_26_frame len=%u hex=%s",
+               static_cast<unsigned>(response.size()), compact_hex_string(response, 64).c_str());
+    }
+    this->publish_live_db_status_raw_(response, "unknown_26_frame");
+    return false;
+  }
+
+  const std::string decoded = selected->payload;
+  const std::string lower = lower_trimmed_transport_payload(decoded);
+  if (this->live_db_status_debug_ || this->status_debug_) {
+    ESP_LOGD(TAG, "live_poll_decoded ascii=\"%s\"", transport_payload_log_text(decoded).c_str());
+  }
+
+  if (lower.rfind("@tf", 0) == 0) {
+    if (this->publish_tf_status_(decoded)) {
+      this->publish_last_command_result_("tf_status");
+      return true;
+    }
+    return false;
+  }
+
+  if (lower.rfind("@tv", 0) == 0) {
+    if (this->handle_tv_progress_(decoded)) {
+      this->publish_last_command_result_("tv_progress");
+      return true;
+    }
+    return false;
+  }
+
+  if (is_live_poll_control_or_handshake_frame(decoded)) {
+    ESP_LOGD(TAG, "live_poll_skip reason=control_or_handshake_frame ascii=\"%s\"",
+             transport_payload_log_text(decoded).c_str());
+    return false;
+  }
+
+  if (this->live_db_status_debug_ || this->status_debug_) {
+    ESP_LOGD(TAG, "live_poll_skip reason=unknown_26_frame ascii=\"%s\" hex=%s",
+             transport_payload_log_text(decoded).c_str(), compact_hex_string(response, 64).c_str());
+  }
+  this->publish_live_db_status_raw_(response, "unknown_26_frame");
+  return false;
 }
 
 void JuraComponent::publish_live_db_status_raw_(const std::string &response, const char *parser_branch) {
