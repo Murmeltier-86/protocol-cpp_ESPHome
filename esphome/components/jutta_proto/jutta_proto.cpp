@@ -43,6 +43,7 @@ constexpr uint32_t kInterCmdGapMs = 250;
 constexpr uint32_t kStatsNextCommandDelayMs = 50;
 constexpr uint32_t kXmlQuietMs = 120;
 constexpr uint32_t kCycleSleepMs = 2000;
+constexpr uint32_t kStatsRetryMs = 30000;
 constexpr uint32_t kLiveDbPollAfterStatsDelayMs = 5000;
 constexpr uint32_t kLiveDbPollStatsGuardMs = 2000;
 constexpr uint8_t kTr32PageCount = 16;
@@ -4075,6 +4076,7 @@ bool JuraComponent::decode_field_value_(const std::vector<uint8_t> &decoded, con
 }
 
 void JuraComponent::start_new_xml_cycle_(uint32_t now) {
+  ++this->xml_stats_cycle_id_;
   this->xml_cycle_started_ms_ = now;
   this->xml_stats_.clear();
   this->xml_rx_buffer_.clear();
@@ -4555,8 +4557,17 @@ void JuraComponent::handle_xml_failure_(XmlPollState wait_state, bool is_timeout
   if (next_state == XmlPollState::SLEEP) {
     uint32_t sleep = std::max(this->xml_poll_interval_ms_, kCycleSleepMs);
     uint32_t deadline = now + sleep;
+    uint32_t old_due_ms = this->xml_next_poll_;
     this->xml_deadline_ms_ = deadline;
     this->xml_next_poll_ = deadline;
+    this->xml_next_poll_is_retry_ = true;
+    if (old_due_ms != 0 && old_due_ms != this->xml_next_poll_) {
+      ESP_LOGD(TAG, "stats_schedule_override old_due_ms=%u new_due_ms=%u reason=retry_exhausted",
+               static_cast<unsigned>(old_due_ms), static_cast<unsigned>(this->xml_next_poll_));
+    }
+    ESP_LOGD(TAG, "stats_schedule_set result=failed cycle_id=%u next_retry_ms=%u due_at_ms=%u",
+             static_cast<unsigned>(this->xml_stats_cycle_id_), static_cast<unsigned>(sleep),
+             static_cast<unsigned>(this->xml_next_poll_));
     this->transition_to_state_(XmlPollState::SLEEP, now);
   } else {
     this->transition_to_state_(next_state, now, kInterCmdGapMs);
@@ -4661,13 +4672,37 @@ void JuraComponent::publish_single_stat_(const std::string &name, double value, 
 
   float tolerance = (meta.kind == XmlSensorKind::Counter) ? XML_COUNTER_TOLERANCE : XML_MEASUREMENT_TOLERANCE;
   if (meta.has_last_value && std::fabs(publish_value - meta.last_value) < tolerance) {
+    bool source_is_stats = this->xml_last_command_.rfind("@TR:32", 0) == 0 ||
+                           this->xml_last_command_.rfind("@TG:43", 0) == 0 ||
+                           this->xml_last_command_.rfind("@TG:C0", 0) == 0;
+    std::string value_text = format_numeric_text(static_cast<double>(publish_value));
+    std::string old_text = format_numeric_text(static_cast<double>(meta.last_value));
+    ESP_LOGD(TAG,
+             "xml_publish_state field=%s value=%s old=%s changed=NO source=%s%s cycle_id=%u cmd=%s page=%02X",
+             name.c_str(), value_text.c_str(), old_text.c_str(), source_is_stats ? "stats" : "outside_stats",
+             source_is_stats ? "" : " ERROR", static_cast<unsigned>(this->xml_stats_cycle_id_),
+             this->xml_last_command_.empty() ? "none" : this->xml_last_command_.c_str(),
+             static_cast<unsigned>(this->xml_tr32_page_));
     return;
   }
 
+  bool had_old_value = meta.has_last_value;
+  float old_value = meta.last_value;
   sensor->publish_state(publish_value);
   meta.last_value = publish_value;
   meta.has_last_value = true;
   meta.last_update_ms = now;
+  bool source_is_stats = this->xml_last_command_.rfind("@TR:32", 0) == 0 ||
+                         this->xml_last_command_.rfind("@TG:43", 0) == 0 ||
+                         this->xml_last_command_.rfind("@TG:C0", 0) == 0;
+  std::string value_text = format_numeric_text(static_cast<double>(publish_value));
+  std::string old_text = had_old_value ? format_numeric_text(static_cast<double>(old_value)) : "none";
+  ESP_LOGD(TAG,
+           "xml_publish_state field=%s value=%s old=%s changed=YES source=%s%s cycle_id=%u cmd=%s page=%02X",
+           name.c_str(), value_text.c_str(), old_text.c_str(), source_is_stats ? "stats" : "outside_stats",
+           source_is_stats ? "" : " ERROR", static_cast<unsigned>(this->xml_stats_cycle_id_),
+           this->xml_last_command_.empty() ? "none" : this->xml_last_command_.c_str(),
+           static_cast<unsigned>(this->xml_tr32_page_));
   if (meta.kind == XmlSensorKind::Counter) {
     ESP_LOGD(TAG, "XML publish_state: %s=%u", name.c_str(),
              static_cast<unsigned>(std::lround(static_cast<double>(publish_value))));
@@ -4867,6 +4902,10 @@ void JuraComponent::reset_xml_poll_state_() {
   this->xml_rx_buffer_.clear();
   this->xml_stats_.clear();
   this->xml_next_poll_ = esphome::millis() + this->xml_startup_delay_ms_;
+  this->xml_next_poll_is_retry_ = false;
+  ESP_LOGD(TAG, "stats_schedule_set result=startup cycle_id=%u next_poll_ms=%u due_at_ms=%u retry_ms=%u",
+           static_cast<unsigned>(this->xml_stats_cycle_id_), static_cast<unsigned>(this->xml_startup_delay_ms_),
+           static_cast<unsigned>(this->xml_next_poll_), static_cast<unsigned>(kStatsRetryMs));
   this->xml_retry_count_.fill(0);
   this->xml_invalid_len_seen_.fill(false);
   this->xml_last_invalid_len_.fill(0);
@@ -6330,6 +6369,10 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
       uint32_t sleep = std::max(this->xml_poll_interval_ms_, kCycleSleepMs);
       this->xml_deadline_ms_ = now + sleep;
       this->xml_next_poll_ = this->xml_deadline_ms_;
+      this->xml_next_poll_is_retry_ = false;
+      ESP_LOGD(TAG, "stats_schedule_set result=skipped_no_mapping cycle_id=%u next_poll_ms=%u due_at_ms=%u retry_ms=%u",
+               static_cast<unsigned>(this->xml_stats_cycle_id_), static_cast<unsigned>(sleep),
+               static_cast<unsigned>(this->xml_next_poll_), static_cast<unsigned>(kStatsRetryMs));
       this->transition_to_state_(XmlPollState::SLEEP, now);
       return;
     }
@@ -6338,7 +6381,14 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
       return;
     }
     this->start_new_xml_cycle_(now);
-    ESP_LOGD(TAG, "stats_cycle_start mode=%s inner_tx=%s ts_lock=%s",
+    const char *start_reason = this->xml_stats_cycle_id_ == 1
+                                   ? "boot_after_delay"
+                                   : (this->xml_next_poll_is_retry_ ? "retry_due" : "poll_interval_due");
+    ESP_LOGD(TAG,
+             "stats_cycle_start cycle_id=%u reason=%s now_ms=%u next_poll_due_ms=%u next_retry_due_ms=%u forced=NO "
+             "mode=%s inner_tx=%s ts_lock=%s",
+             static_cast<unsigned>(this->xml_stats_cycle_id_), start_reason, static_cast<unsigned>(now),
+             static_cast<unsigned>(this->xml_next_poll_), static_cast<unsigned>(this->xml_next_poll_),
              this->stats_session_ready_ && this->stats_inner_tx_required_ ? "post_gate" : "legacy",
              YESNO(this->stats_inner_tx_required_), YESNO(this->xml_stats_use_ts_lock_));
     if (this->xml_stats_reprime_tr37_before_cycle_ && this->stats_session_ready_ &&
@@ -6490,7 +6540,10 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         this->xml_deadline_ms_ = 0;
         this->xml_next_action_ms_ = 0;
         this->xml_state_ = XmlPollState::IDLE;
+        uint32_t old_due_ms = this->xml_next_poll_;
         this->xml_next_poll_ = now;
+        ESP_LOGD(TAG, "stats_schedule_override old_due_ms=%u new_due_ms=%u reason=sleep_elapsed",
+                 static_cast<unsigned>(old_due_ms), static_cast<unsigned>(this->xml_next_poll_));
         this->xml_inflight_ = false;
         this->xml_last_command_.clear();
         this->clear_db_transaction_(DbTransactionOwner::XML_POLL);
@@ -7571,6 +7624,10 @@ bool JuraComponent::handle_stats_line_(const std::string &line, uint32_t now) {
                  static_cast<unsigned>(now - this->xml_command_started_ms_),
                  static_cast<unsigned>(this->xml_command_frames_),
                  static_cast<unsigned>(this->xml_command_noise_frames_));
+        this->end_xml_transaction_("tr37_reprime_done");
+        this->clear_db_transaction_(DbTransactionOwner::XML_POLL);
+        this->xml_last_command_.clear();
+        this->xml_expected_prefix_.clear();
         ESP_LOGD(TAG, "stats_reprime_tr37_done");
         ESP_LOGD(TAG, "stats_cycle_start_after_reprime");
         this->transition_to_state_(this->xml_stats_use_ts_lock_ ? XmlPollState::TS_LOCK : XmlPollState::TR32_PAGE, now,
@@ -8207,6 +8264,9 @@ void JuraComponent::finish_stats_cycle_(uint32_t now, const char *reason) {
                 (!tg43_expected || this->xml_tg43_ok_) &&
                 (!tgc0_expected || this->xml_tgc0_ok_);
   const char *result = all_ok ? "success" : (any_ok ? "partial" : "failed");
+  if (this->db_transaction_owner_ == DbTransactionOwner::XML_POLL) {
+    this->xml_transaction_cmd_ = "stats_cycle";
+  }
   this->end_xml_transaction_(end_reason);
   this->clear_db_transaction_(DbTransactionOwner::NONE);
   this->xml_inflight_ = false;
@@ -8242,17 +8302,39 @@ void JuraComponent::finish_stats_cycle_(uint32_t now, const char *reason) {
     this->live_db_status_next_poll_ms_ = this->live_db_status_after_stats_hold_until_ms_;
   }
   this->live_db_status_use_fallback_next_ = false;
-  uint32_t sleep = std::max(this->xml_poll_interval_ms_, kCycleSleepMs);
+  uint32_t next_poll_ms = std::max(this->xml_poll_interval_ms_, kCycleSleepMs);
+  uint32_t next_retry_ms = std::max(kStatsRetryMs, kCycleSleepMs);
+  uint32_t sleep = all_ok ? next_poll_ms : next_retry_ms;
+  uint32_t old_due_ms = this->xml_next_poll_;
   this->transition_to_state_(XmlPollState::SLEEP, now);
   this->xml_deadline_ms_ = now + sleep;
   this->xml_next_poll_ = this->xml_deadline_ms_;
-  if (!any_ok) {
+  this->xml_next_poll_is_retry_ = !all_ok;
+  if (old_due_ms != 0 && old_due_ms != this->xml_next_poll_) {
+    ESP_LOGD(TAG, "stats_schedule_override old_due_ms=%u new_due_ms=%u reason=cycle_end_%s",
+             static_cast<unsigned>(old_due_ms), static_cast<unsigned>(this->xml_next_poll_),
+             all_ok ? "success" : "retry");
+  }
+  if (all_ok) {
+    ESP_LOGD(TAG, "stats_cycle_end result=success pages_ok=%u tg43_ok=%s tgc0_ok=%s next_poll_ms=%u retry_ms=%u",
+             static_cast<unsigned>(this->xml_tr32_pages_ok_), YESNO(this->xml_tg43_ok_), YESNO(this->xml_tgc0_ok_),
+             static_cast<unsigned>(next_poll_ms), static_cast<unsigned>(next_retry_ms));
+    ESP_LOGD(TAG, "stats_schedule_set result=success cycle_id=%u next_poll_ms=%u due_at_ms=%u retry_ms=%u",
+             static_cast<unsigned>(this->xml_stats_cycle_id_), static_cast<unsigned>(next_poll_ms),
+             static_cast<unsigned>(this->xml_next_poll_), static_cast<unsigned>(next_retry_ms));
+  } else if (!any_ok) {
     ESP_LOGD(TAG, "stats_cycle_end result=failed reason=no_valid_tr32_pages next_retry_ms=%u",
-             static_cast<unsigned>(sleep));
+             static_cast<unsigned>(next_retry_ms));
+    ESP_LOGD(TAG, "stats_schedule_set result=failed cycle_id=%u next_retry_ms=%u due_at_ms=%u",
+             static_cast<unsigned>(this->xml_stats_cycle_id_), static_cast<unsigned>(next_retry_ms),
+             static_cast<unsigned>(this->xml_next_poll_));
   } else {
     ESP_LOGD(TAG, "stats_cycle_end result=%s pages_ok=%u tg43_ok=%s tgc0_ok=%s next_retry_ms=%u", result,
              static_cast<unsigned>(this->xml_tr32_pages_ok_), YESNO(this->xml_tg43_ok_), YESNO(this->xml_tgc0_ok_),
-             static_cast<unsigned>(sleep));
+             static_cast<unsigned>(next_retry_ms));
+    ESP_LOGD(TAG, "stats_schedule_set result=%s cycle_id=%u next_retry_ms=%u due_at_ms=%u", result,
+             static_cast<unsigned>(this->xml_stats_cycle_id_), static_cast<unsigned>(next_retry_ms),
+             static_cast<unsigned>(this->xml_next_poll_));
   }
   ESP_LOGD(TAG, "stats_cycle_perf duration_ms=%u pages_ok=%u tg43_ok=%s tgc0_ok=%s",
            static_cast<unsigned>(now - this->xml_cycle_started_ms_),

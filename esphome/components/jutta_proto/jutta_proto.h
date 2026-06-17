@@ -678,7 +678,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_publish_unstable_{false};
   bool xml_wait_for_ts_ack_{false};
   bool xml_stats_use_ts_lock_{false};
-  bool xml_stats_reprime_tr37_before_cycle_{true};
+  bool xml_stats_reprime_tr37_before_cycle_{false};
   bool xml_debug_compact_{true};
   bool xml_decode_inner_transport_{true};
   bool xml_inner_decode_trace_{false};
@@ -750,6 +750,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   const char *xml_mapping_data_{nullptr};
   size_t xml_mapping_length_{0};
   uint32_t xml_next_poll_{0};
+  uint32_t xml_stats_cycle_id_{0};
+  bool xml_next_poll_is_retry_{false};
   XmlPollState xml_state_{XmlPollState::IDLE};
   uint32_t xml_deadline_ms_{0};
   uint32_t xml_next_action_ms_{0};
