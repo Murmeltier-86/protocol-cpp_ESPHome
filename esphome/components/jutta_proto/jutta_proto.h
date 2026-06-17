@@ -264,6 +264,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_xml_stats_reprime_tr37_before_cycle(bool enabled) {
     this->xml_stats_reprime_tr37_before_cycle_ = enabled;
   }
+  void set_xml_stats_handshake_before_cycle(bool enabled) { this->xml_stats_handshake_before_cycle_ = enabled; }
   void set_xml_debug_compact(bool enabled) { this->xml_debug_compact_ = enabled; }
   void set_xml_decode_inner_transport(bool enabled) { this->xml_decode_inner_transport_ = enabled; }
   void set_xml_inner_decode_trace(bool enabled) { this->xml_inner_decode_trace_ = enabled; }
@@ -481,6 +482,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void start_new_xml_cycle_(uint32_t now);
   enum class XmlPollState {
     IDLE,
+    STATS_HANDSHAKE,
     REPRIME_TR37,
     WAIT_REPRIME_TR37,
     TS_LOCK,
@@ -503,7 +505,16 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     PARSE_TGC0,
     SLEEP
   };
-  enum class DbTransactionOwner { NONE, XML_POLL, MACHINE_XML, LIVE_DB_STATUS, STATUS_PROBE, BLE2_PROBE, DEBUG_COMMAND };
+  enum class DbTransactionOwner {
+    NONE,
+    XML_POLL,
+    MACHINE_XML,
+    LIVE_DB_STATUS,
+    STATS_HANDSHAKE,
+    STATUS_PROBE,
+    BLE2_PROBE,
+    DEBUG_COMMAND
+  };
   size_t xml_command_index_(XmlPollState state) const;
   const char *db_transaction_owner_name_(DbTransactionOwner owner) const;
   bool begin_xml_transaction_(const char *command, uint32_t now);
@@ -680,6 +691,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool xml_wait_for_ts_ack_{false};
   bool xml_stats_use_ts_lock_{false};
   bool xml_stats_reprime_tr37_before_cycle_{false};
+  bool xml_stats_handshake_before_cycle_{true};
   bool xml_debug_compact_{true};
   bool xml_decode_inner_transport_{true};
   bool xml_inner_decode_trace_{false};
@@ -701,6 +713,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool stats_inner_tx_required_{false};
   bool post_gate_tx_ready_event_{true};
   bool post_gate_reprime_required_for_next_stats_{true};
+  bool stats_handshake_before_cycle_active_{false};
   uint16_t startup_t2_word_{0};
   std::string dongle_machine_identity_{};
   std::string dongle_tr_payload_{};
@@ -716,6 +729,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool dongle_startup_t3_seen_during_quiet_{false};
   bool dongle_startup_t3_seen_while_waiting_tr37_{false};
   bool dongle_startup_quiet_then_prep_tr37_{true};
+  std::string dongle_startup_last_error_{};
   uint8_t dongle_inner_tx_key_counter_{0x42};
   bool xml_run_tablet_start_sequence_{false};
   std::string xml_tablet_sequence_mode_{"minimal"};

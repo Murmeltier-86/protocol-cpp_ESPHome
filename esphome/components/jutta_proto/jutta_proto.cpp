@@ -1712,6 +1712,7 @@ void JuraComponent::dump_config() {
                 static_cast<unsigned>(this->xml_startup_delay_ms_));
   ESP_LOGCONFIG(TAG, "  XML publish unstable counters: %s", YESNO(this->xml_publish_unstable_));
   ESP_LOGCONFIG(TAG, "  XML stats TS lock: %s", YESNO(this->xml_stats_use_ts_lock_));
+  ESP_LOGCONFIG(TAG, "  XML stats handshake before cycle: %s", YESNO(this->xml_stats_handshake_before_cycle_));
   ESP_LOGCONFIG(TAG, "  XML compact debug: %s", YESNO(this->xml_debug_compact_));
   ESP_LOGCONFIG(TAG, "  XML inner transport decode: %s", YESNO(this->xml_decode_inner_transport_));
   ESP_LOGCONFIG(TAG, "  XML inner decode trace: %s", YESNO(this->xml_inner_decode_trace_));
@@ -4157,6 +4158,8 @@ const char *JuraComponent::db_transaction_owner_name_(DbTransactionOwner owner) 
       return "machine_xml";
     case DbTransactionOwner::LIVE_DB_STATUS:
       return "live_db_status";
+    case DbTransactionOwner::STATS_HANDSHAKE:
+      return "stats_handshake";
     case DbTransactionOwner::STATUS_PROBE:
       return "status_probe";
     case DbTransactionOwner::BLE2_PROBE:
@@ -4890,6 +4893,7 @@ void JuraComponent::reset_xml_poll_state_() {
   this->xml_stats_rx_logged_ = false;
   this->xml_stats_binary_response_ = false;
   this->xml_tr32_page_ = 0;
+  this->stats_handshake_before_cycle_active_ = false;
   this->xml_binary_probe_prev_tr32_payload_.clear();
   this->xml_binary_probe_prev_tr32_page_ = 0;
   this->xml_binary_probe_has_prev_tr32_ = false;
@@ -4931,6 +4935,7 @@ void JuraComponent::reset_xml_poll_state_() {
   this->stats_session_ready_ = !this->xml_dongle_startup_;
   this->stats_inner_tx_required_ = false;
   this->post_gate_reprime_required_for_next_stats_ = true;
+  this->stats_handshake_before_cycle_active_ = false;
   this->dongle_startup_state_ = DongleStartupState::IDLE;
   this->dongle_startup_rx_buffer_.clear();
       this->dongle_startup_deadline_ms_ = 0;
@@ -4944,6 +4949,7 @@ void JuraComponent::reset_xml_poll_state_() {
       this->dongle_startup_t3_seen_while_waiting_tr37_ = false;
       this->dongle_startup_quiet_then_prep_tr37_ = true;
       this->dongle_tr_payload_.clear();
+      this->dongle_startup_last_error_.clear();
 }
 
 void JuraComponent::process_xml_polling() {
@@ -4976,7 +4982,7 @@ void JuraComponent::process_xml_polling() {
     ESP_LOGD(TAG, "XML DB polling skipped while Machine-XML transaction is active");
     return;
   }
-  if (this->xml_dongle_startup_ && !this->stats_session_ready_) {
+  if (this->xml_dongle_startup_ && !this->stats_session_ready_ && !this->stats_handshake_before_cycle_active_) {
     this->process_dongle_startup_(now);
     return;
   }
@@ -5712,6 +5718,10 @@ void JuraComponent::transition_dongle_startup_(DongleStartupState state, uint32_
     ESP_LOGD(TAG, "dongle_startup_state old=%s new=%s events=0x%02X",
              this->dongle_startup_state_name_(this->dongle_startup_state_),
              this->dongle_startup_state_name_(state), static_cast<unsigned>(this->dongle_events_));
+    if (this->stats_handshake_before_cycle_active_) {
+      ESP_LOGD(TAG, "stats_handshake_step cycle_id=%u step=%s",
+               static_cast<unsigned>(this->xml_stats_cycle_id_), this->dongle_startup_state_name_(state));
+    }
   }
   this->dongle_startup_state_ = state;
   this->dongle_startup_deadline_ms_ = 0;
@@ -5783,6 +5793,7 @@ bool JuraComponent::write_inner_uart0_command_(const std::string &command, uint3
 }
 
 void JuraComponent::fail_dongle_startup_(uint32_t now, const char *reason) {
+  this->dongle_startup_last_error_ = reason != nullptr ? reason : "unknown";
   this->stats_session_ready_ = false;
   this->stats_inner_tx_required_ = false;
   this->post_gate_tx_ready_event_ = true;
@@ -6397,6 +6408,27 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
              static_cast<unsigned>(this->xml_next_poll_), static_cast<unsigned>(this->xml_next_poll_),
              this->stats_session_ready_ && this->stats_inner_tx_required_ ? "post_gate" : "legacy",
              YESNO(this->stats_inner_tx_required_), YESNO(this->xml_stats_use_ts_lock_));
+    if (this->xml_stats_handshake_before_cycle_ && this->xml_dongle_startup_) {
+      if (this->db_transaction_owner_ != DbTransactionOwner::NONE) {
+        ESP_LOGD(TAG, "stats_cycle_abort reason=owner_active owner=%s",
+                 this->db_transaction_owner_name_(this->db_transaction_owner_));
+        this->xml_cycle_failed_ = true;
+        this->finish_stats_cycle_(now, "owner_active_before_stats_handshake");
+        return;
+      }
+      this->stats_handshake_before_cycle_active_ = true;
+      this->db_transaction_owner_ = DbTransactionOwner::STATS_HANDSHAKE;
+      this->stats_session_ready_ = false;
+      this->stats_inner_tx_required_ = false;
+      this->post_gate_tx_ready_event_ = true;
+      this->dongle_startup_state_ = DongleStartupState::IDLE;
+      this->dongle_startup_next_retry_ms_ = 0;
+      this->dongle_startup_rx_buffer_.clear();
+      this->dongle_startup_last_error_.clear();
+      ESP_LOGD(TAG, "stats_handshake_begin cycle_id=%u", static_cast<unsigned>(this->xml_stats_cycle_id_));
+      this->transition_to_state_(XmlPollState::STATS_HANDSHAKE, now);
+      return;
+    }
     if (this->xml_stats_reprime_tr37_before_cycle_ && this->stats_session_ready_ &&
         this->stats_inner_tx_required_ && this->post_gate_reprime_required_for_next_stats_) {
       this->transition_to_state_(XmlPollState::REPRIME_TR37, now);
@@ -6410,6 +6442,30 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
   }
 
   switch (this->xml_state_) {
+    case XmlPollState::STATS_HANDSHAKE:
+      if (this->process_dongle_startup_(now)) {
+        ESP_LOGD(TAG, "stats_handshake_done cycle_id=%u events=0x%02X post_gate=%s",
+                 static_cast<unsigned>(this->xml_stats_cycle_id_), static_cast<unsigned>(this->dongle_events_),
+                 YESNO(this->stats_session_ready_ && this->stats_inner_tx_required_));
+        this->stats_handshake_before_cycle_active_ = false;
+        this->clear_db_transaction_(DbTransactionOwner::STATS_HANDSHAKE);
+        ESP_LOGD(TAG, "stats_cycle_start_after_handshake cycle_id=%u",
+                 static_cast<unsigned>(this->xml_stats_cycle_id_));
+        this->transition_to_state_(this->xml_stats_use_ts_lock_ ? XmlPollState::TS_LOCK : XmlPollState::TR32_PAGE,
+                                   now, kStatsNextCommandDelayMs);
+        return;
+      }
+      if (this->dongle_startup_state_ == DongleStartupState::FAILED) {
+        ESP_LOGD(TAG, "stats_handshake_failed step=%s reason=%s",
+                 this->dongle_startup_state_name_(this->dongle_startup_state_),
+                 this->dongle_startup_last_error_.empty() ? "unknown" : this->dongle_startup_last_error_.c_str());
+        ESP_LOGD(TAG, "stats_cycle_abort reason=handshake_failed");
+        this->stats_handshake_before_cycle_active_ = false;
+        this->clear_db_transaction_(DbTransactionOwner::STATS_HANDSHAKE);
+        this->xml_cycle_failed_ = true;
+        this->finish_stats_cycle_(now, "handshake_failed");
+      }
+      return;
     case XmlPollState::REPRIME_TR37:
       if (!this->xml_inflight_) {
         ESP_LOGD(TAG, "stats_reprime_tr37_begin");
@@ -6577,6 +6633,7 @@ bool JuraComponent::xml_state_has_mapping_(XmlPollState state) const {
       return !this->xml_mapping_.tgc0.empty();
     case XmlPollState::TS_LOCK:
     case XmlPollState::WAIT_TS_LOCK:
+    case XmlPollState::STATS_HANDSHAKE:
     case XmlPollState::REPRIME_TR37:
     case XmlPollState::WAIT_REPRIME_TR37:
     case XmlPollState::TS_UNLOCK:
@@ -6605,6 +6662,8 @@ const char *JuraComponent::xml_state_command_(XmlPollState state) const {
     case XmlPollState::TS_LOCK:
     case XmlPollState::WAIT_TS_LOCK:
       return "@TS:01";
+    case XmlPollState::STATS_HANDSHAKE:
+      return "stats_handshake";
     case XmlPollState::REPRIME_TR37:
     case XmlPollState::WAIT_REPRIME_TR37:
       return "@TR:37";
@@ -6638,6 +6697,8 @@ const char *JuraComponent::xml_state_label_(XmlPollState state) const {
     case XmlPollState::TS_LOCK:
     case XmlPollState::WAIT_TS_LOCK:
       return "TS_LOCK";
+    case XmlPollState::STATS_HANDSHAKE:
+      return "STATS_HANDSHAKE";
     case XmlPollState::REPRIME_TR37:
     case XmlPollState::WAIT_REPRIME_TR37:
       return "REPRIME_TR37";
@@ -8278,6 +8339,7 @@ void JuraComponent::finish_stats_cycle_(uint32_t now, const char *reason) {
   }
   this->end_xml_transaction_(end_reason);
   this->clear_db_transaction_(DbTransactionOwner::NONE);
+  this->stats_handshake_before_cycle_active_ = false;
   this->xml_inflight_ = false;
   this->post_gate_tx_ready_event_ = true;
   this->xml_stats_locked_ = false;
