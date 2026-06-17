@@ -257,6 +257,37 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_debug_uart_frames(bool enabled) { this->debug_uart_frames_ = enabled; }
   void set_enable_machine_xml_poll(bool enabled) { this->enable_machine_xml_poll_ = enabled; }
   void set_enable_xml_poll(bool enabled) { this->enable_xml_poll_ = enabled; }
+  void set_xml_stats_enabled(bool enabled) {
+    this->xml_stats_enabled_ = enabled;
+    if (!enabled) {
+      return;
+    }
+    this->enable_xml_poll_ = true;
+    this->enable_machine_xml_poll_ = false;
+    this->xml_dongle_startup_ = true;
+    this->xml_dongle_startup_mode_ = "full";
+    this->xml_stats_use_ts_lock_ = true;
+    this->xml_stats_reprime_tr37_before_cycle_ = false;
+    this->xml_stats_handshake_before_cycle_ = true;
+    this->xml_decode_inner_transport_ = true;
+    this->xml_publish_unstable_ = false;
+    this->xml_command_probe_ = false;
+    this->xml_session_probe_ = false;
+    this->xml_transport_selftest_ = false;
+    this->xml_binary_probe_ = false;
+    this->xml_key_probe_ = false;
+    this->xml_deep_debug_ = false;
+    this->xml_inner_decode_trace_ = false;
+    this->xml_run_tablet_start_sequence_ = false;
+  }
+  void set_xml_stats_debug(bool enabled) {
+    this->xml_stats_debug_ = enabled;
+    if (enabled) {
+      this->xml_dongle_startup_debug_ = true;
+      this->xml_dongle_inner_tx_debug_ = true;
+      this->xml_inner_decode_trace_ = true;
+    }
+  }
   void set_xml_publish_unstable(bool enabled) { this->xml_publish_unstable_ = enabled; }
   void set_xml_counter_max(uint32_t max_value) { this->xml_counter_max_ = max_value; }
   void set_xml_wait_for_ts_ack(bool enabled) { this->xml_wait_for_ts_ack_ = enabled; }
@@ -687,6 +718,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
 
   bool enable_machine_xml_poll_{true};
   bool enable_xml_poll_{false};
+  bool xml_stats_enabled_{false};
+  bool xml_stats_debug_{false};
   bool xml_publish_unstable_{false};
   bool xml_wait_for_ts_ack_{false};
   bool xml_stats_use_ts_lock_{false};
@@ -759,7 +792,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string xml_session_probe_last_wait_reason_{};
   uint8_t xml_session_probe_timeouts_{0};
   uint32_t xml_counter_max_{20000};
-  uint32_t xml_poll_interval_ms_{30000};
+  uint32_t xml_poll_interval_ms_{300000};
   uint32_t xml_startup_delay_ms_{10000};
   std::string xml_mapping_path_{"embedded"};
   const char *xml_mapping_data_{nullptr};
@@ -767,6 +800,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t xml_next_poll_{0};
   uint32_t xml_stats_cycle_id_{0};
   bool xml_next_poll_is_retry_{false};
+  uint16_t xml_stats_changed_count_{0};
+  std::string xml_stats_changed_fields_{};
   XmlPollState xml_state_{XmlPollState::IDLE};
   uint32_t xml_deadline_ms_{0};
   uint32_t xml_next_action_ms_{0};

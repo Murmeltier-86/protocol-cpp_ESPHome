@@ -51,8 +51,10 @@ CONF_TF_ACTIVE_RF_FILTER = "tf_active_rf_filter"
 CONF_TF_STATUS_BITS = "tf_status_bits"
 CONF_ENABLE_MACHINE_XML_POLL = "enable_machine_xml_poll"
 CONF_ENABLE_XML_POLL = "enable_xml_poll"
+CONF_XML_STATS_ENABLED = "xml_stats_enabled"
 CONF_XML_MAPPING_PATH = "xml_mapping_path"
 CONF_XML_POLL_INTERVAL_MS = "xml_poll_interval_ms"
+CONF_XML_STATS_DEBUG = "xml_stats_debug"
 CONF_XML_STARTUP_DELAY_MS = "xml_startup_delay_ms"
 CONF_XML_PUBLISH_UNSTABLE = "xml_publish_unstable"
 CONF_XML_WAIT_FOR_TS_ACK = "xml_wait_for_ts_ack"
@@ -223,11 +225,13 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_TF_ACTIVE_RF_FILTER): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_TF_STATUS_BITS): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_ENABLE_MACHINE_XML_POLL): cv.boolean,
+            cv.Optional(CONF_XML_STATS_ENABLED, default=False): cv.boolean,
             cv.Optional(CONF_ENABLE_XML_POLL, default=False): cv.boolean,
             cv.Optional(CONF_XML_MAPPING_PATH, default="embedded"): cv.string,
-            cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=30000): cv.All(
+            cv.Optional(CONF_XML_POLL_INTERVAL_MS, default=300000): cv.All(
                 cv.positive_int, cv.Range(min=25000)
             ),
+            cv.Optional(CONF_XML_STATS_DEBUG, default=False): cv.boolean,
             cv.Optional(CONF_XML_STARTUP_DELAY_MS, default=10000): cv.All(
                 cv.positive_int, cv.Range(min=10000)
             ),
@@ -560,6 +564,8 @@ async def to_code(config):
     )
     cg.add(var.set_xml_poll_interval_ms(config[CONF_XML_POLL_INTERVAL_MS]))
     cg.add(var.set_xml_startup_delay(config[CONF_XML_STARTUP_DELAY_MS]))
+    cg.add(var.set_xml_stats_enabled(config[CONF_XML_STATS_ENABLED]))
+    cg.add(var.set_xml_stats_debug(config[CONF_XML_STATS_DEBUG]))
 
     if CONF_MACHINE_DATA in config:
         machine_sensor = await text_sensor.new_text_sensor(config[CONF_MACHINE_DATA])
