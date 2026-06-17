@@ -314,7 +314,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     this->xml_mapping_data_ = data;
     this->xml_mapping_length_ = length;
   }
-  void set_xml_poll_interval(uint32_t interval_ms) { this->xml_poll_interval_ms_ = interval_ms; }
+  void set_xml_poll_interval(uint32_t interval_ms) { this->set_xml_poll_interval_ms(interval_ms); }
+  void set_xml_poll_interval_ms(uint32_t interval_ms) { this->xml_poll_interval_ms_ = interval_ms; }
   void set_xml_startup_delay(uint32_t delay_ms) { this->xml_startup_delay_ms_ = delay_ms; }
   void add_configured_xml_sensor(const std::string &field, sensor::Sensor *sensor);
   void register_setting_sensor(const std::string &id, sensor::Sensor *sensor);

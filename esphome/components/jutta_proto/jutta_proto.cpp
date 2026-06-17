@@ -1707,6 +1707,9 @@ void JuraComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  XML mapping Quelle: %s", this->xml_mapping_path_.c_str());
   ESP_LOGCONFIG(TAG, "  XML poll interval: %u ms", static_cast<unsigned>(this->xml_poll_interval_ms_));
   ESP_LOGCONFIG(TAG, "  XML startup delay: %u ms", static_cast<unsigned>(this->xml_startup_delay_ms_));
+  ESP_LOGCONFIG(TAG, "xml_config poll_interval_ms=%u retry_ms=%u startup_delay_ms=%u",
+                static_cast<unsigned>(this->xml_poll_interval_ms_), static_cast<unsigned>(kStatsRetryMs),
+                static_cast<unsigned>(this->xml_startup_delay_ms_));
   ESP_LOGCONFIG(TAG, "  XML publish unstable counters: %s", YESNO(this->xml_publish_unstable_));
   ESP_LOGCONFIG(TAG, "  XML stats TS lock: %s", YESNO(this->xml_stats_use_ts_lock_));
   ESP_LOGCONFIG(TAG, "  XML compact debug: %s", YESNO(this->xml_debug_compact_));
@@ -4562,8 +4565,11 @@ void JuraComponent::handle_xml_failure_(XmlPollState wait_state, bool is_timeout
     this->xml_next_poll_ = deadline;
     this->xml_next_poll_is_retry_ = true;
     if (old_due_ms != 0 && old_due_ms != this->xml_next_poll_) {
-      ESP_LOGD(TAG, "stats_schedule_override old_due_ms=%u new_due_ms=%u reason=retry_exhausted",
-               static_cast<unsigned>(old_due_ms), static_cast<unsigned>(this->xml_next_poll_));
+      ESP_LOGD(TAG,
+               "stats_schedule_override old_due_ms=%u new_due_ms=%u reason=retry_exhausted old_interval_ms=%u "
+               "new_interval_ms=%u",
+               static_cast<unsigned>(old_due_ms), static_cast<unsigned>(this->xml_next_poll_),
+               static_cast<unsigned>(this->xml_poll_interval_ms_), static_cast<unsigned>(sleep));
     }
     ESP_LOGD(TAG, "stats_schedule_set result=failed cycle_id=%u next_retry_ms=%u due_at_ms=%u",
              static_cast<unsigned>(this->xml_stats_cycle_id_), static_cast<unsigned>(sleep),
@@ -6542,8 +6548,11 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         this->xml_state_ = XmlPollState::IDLE;
         uint32_t old_due_ms = this->xml_next_poll_;
         this->xml_next_poll_ = now;
-        ESP_LOGD(TAG, "stats_schedule_override old_due_ms=%u new_due_ms=%u reason=sleep_elapsed",
-                 static_cast<unsigned>(old_due_ms), static_cast<unsigned>(this->xml_next_poll_));
+        ESP_LOGD(TAG,
+                 "stats_schedule_override old_due_ms=%u new_due_ms=%u reason=sleep_elapsed old_interval_ms=%u "
+                 "new_interval_ms=0",
+                 static_cast<unsigned>(old_due_ms), static_cast<unsigned>(this->xml_next_poll_),
+                 static_cast<unsigned>(this->xml_poll_interval_ms_));
         this->xml_inflight_ = false;
         this->xml_last_command_.clear();
         this->clear_db_transaction_(DbTransactionOwner::XML_POLL);
@@ -8311,9 +8320,12 @@ void JuraComponent::finish_stats_cycle_(uint32_t now, const char *reason) {
   this->xml_next_poll_ = this->xml_deadline_ms_;
   this->xml_next_poll_is_retry_ = !all_ok;
   if (old_due_ms != 0 && old_due_ms != this->xml_next_poll_) {
-    ESP_LOGD(TAG, "stats_schedule_override old_due_ms=%u new_due_ms=%u reason=cycle_end_%s",
+    ESP_LOGD(TAG,
+             "stats_schedule_override old_due_ms=%u new_due_ms=%u reason=cycle_end_%s old_interval_ms=%u "
+             "new_interval_ms=%u",
              static_cast<unsigned>(old_due_ms), static_cast<unsigned>(this->xml_next_poll_),
-             all_ok ? "success" : "retry");
+             all_ok ? "success" : "retry", static_cast<unsigned>(this->xml_poll_interval_ms_),
+             static_cast<unsigned>(sleep));
   }
   if (all_ok) {
     ESP_LOGD(TAG, "stats_cycle_end result=success pages_ok=%u tg43_ok=%s tgc0_ok=%s next_poll_ms=%u retry_ms=%u",

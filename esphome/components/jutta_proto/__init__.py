@@ -555,7 +555,7 @@ async def to_code(config):
             cg.RawExpression(f"::esphome::jutta_component::{symbol_base}_len")
         )
     )
-    cg.add(var.set_xml_poll_interval(config[CONF_XML_POLL_INTERVAL_MS]))
+    cg.add(var.set_xml_poll_interval_ms(config[CONF_XML_POLL_INTERVAL_MS]))
     cg.add(var.set_xml_startup_delay(config[CONF_XML_STARTUP_DELAY_MS]))
 
     if CONF_MACHINE_DATA in config:
