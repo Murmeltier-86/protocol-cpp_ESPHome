@@ -339,6 +339,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     this->allow_unsafe_debug_commands_ = false;
   }
   void run_status_probe_command(const std::string &command);
+  void run_manual_handshake_probe(uint32_t observe_ms);
   void run_ble2_transport_probe(const std::string &probe);
   void run_debug_command(const std::string &command, const std::string &transport);
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
@@ -387,6 +388,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   enum class XmlCommandProbeState { IDLE, SEND, WAIT, DONE };
   enum class XmlSessionProbeState { IDLE, SEND, WAIT, DONE, FAILED };
   enum class StatusProbeState { IDLE, SEND, WAIT, DONE };
+  enum class ManualHandshakeProbeState { IDLE, RUN_HANDSHAKE, OBSERVE };
   enum class Ble2ProbeState { IDLE, WAIT };
   enum class DebugCommandState { IDLE, WAIT };
   enum class DongleStartupState {
@@ -436,6 +438,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool handle_status_probe_line_(const std::string &line, bool complete, uint32_t now);
   void finish_status_probe_candidate_(uint32_t now, const char *reason);
   void finish_status_probe_cycle_(uint32_t now, const char *result);
+  bool start_manual_handshake_probe_(uint32_t observe_ms, uint32_t now);
+  bool handle_manual_handshake_probe_line_(const std::string &line, const char *table_name, uint32_t now);
+  void process_manual_handshake_probe_(uint32_t now);
+  void finish_manual_handshake_probe_(uint32_t now, const char *result);
   bool start_ble2_transport_probe_(const std::string &probe, uint32_t now);
   bool send_ble2_transport_probe_(const std::string &probe, const std::string &command, uint32_t now);
   bool handle_ble2_probe_line_(const std::string &line, const char *table_name, uint32_t now);
@@ -543,6 +549,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     MACHINE_XML,
     LIVE_DB_STATUS,
     STATS_HANDSHAKE,
+    MANUAL_HANDSHAKE_PROBE,
     STATUS_PROBE,
     BLE2_PROBE,
     DEBUG_COMMAND
@@ -706,6 +713,18 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string status_probe_rx_buffer_{};
   uint32_t status_probe_deadline_ms_{0};
   uint16_t status_probe_frames_{0};
+  ManualHandshakeProbeState manual_handshake_probe_state_{ManualHandshakeProbeState::IDLE};
+  uint32_t manual_handshake_observe_ms_{5000};
+  uint32_t manual_handshake_deadline_ms_{0};
+  uint16_t manual_handshake_frames_{0};
+  bool manual_handshake_tf_seen_{false};
+  bool manual_handshake_tv_seen_{false};
+  bool manual_handshake_prev_xml_dongle_startup_{false};
+  bool manual_handshake_prev_xml_dongle_startup_debug_{false};
+  std::string manual_handshake_prev_xml_dongle_startup_mode_{};
+  bool manual_handshake_prev_stats_session_ready_{false};
+  bool manual_handshake_prev_stats_inner_tx_required_{false};
+  bool manual_handshake_prev_post_gate_tx_ready_event_{true};
   Ble2ProbeState ble2_probe_state_{Ble2ProbeState::IDLE};
   std::string ble2_probe_name_{};
   std::string ble2_probe_command_{};
@@ -952,6 +971,17 @@ class ManualStatusProbeAction : public esphome::Action<> {
  protected:
   JuraComponent *parent_;
   std::string command_{};
+};
+
+class ManualHandshakeProbeAction : public esphome::Action<> {
+ public:
+  explicit ManualHandshakeProbeAction(JuraComponent *parent) : parent_(parent) {}
+  void set_observe_ms(uint32_t observe_ms) { observe_ms_ = observe_ms; }
+  void play() override { this->parent_->run_manual_handshake_probe(observe_ms_); }
+
+ protected:
+  JuraComponent *parent_;
+  uint32_t observe_ms_{5000};
 };
 
 class Ble2TransportProbeAction : public esphome::Action<> {

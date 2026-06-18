@@ -23,6 +23,7 @@ CONF_RAW = "raw"
 CONF_SLEEP = "sleep"
 CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
+CONF_OBSERVE_MS = "observe_ms"
 CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
 CONF_RAW_RX = "raw_rx"
@@ -117,6 +118,9 @@ SwitchPageAction = jutta_component_ns.class_("SwitchPageAction", automation.Acti
 RunSequenceAction = jutta_component_ns.class_("RunSequenceAction", automation.Action)
 ManualStatusProbeAction = jutta_component_ns.class_(
     "ManualStatusProbeAction", automation.Action
+)
+ManualHandshakeProbeAction = jutta_component_ns.class_(
+    "ManualHandshakeProbeAction", automation.Action
 )
 Ble2TransportProbeAction = jutta_component_ns.class_(
     "Ble2TransportProbeAction", automation.Action
@@ -439,6 +443,17 @@ def _normalize_status_probe(value):
     )(value)
 
 
+def _normalize_manual_handshake_probe(value):
+    if value is None:
+        value = {}
+    return cv.Schema(
+        {
+            cv.Optional(CONF_ID): cv.use_id(JuraComponent),
+            cv.Optional(CONF_OBSERVE_MS, default=5000): cv.int_range(min=1000, max=30000),
+        }
+    )(value)
+
+
 def _normalize_ble2_transport_probe(value):
     if isinstance(value, str):
         value = {CONF_PROBE: value}
@@ -738,6 +753,20 @@ async def status_probe_action_to_code(config, action_id, template_args, args):
     parent = await _get_parent(config)
     var = cg.new_Pvariable(action_id, parent)
     cg.add(var.set_command(cg.std_string(STATUS_PROBE_COMMANDS[config[CONF_PROBE]])))
+    return var
+
+
+@automation.register_action(
+    "jutta_proto.manual_handshake_probe",
+    ManualHandshakeProbeAction,
+    _normalize_manual_handshake_probe,
+    synchronous=False,
+)
+async def manual_handshake_probe_action_to_code(config, action_id, template_args, args):
+    _ = args
+    parent = await _get_parent(config)
+    var = cg.new_Pvariable(action_id, parent)
+    cg.add(var.set_observe_ms(config[CONF_OBSERVE_MS]))
     return var
 
 

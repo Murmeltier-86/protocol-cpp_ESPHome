@@ -82,6 +82,8 @@ constexpr uint32_t kSettingsRefreshMs = 600000;
 constexpr uint32_t kErrorPollIntervalMs = 5000;
 constexpr uint32_t kCommandTimeoutMs = 1500;
 constexpr uint32_t kStatusProbeTimeoutMs = 5000;
+constexpr uint32_t kManualHandshakeObserveDefaultMs = 5000;
+constexpr uint32_t kManualHandshakeObserveMaxMs = 30000;
 constexpr uint32_t kBle2ProbeTimeoutMs = 5000;
 constexpr uint32_t kDebugCommandTimeoutMs = 5000;
 constexpr size_t kDebugCommandMaxLength = 80;
@@ -1658,6 +1660,7 @@ void JuraComponent::loop() {
   }
 
   this->process_machine_data_query();
+  this->process_manual_handshake_probe_(esphome::millis());
   this->process_xml_polling();
   this->process_live_db_status_poll_(esphome::millis());
   this->poll_settings_once_();
@@ -2821,6 +2824,10 @@ void JuraComponent::run_status_probe_command(const std::string &command) {
   ESP_LOGW(TAG, "status_probe_disabled reason=stability_rollback");
 }
 
+void JuraComponent::run_manual_handshake_probe(uint32_t observe_ms) {
+  this->start_manual_handshake_probe_(observe_ms, esphome::millis());
+}
+
 void JuraComponent::run_ble2_transport_probe(const std::string &probe) {
   (void) probe;
   ESP_LOGW(TAG, "ble2_probe_disabled reason=stability_rollback");
@@ -3179,6 +3186,198 @@ void JuraComponent::finish_status_probe_cycle_(uint32_t now, const char *result)
     this->publish_status_probe_last_response_((command.empty() ? std::string{} : command + " -> ") + safe_result +
                                               " frames=" + std::to_string(this->status_probe_frames_));
   }
+  (void) now;
+}
+
+bool JuraComponent::start_manual_handshake_probe_(uint32_t observe_ms, uint32_t now) {
+  if (observe_ms == 0) {
+    observe_ms = kManualHandshakeObserveDefaultMs;
+  }
+  observe_ms = std::min<uint32_t>(observe_ms, kManualHandshakeObserveMaxMs);
+
+  if (this->manual_handshake_probe_state_ != ManualHandshakeProbeState::IDLE ||
+      this->status_probe_state_ != StatusProbeState::IDLE || this->ble2_probe_state_ != Ble2ProbeState::IDLE ||
+      this->debug_command_state_ != DebugCommandState::IDLE) {
+    ESP_LOGD(TAG, "manual_handshake_skip reason=probe_active");
+    this->publish_status_probe_last_response_("manual_handshake -> busy");
+    return false;
+  }
+  if (this->handshake_stage_ != HandshakeStage::DONE || !this->is_ready()) {
+    ESP_LOGD(TAG, "manual_handshake_skip reason=not_ready");
+    this->publish_status_probe_last_response_("manual_handshake -> not_ready");
+    return false;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    ESP_LOGD(TAG, "manual_handshake_skip reason=controller_not_ready");
+    this->publish_status_probe_last_response_("manual_handshake -> controller_not_ready");
+    return false;
+  }
+  if (this->xml_inflight_ || this->db_transaction_owner_ != DbTransactionOwner::NONE || this->is_busy() ||
+      !this->post_gate_tx_ready_event_) {
+    ESP_LOGD(TAG, "manual_handshake_skip reason=uart_busy owner=%s",
+             this->db_transaction_owner_name_(this->db_transaction_owner_));
+    this->publish_status_probe_last_response_("manual_handshake -> busy");
+    return false;
+  }
+  if (this->enable_xml_poll_ && this->xml_state_ == XmlPollState::IDLE && this->xml_next_poll_ != 0 &&
+      static_cast<int32_t>(this->xml_next_poll_ - now) <= static_cast<int32_t>(kLiveDbPollStatsGuardMs)) {
+    ESP_LOGD(TAG, "manual_handshake_skip reason=stats_due_soon");
+    this->publish_status_probe_last_response_("manual_handshake -> stats_due_soon");
+    return false;
+  }
+
+  this->manual_handshake_prev_xml_dongle_startup_ = this->xml_dongle_startup_;
+  this->manual_handshake_prev_xml_dongle_startup_debug_ = this->xml_dongle_startup_debug_;
+  this->manual_handshake_prev_xml_dongle_startup_mode_ = this->xml_dongle_startup_mode_;
+  this->manual_handshake_prev_stats_session_ready_ = this->stats_session_ready_;
+  this->manual_handshake_prev_stats_inner_tx_required_ = this->stats_inner_tx_required_;
+  this->manual_handshake_prev_post_gate_tx_ready_event_ = this->post_gate_tx_ready_event_;
+
+  this->db_transaction_owner_ = DbTransactionOwner::MANUAL_HANDSHAKE_PROBE;
+  this->xml_dongle_startup_ = true;
+  this->xml_dongle_startup_mode_ = "full";
+  this->xml_dongle_startup_debug_ = false;
+  this->stats_session_ready_ = false;
+  this->stats_inner_tx_required_ = false;
+  this->post_gate_tx_ready_event_ = true;
+  this->dongle_startup_state_ = DongleStartupState::IDLE;
+  this->dongle_startup_next_retry_ms_ = 0;
+  this->dongle_startup_rx_buffer_.clear();
+  this->dongle_startup_last_error_.clear();
+  this->manual_handshake_observe_ms_ = observe_ms;
+  this->manual_handshake_deadline_ms_ = 0;
+  this->manual_handshake_frames_ = 0;
+  this->manual_handshake_tf_seen_ = false;
+  this->manual_handshake_tv_seen_ = false;
+  this->manual_handshake_probe_state_ = ManualHandshakeProbeState::RUN_HANDSHAKE;
+
+  ESP_LOGI(TAG, "manual_handshake_start observe_ms=%u mode=original_dongle_full direct_tf_tv_queries=NO",
+           static_cast<unsigned>(observe_ms));
+  this->publish_status_probe_last_response_("manual_handshake -> started");
+  return true;
+}
+
+bool JuraComponent::handle_manual_handshake_probe_line_(const std::string &line, const char *table_name, uint32_t now) {
+  std::string trimmed = line;
+  trim_in_place(trimmed);
+  if (trimmed.empty()) {
+    return false;
+  }
+  this->update_dongle_events_from_line_(trimmed);
+  std::string lower = to_lower_copy(trimmed);
+  ESP_LOGD(TAG, "manual_handshake_rx_decoded table=%s line=\"%s\"", table_name != nullptr ? table_name : "unknown",
+           transport_payload_log_text(trimmed).c_str());
+
+  if (lower.rfind("@tf:", 0) == 0) {
+    this->manual_handshake_tf_seen_ = true;
+    ESP_LOGI(TAG, "manual_handshake_detected_tf line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
+    this->publish_tf_status_(trimmed);
+    this->publish_status_probe_last_response_("manual_handshake -> @TF");
+    return true;
+  }
+  if (lower.rfind("@tv:", 0) == 0) {
+    this->manual_handshake_tv_seen_ = true;
+    ESP_LOGI(TAG, "manual_handshake_detected_tv line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
+    this->handle_tv_progress_(trimmed);
+    this->publish_status_probe_last_response_("manual_handshake -> @TV");
+    return true;
+  }
+  if (lower.rfind("@t", 0) == 0 || lower.rfind("ty:", 0) == 0 || lower.rfind("@tr", 0) == 0) {
+    ESP_LOGD(TAG, "manual_handshake_control_frame line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
+  } else if (lower.rfind("@", 0) == 0) {
+    ESP_LOGD(TAG, "manual_handshake_status_like line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
+  }
+  (void) now;
+  return false;
+}
+
+void JuraComponent::process_manual_handshake_probe_(uint32_t now) {
+  if (this->manual_handshake_probe_state_ == ManualHandshakeProbeState::IDLE) {
+    return;
+  }
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    this->finish_manual_handshake_probe_(now, "controller_not_ready");
+    return;
+  }
+
+  if (this->manual_handshake_probe_state_ == ManualHandshakeProbeState::RUN_HANDSHAKE) {
+    if (this->process_dongle_startup_(now)) {
+      ESP_LOGI(TAG, "manual_handshake_gate_ok events=0x%02X post_gate=YES observe_ms=%u",
+               static_cast<unsigned>(this->dongle_events_),
+               static_cast<unsigned>(this->manual_handshake_observe_ms_));
+      this->manual_handshake_probe_state_ = ManualHandshakeProbeState::OBSERVE;
+      this->manual_handshake_deadline_ms_ = now + this->manual_handshake_observe_ms_;
+      this->manual_handshake_frames_ = 0;
+      this->publish_status_probe_last_response_("manual_handshake -> observing");
+      return;
+    }
+    if (this->dongle_startup_state_ == DongleStartupState::FAILED) {
+      this->finish_manual_handshake_probe_(now, "handshake_failed");
+    }
+    return;
+  }
+
+  if (this->manual_handshake_probe_state_ != ManualHandshakeProbeState::OBSERVE) {
+    return;
+  }
+
+  std::string raw_line;
+  while (this->coffee_maker_->connection->read_line_until(raw_line)) {
+    this->manual_handshake_frames_++;
+    ESP_LOGD(TAG, "manual_handshake_rx_raw hex=\"%s\"", compact_hex_string(raw_line, raw_line.size()).c_str());
+    if (!raw_line.empty() && this->xml_decode_inner_transport_ &&
+        is_inner_transport_start(static_cast<uint8_t>(raw_line.front()))) {
+      std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(raw_line);
+      bool had_payload = false;
+      for (const auto &candidate : candidates) {
+        if (candidate.payload.empty()) {
+          continue;
+        }
+        had_payload = true;
+        this->handle_manual_handshake_probe_line_(candidate.payload, candidate.table_name, now);
+      }
+      if (!had_payload) {
+        ESP_LOGD(TAG, "manual_handshake_rx_noise reason=inner_decode_empty");
+      }
+    } else if (this->is_printable_status_text_(raw_line)) {
+      this->handle_manual_handshake_probe_line_(raw_line, "ascii", now);
+    } else {
+      ESP_LOGD(TAG, "manual_handshake_rx_noise reason=non_printable hex=\"%s\"",
+               compact_hex_string(raw_line, raw_line.size()).c_str());
+    }
+  }
+
+  if (time_reached(now, this->manual_handshake_deadline_ms_)) {
+    const char *result = this->manual_handshake_tf_seen_ && this->manual_handshake_tv_seen_
+                             ? "tf_tv_seen"
+                             : (this->manual_handshake_tf_seen_ ? "tf_seen"
+                                                                : (this->manual_handshake_tv_seen_ ? "tv_seen"
+                                                                                                   : "no_tf_tv"));
+    this->finish_manual_handshake_probe_(now, result);
+  }
+}
+
+void JuraComponent::finish_manual_handshake_probe_(uint32_t now, const char *result) {
+  const char *safe_result = result != nullptr ? result : "done";
+  ESP_LOGI(TAG, "manual_handshake_done result=%s frames=%u tf=%s tv=%s",
+           safe_result, static_cast<unsigned>(this->manual_handshake_frames_),
+           YESNO(this->manual_handshake_tf_seen_), YESNO(this->manual_handshake_tv_seen_));
+
+  this->xml_dongle_startup_ = this->manual_handshake_prev_xml_dongle_startup_;
+  this->xml_dongle_startup_debug_ = this->manual_handshake_prev_xml_dongle_startup_debug_;
+  this->xml_dongle_startup_mode_ = this->manual_handshake_prev_xml_dongle_startup_mode_.empty()
+                                       ? std::string{"full"}
+                                       : this->manual_handshake_prev_xml_dongle_startup_mode_;
+  this->stats_session_ready_ = this->manual_handshake_prev_stats_session_ready_;
+  this->stats_inner_tx_required_ = this->manual_handshake_prev_stats_inner_tx_required_;
+  this->post_gate_tx_ready_event_ = this->manual_handshake_prev_post_gate_tx_ready_event_;
+  if (this->db_transaction_owner_ == DbTransactionOwner::MANUAL_HANDSHAKE_PROBE) {
+    this->db_transaction_owner_ = DbTransactionOwner::NONE;
+  }
+  this->manual_handshake_probe_state_ = ManualHandshakeProbeState::IDLE;
+  this->manual_handshake_deadline_ms_ = 0;
+  this->publish_status_probe_last_response_("manual_handshake -> " + std::string(safe_result) +
+                                            " frames=" + std::to_string(this->manual_handshake_frames_));
   (void) now;
 }
 
@@ -4246,6 +4445,8 @@ const char *JuraComponent::db_transaction_owner_name_(DbTransactionOwner owner) 
       return "live_db_status";
     case DbTransactionOwner::STATS_HANDSHAKE:
       return "stats_handshake";
+    case DbTransactionOwner::MANUAL_HANDSHAKE_PROBE:
+      return "manual_handshake_probe";
     case DbTransactionOwner::STATUS_PROBE:
       return "status_probe";
     case DbTransactionOwner::BLE2_PROBE:
@@ -5078,6 +5279,9 @@ void JuraComponent::process_xml_polling() {
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     return;
   }
+  if (this->db_transaction_owner_ == DbTransactionOwner::MANUAL_HANDSHAKE_PROBE) {
+    return;
+  }
   if (this->db_transaction_owner_ == DbTransactionOwner::MACHINE_XML) {
     XML_STATS_LOGD("XML DB polling skipped while Machine-XML transaction is active");
     return;
@@ -5821,6 +6025,10 @@ void JuraComponent::transition_dongle_startup_(DongleStartupState state, uint32_
     if (this->stats_handshake_before_cycle_active_) {
       XML_STATS_LOGD("stats_handshake_step cycle_id=%u step=%s",
                static_cast<unsigned>(this->xml_stats_cycle_id_), this->dongle_startup_state_name_(state));
+    }
+    if (this->manual_handshake_probe_state_ == ManualHandshakeProbeState::RUN_HANDSHAKE) {
+      ESP_LOGD(TAG, "manual_handshake_step step=%s events=0x%02X",
+               this->dongle_startup_state_name_(state), static_cast<unsigned>(this->dongle_events_));
     }
   }
   this->dongle_startup_state_ = state;
