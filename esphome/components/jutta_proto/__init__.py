@@ -24,6 +24,7 @@ CONF_SLEEP = "sleep"
 CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_OBSERVE_MS = "observe_ms"
+CONF_MODE = "mode"
 CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
 CONF_RAW_RX = "raw_rx"
@@ -450,6 +451,13 @@ def _normalize_manual_handshake_probe(value):
         {
             cv.Optional(CONF_ID): cv.use_id(JuraComponent),
             cv.Optional(CONF_OBSERVE_MS, default=5000): cv.int_range(min=1000, max=30000),
+            cv.Optional(CONF_MODE, default="normal"): cv.enum(
+                {
+                    "normal": "normal",
+                    "test_c_app_initial_reads": "test_c_app_initial_reads",
+                },
+                lower=True,
+            ),
         }
     )(value)
 
@@ -767,6 +775,7 @@ async def manual_handshake_probe_action_to_code(config, action_id, template_args
     parent = await _get_parent(config)
     var = cg.new_Pvariable(action_id, parent)
     cg.add(var.set_observe_ms(config[CONF_OBSERVE_MS]))
+    cg.add(var.set_mode(cg.std_string(config[CONF_MODE])))
     return var
 
 
