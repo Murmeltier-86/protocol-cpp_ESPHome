@@ -3266,6 +3266,7 @@ bool JuraComponent::start_manual_handshake_probe_(uint32_t observe_ms, const std
   this->manual_handshake_tv_count_ = 0;
   this->manual_handshake_unknown_count_ = 0;
   this->manual_handshake_app_initial_reads_done_ = false;
+  this->manual_handshake_original_gate_done_ = false;
   this->manual_handshake_cache_1531_present_ = false;
   this->manual_handshake_cache_1524_present_ = false;
   this->manual_handshake_cache_1527_present_ = false;
@@ -3277,6 +3278,9 @@ bool JuraComponent::start_manual_handshake_probe_(uint32_t observe_ms, const std
 
   ESP_LOGI(TAG, "manual_handshake_start observe_ms=%u mode=%s original_dongle_full=YES direct_tf_tv_queries=NO",
            static_cast<unsigned>(observe_ms), this->manual_handshake_mode_name_());
+  if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::TEST_C_APP_INITIAL_READS) {
+    ESP_LOGI(TAG, "manual_handshake_test_c_wait original_handshake_first=YES");
+  }
   this->publish_status_probe_last_response_("manual_handshake -> started");
   return true;
 }
@@ -3405,10 +3409,19 @@ void JuraComponent::process_manual_handshake_probe_(uint32_t now) {
       ESP_LOGI(TAG, "manual_handshake_gate_ok events=0x%02X post_gate=YES observe_ms=%u",
                static_cast<unsigned>(this->dongle_events_),
                static_cast<unsigned>(this->manual_handshake_observe_ms_));
+      this->manual_handshake_original_gate_done_ = true;
+      if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::TEST_C_APP_INITIAL_READS) {
+        ESP_LOGI(TAG, "manual_handshake_test_c_begin original_handshake_done=YES");
+      }
       this->manual_handshake_probe_state_ = ManualHandshakeProbeState::OBSERVE;
       this->manual_handshake_deadline_ms_ = now + this->manual_handshake_observe_ms_;
       this->manual_handshake_frames_ = 0;
       if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::TEST_C_APP_INITIAL_READS) {
+        if (!this->manual_handshake_original_gate_done_) {
+          ESP_LOGE(TAG, "manual_handshake_test_c_abort reason=original_handshake_not_done");
+          this->finish_manual_handshake_probe_(now, "handshake_failed");
+          return;
+        }
         this->manual_observe_no_tx_guard_ = true;
         this->run_manual_handshake_app_initial_reads_(now);
       }
@@ -3488,7 +3501,7 @@ void JuraComponent::finish_manual_handshake_probe_(uint32_t now, const char *res
     ESP_LOGI(TAG,
              "manual_handshake_test_c_done result=%s observe_frames_total=%u control_count=%u tf_count=%u "
              "tv_count=%u unknown_count=%u app_initial_reads_done=%s cache_1531=%s cache_1524=%s cache_1527=%s "
-             "tx_during_observe=%s",
+             "tx_during_observe=%s original_handshake_done=%s",
              final_result.c_str(), static_cast<unsigned>(this->manual_handshake_frames_),
              static_cast<unsigned>(this->manual_handshake_control_count_),
              static_cast<unsigned>(this->manual_handshake_tf_count_),
@@ -3498,7 +3511,7 @@ void JuraComponent::finish_manual_handshake_probe_(uint32_t now, const char *res
              this->manual_handshake_cache_1531_present_ ? "PRESENT" : "EMPTY",
              this->manual_handshake_cache_1524_present_ ? "PRESENT" : "EMPTY",
              this->manual_handshake_cache_1527_present_ ? "PRESENT" : "EMPTY",
-             YESNO(this->manual_handshake_tx_violation_));
+             YESNO(this->manual_handshake_tx_violation_), YESNO(this->manual_handshake_original_gate_done_));
   }
   ESP_LOGI(TAG, "manual_handshake_done result=%s frames=%u tf=%s tv=%s",
            final_result.c_str(), static_cast<unsigned>(this->manual_handshake_frames_),

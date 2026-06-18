@@ -730,6 +730,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint16_t manual_handshake_tv_count_{0};
   uint16_t manual_handshake_unknown_count_{0};
   bool manual_handshake_app_initial_reads_done_{false};
+  bool manual_handshake_original_gate_done_{false};
   bool manual_handshake_cache_1531_present_{false};
   bool manual_handshake_cache_1524_present_{false};
   bool manual_handshake_cache_1527_present_{false};
