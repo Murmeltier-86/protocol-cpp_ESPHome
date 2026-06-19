@@ -3563,18 +3563,42 @@ void JuraComponent::process_manual_handshake_probe_(uint32_t now) {
 
   std::string raw_line;
   while (this->coffee_maker_->connection->read_line_until(raw_line)) {
-    this->manual_handshake_frames_++;
-    ESP_LOGD(TAG, "manual_handshake_rx_raw hex=\"%s\"", compact_hex_string(raw_line, raw_line.size()).c_str());
+    const bool live_trigger_mode =
+        this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE;
+    if (!live_trigger_mode) {
+      this->manual_handshake_frames_++;
+    }
+    if (!live_trigger_mode || this->xml_deep_debug_) {
+      ESP_LOGD(TAG, "manual_handshake_rx_raw hex=\"%s\"", compact_hex_string(raw_line, raw_line.size()).c_str());
+    }
     if (!raw_line.empty() && this->xml_decode_inner_transport_ &&
         is_inner_transport_start(static_cast<uint8_t>(raw_line.front()))) {
-      if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::TEST_C_APP_INITIAL_READS) {
+      if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::TEST_C_APP_INITIAL_READS ||
+          live_trigger_mode) {
         InnerTransportDecodeResult decoded =
             decode_inner_transport_with_tables(raw_line, INNER_UART_MODE0_A, INNER_UART_MODE0_B, "uart_mode0");
         if (!decoded.payload.empty()) {
+          if (live_trigger_mode) {
+            this->manual_handshake_frames_++;
+          }
           this->handle_manual_handshake_probe_line_(decoded.payload, decoded.table_name, now);
         } else {
-          this->manual_handshake_unknown_count_++;
-          ESP_LOGD(TAG, "manual_handshake_rx_noise reason=uart_mode0_decode_empty");
+          if (!live_trigger_mode) {
+            this->manual_handshake_unknown_count_++;
+          }
+          if (!live_trigger_mode || this->xml_deep_debug_) {
+            ESP_LOGD(TAG, "manual_handshake_rx_noise reason=uart_mode0_decode_empty");
+          }
+        }
+        if (live_trigger_mode && this->xml_deep_debug_) {
+          std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(raw_line);
+          for (const auto &candidate : candidates) {
+            if (candidate.payload.empty() || std::strcmp(candidate.table_name, "uart_mode0") == 0) {
+              continue;
+            }
+            ESP_LOGD(TAG, "manual_live_trigger_alt_decode_ignored table=%s line=\"%s\"", candidate.table_name,
+                     transport_payload_log_text(candidate.payload).c_str());
+          }
         }
         continue;
       }
@@ -3591,10 +3615,19 @@ void JuraComponent::process_manual_handshake_probe_(uint32_t now) {
         ESP_LOGD(TAG, "manual_handshake_rx_noise reason=inner_decode_empty");
       }
     } else if (this->is_printable_status_text_(raw_line)) {
+      if (live_trigger_mode) {
+        if (this->xml_deep_debug_) {
+          ESP_LOGD(TAG, "manual_live_trigger_ascii_ignored reason=not_uart_mode0 line=\"%s\"",
+                   transport_payload_log_text(raw_line).c_str());
+        }
+        continue;
+      }
       this->handle_manual_handshake_probe_line_(raw_line, "ascii", now);
     } else {
-      ESP_LOGD(TAG, "manual_handshake_rx_noise reason=non_printable hex=\"%s\"",
-               compact_hex_string(raw_line, raw_line.size()).c_str());
+      if (!live_trigger_mode || this->xml_deep_debug_) {
+        ESP_LOGD(TAG, "manual_handshake_rx_noise reason=non_printable hex=\"%s\"",
+                 compact_hex_string(raw_line, raw_line.size()).c_str());
+      }
     }
   }
 
