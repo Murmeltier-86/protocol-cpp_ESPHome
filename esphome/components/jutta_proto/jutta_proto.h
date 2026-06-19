@@ -345,6 +345,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void run_status_probe_command(const std::string &command);
   void run_manual_handshake_probe(uint32_t observe_ms, const std::string &mode);
   void manual_live_trigger_probe_stayinble(uint32_t observe_ms = 30000, uint32_t interval_ms = 6000);
+  void manual_live_event_observe(uint32_t observe_ms = 120000, bool stayinble = true, uint32_t interval_ms = 6000);
   void run_ble2_transport_probe(const std::string &probe);
   void run_debug_command(const std::string &command, const std::string &transport);
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
@@ -394,7 +395,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   enum class XmlSessionProbeState { IDLE, SEND, WAIT, DONE, FAILED };
   enum class StatusProbeState { IDLE, SEND, WAIT, DONE };
   enum class ManualHandshakeProbeState { IDLE, RUN_HANDSHAKE, OBSERVE };
-  enum class ManualHandshakeProbeMode { NORMAL, TEST_C_APP_INITIAL_READS, LIVE_TRIGGER_STAYINBLE };
+  enum class ManualHandshakeProbeMode { NORMAL, TEST_C_APP_INITIAL_READS, LIVE_TRIGGER_STAYINBLE, LIVE_EVENT_OBSERVE };
   enum class Ble2ProbeState { IDLE, WAIT };
   enum class DebugCommandState { IDLE, WAIT };
   enum class DongleStartupState {
@@ -737,6 +738,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint16_t manual_handshake_control_count_{0};
   uint16_t manual_handshake_tf_count_{0};
   uint16_t manual_handshake_tv_count_{0};
+  uint16_t manual_handshake_event_other_count_{0};
   uint16_t manual_handshake_unknown_count_{0};
   bool manual_handshake_app_initial_reads_done_{false};
   bool manual_handshake_original_gate_done_{false};
@@ -752,6 +754,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t manual_live_trigger_last_tx_ms_{0};
   uint16_t manual_live_trigger_stayinble_tx_count_{0};
   bool manual_live_trigger_allow_stayinble_tx_{false};
+  bool manual_live_event_observe_stayinble_{true};
   bool manual_handshake_prev_xml_dongle_startup_{false};
   bool manual_handshake_prev_xml_dongle_startup_debug_{false};
   std::string manual_handshake_prev_xml_dongle_startup_mode_{};
@@ -1029,6 +1032,21 @@ class ManualLiveTriggerProbeStayInBleAction : public esphome::Action<> {
  protected:
   JuraComponent *parent_;
   uint32_t observe_ms_{30000};
+  uint32_t interval_ms_{6000};
+};
+
+class ManualLiveEventObserveAction : public esphome::Action<> {
+ public:
+  explicit ManualLiveEventObserveAction(JuraComponent *parent) : parent_(parent) {}
+  void set_observe_ms(uint32_t observe_ms) { observe_ms_ = observe_ms; }
+  void set_stayinble(bool stayinble) { stayinble_ = stayinble; }
+  void set_interval_ms(uint32_t interval_ms) { interval_ms_ = interval_ms; }
+  void play() override { this->parent_->manual_live_event_observe(observe_ms_, stayinble_, interval_ms_); }
+
+ protected:
+  JuraComponent *parent_;
+  uint32_t observe_ms_{120000};
+  bool stayinble_{true};
   uint32_t interval_ms_{6000};
 };
 

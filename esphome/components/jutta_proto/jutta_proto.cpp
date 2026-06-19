@@ -83,10 +83,11 @@ constexpr uint32_t kErrorPollIntervalMs = 5000;
 constexpr uint32_t kCommandTimeoutMs = 1500;
 constexpr uint32_t kStatusProbeTimeoutMs = 5000;
 constexpr uint32_t kManualHandshakeObserveDefaultMs = 5000;
-constexpr uint32_t kManualHandshakeObserveMaxMs = 30000;
+constexpr uint32_t kManualHandshakeObserveMaxMs = 120000;
 constexpr uint32_t kBle2ProbeTimeoutMs = 5000;
 constexpr uint32_t kDebugCommandTimeoutMs = 5000;
 constexpr uint32_t kManualLiveTriggerObserveDefaultMs = 30000;
+constexpr uint32_t kManualLiveEventObserveDefaultMs = 120000;
 constexpr uint32_t kManualLiveTriggerStayInBleIntervalDefaultMs = 6000;
 constexpr size_t kDebugCommandMaxLength = 80;
 
@@ -2853,6 +2854,28 @@ void JuraComponent::manual_live_trigger_probe_stayinble(uint32_t observe_ms, uin
   }
 }
 
+void JuraComponent::manual_live_event_observe(uint32_t observe_ms, bool stayinble, uint32_t interval_ms) {
+  if (this->manual_handshake_probe_state_ != ManualHandshakeProbeState::IDLE) {
+    ESP_LOGW(TAG, "manual_live_event_observe_start rejected reason=already_running");
+    return;
+  }
+  if (observe_ms == 0) {
+    observe_ms = kManualLiveEventObserveDefaultMs;
+  }
+  observe_ms = std::min<uint32_t>(observe_ms, kManualHandshakeObserveMaxMs);
+  if (interval_ms == 0) {
+    interval_ms = kManualLiveTriggerStayInBleIntervalDefaultMs;
+  }
+  this->manual_live_trigger_interval_ms_ = interval_ms;
+  this->manual_live_event_observe_stayinble_ = stayinble;
+  ESP_LOGI(TAG, "manual_live_event_observe_start observe_ms=%u stayinble=%s interval_ms=%u",
+           static_cast<unsigned>(observe_ms), YESNO(stayinble), static_cast<unsigned>(interval_ms));
+  if (!this->start_manual_handshake_probe_(observe_ms, "manual_live_event_observe", esphome::millis()) &&
+      this->manual_handshake_probe_state_ != ManualHandshakeProbeState::IDLE) {
+    ESP_LOGW(TAG, "manual_live_event_observe_start rejected reason=already_running");
+  }
+}
+
 void JuraComponent::run_ble2_transport_probe(const std::string &probe) {
   (void) probe;
   ESP_LOGW(TAG, "ble2_probe_disabled reason=stability_rollback");
@@ -3227,6 +3250,8 @@ bool JuraComponent::start_manual_handshake_probe_(uint32_t observe_ms, const std
     this->manual_handshake_probe_mode_ = ManualHandshakeProbeMode::TEST_C_APP_INITIAL_READS;
   } else if (normalized_mode == "manual_live_trigger_probe_stayinble" || normalized_mode == "live_trigger_stayinble") {
     this->manual_handshake_probe_mode_ = ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE;
+  } else if (normalized_mode == "manual_live_event_observe" || normalized_mode == "live_event_observe") {
+    this->manual_handshake_probe_mode_ = ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE;
   } else {
     ESP_LOGW(TAG, "manual_handshake_skip reason=unsupported_mode mode=%s", sanitize_text_for_api(mode).c_str());
     this->publish_status_probe_last_response_("manual_handshake -> unsupported_mode");
@@ -3289,6 +3314,7 @@ bool JuraComponent::start_manual_handshake_probe_(uint32_t observe_ms, const std
   this->manual_handshake_control_count_ = 0;
   this->manual_handshake_tf_count_ = 0;
   this->manual_handshake_tv_count_ = 0;
+  this->manual_handshake_event_other_count_ = 0;
   this->manual_handshake_unknown_count_ = 0;
   this->manual_handshake_app_initial_reads_done_ = false;
   this->manual_handshake_original_gate_done_ = false;
@@ -3311,6 +3337,8 @@ bool JuraComponent::start_manual_handshake_probe_(uint32_t observe_ms, const std
     ESP_LOGI(TAG, "manual_handshake_test_c_wait original_handshake_first=YES");
   } else if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE) {
     ESP_LOGI(TAG, "manual_live_trigger_probe_stayinble_wait original_handshake_first=YES");
+  } else if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE) {
+    ESP_LOGI(TAG, "manual_live_event_observe_wait original_handshake_first=YES");
   }
   this->publish_status_probe_last_response_("manual_handshake -> started");
   return true;
@@ -3324,6 +3352,8 @@ const char *JuraComponent::manual_handshake_mode_name_() const {
       return "test_c_app_initial_reads";
     case ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE:
       return "manual_live_trigger_probe_stayinble";
+    case ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE:
+      return "manual_live_event_observe";
   }
   return "unknown";
 }
@@ -3390,6 +3420,9 @@ bool JuraComponent::guard_manual_observe_tx_(const char *source, const std::stri
   if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE) {
     ESP_LOGE(TAG, "live_trigger_tx_violation unexpected_tx_during_live_probe=YES source=%s line=\"%s\"",
              source != nullptr ? source : "unknown", escape_control_text_for_log(frame).c_str());
+  } else if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE) {
+    ESP_LOGE(TAG, "manual_live_event_tx_violation unexpected_tx_during_observe=YES source=%s line=\"%s\"",
+             source != nullptr ? source : "unknown", escape_control_text_for_log(frame).c_str());
   } else {
     ESP_LOGE(TAG, "manual_handshake_tx_blocked tx_during_observe=YES source=%s frame=\"%s\"",
              source != nullptr ? source : "unknown", escape_control_text_for_log(frame).c_str());
@@ -3398,7 +3431,12 @@ bool JuraComponent::guard_manual_observe_tx_(const char *source, const std::stri
 }
 
 bool JuraComponent::manual_live_trigger_stayinble_tx_allowed_(const std::string &frame) const {
-  if (this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE) {
+  if (this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE &&
+      this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE) {
+    return false;
+  }
+  if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE &&
+      !this->manual_live_event_observe_stayinble_) {
     return false;
   }
   std::string normalized = frame;
@@ -3420,7 +3458,11 @@ bool JuraComponent::send_manual_live_trigger_stayinble_(uint32_t now) {
   char command[16];
   std::snprintf(command, sizeof(command), "@TP:%02X7F", static_cast<unsigned>(this->pmode_key_));
   std::string line(command);
-  ESP_LOGI(TAG, "live_trigger_stayinble_tx mode=machine_uart line=\"%s\"", line.c_str());
+  if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE) {
+    ESP_LOGI(TAG, "manual_live_event_stayinble_tx mode=machine_uart line=\"%s\"", line.c_str());
+  } else {
+    ESP_LOGI(TAG, "live_trigger_stayinble_tx mode=machine_uart line=\"%s\"", line.c_str());
+  }
   this->manual_live_trigger_allow_stayinble_tx_ = true;
   const bool ok = this->write_inner_uart0_command_(line, now, true);
   this->manual_live_trigger_allow_stayinble_tx_ = false;
@@ -3442,18 +3484,26 @@ bool JuraComponent::handle_manual_handshake_probe_line_(const std::string &line,
   }
   this->update_dongle_events_from_line_(trimmed);
   std::string lower = to_lower_copy(trimmed);
+  const bool live_trigger_mode = this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE;
+  const bool live_event_mode = this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE;
   ESP_LOGD(TAG, "manual_handshake_rx_decoded table=%s line=\"%s\"", table_name != nullptr ? table_name : "unknown",
            transport_payload_log_text(trimmed).c_str());
 
   if (lower.rfind("@tf:", 0) == 0) {
     this->manual_handshake_tf_seen_ = true;
     this->manual_handshake_tf_count_++;
-    if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE) {
+    if (live_trigger_mode) {
       uint32_t since_last_tx = this->manual_live_trigger_last_tx_ms_ == 0 ? 0 : now - this->manual_live_trigger_last_tx_ms_;
       ESP_LOGI(TAG, "manual_live_trigger_frame class=cachewriter line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
       ESP_LOGI(TAG, "manual_live_trigger_cachewriter type=TF since_last_stayinble_ms=%u raw_hex=\"%s\" line=\"%s\"",
                static_cast<unsigned>(since_last_tx), compact_hex_string(trimmed, trimmed.size()).c_str(),
                sanitize_text_for_api(trimmed).c_str());
+    } else if (live_event_mode) {
+      uint32_t since_last_tx = this->manual_live_trigger_last_tx_ms_ == 0 ? 0 : now - this->manual_live_trigger_last_tx_ms_;
+      ESP_LOGI(TAG, "manual_live_event_frame class=cachewriter line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
+      ESP_LOGI(TAG, "manual_live_event_cachewriter type=TF raw_hex=\"%s\" line=\"%s\" since_last_stayinble_ms=%u",
+               compact_hex_string(trimmed, trimmed.size()).c_str(), sanitize_text_for_api(trimmed).c_str(),
+               static_cast<unsigned>(since_last_tx));
     } else {
       ESP_LOGI(TAG, "manual_handshake_detected_tf line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
     }
@@ -3464,12 +3514,18 @@ bool JuraComponent::handle_manual_handshake_probe_line_(const std::string &line,
   if (lower.rfind("@tv:", 0) == 0) {
     this->manual_handshake_tv_seen_ = true;
     this->manual_handshake_tv_count_++;
-    if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE) {
+    if (live_trigger_mode) {
       uint32_t since_last_tx = this->manual_live_trigger_last_tx_ms_ == 0 ? 0 : now - this->manual_live_trigger_last_tx_ms_;
       ESP_LOGI(TAG, "manual_live_trigger_frame class=cachewriter line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
       ESP_LOGI(TAG, "manual_live_trigger_cachewriter type=TV since_last_stayinble_ms=%u raw_hex=\"%s\" line=\"%s\"",
                static_cast<unsigned>(since_last_tx), compact_hex_string(trimmed, trimmed.size()).c_str(),
                sanitize_text_for_api(trimmed).c_str());
+    } else if (live_event_mode) {
+      uint32_t since_last_tx = this->manual_live_trigger_last_tx_ms_ == 0 ? 0 : now - this->manual_live_trigger_last_tx_ms_;
+      ESP_LOGI(TAG, "manual_live_event_frame class=cachewriter line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
+      ESP_LOGI(TAG, "manual_live_event_cachewriter type=TV raw_hex=\"%s\" line=\"%s\" since_last_stayinble_ms=%u",
+               compact_hex_string(trimmed, trimmed.size()).c_str(), sanitize_text_for_api(trimmed).c_str(),
+               static_cast<unsigned>(since_last_tx));
     } else {
       ESP_LOGI(TAG, "manual_handshake_detected_tv line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
     }
@@ -3480,15 +3536,22 @@ bool JuraComponent::handle_manual_handshake_probe_line_(const std::string &line,
   if (trimmed.rfind("@T2", 0) == 0 || trimmed.rfind("@T3", 0) == 0 || lower.rfind("@t0", 0) == 0 ||
       lower.rfind("@t1", 0) == 0 || lower.rfind("ty:", 0) == 0 || lower.rfind("@tr", 0) == 0) {
     this->manual_handshake_control_count_++;
-    if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE) {
+    if (live_trigger_mode) {
       ESP_LOGI(TAG, "manual_live_trigger_frame class=control line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
+    } else if (live_event_mode) {
+      ESP_LOGI(TAG, "manual_live_event_frame class=control line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
     } else {
       ESP_LOGD(TAG, "manual_handshake_frame class=control line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
     }
+  } else if (live_event_mode && (trimmed.rfind("@", 0) == 0 || lower.rfind("ty:", 0) == 0)) {
+    this->manual_handshake_event_other_count_++;
+    ESP_LOGI(TAG, "manual_live_event_frame class=event_other line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
   } else {
     this->manual_handshake_unknown_count_++;
-    if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE) {
+    if (live_trigger_mode) {
       ESP_LOGI(TAG, "manual_live_trigger_frame class=unknown line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
+    } else if (live_event_mode) {
+      ESP_LOGI(TAG, "manual_live_event_frame class=unknown line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
     } else {
       ESP_LOGD(TAG, "manual_handshake_frame class=unknown line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
     }
@@ -3516,12 +3579,15 @@ void JuraComponent::process_manual_handshake_probe_(uint32_t now) {
         ESP_LOGI(TAG, "manual_handshake_test_c_begin original_handshake_done=YES");
       } else if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE) {
         ESP_LOGI(TAG, "manual_live_trigger_probe_stayinble_gate_ok original_handshake_done=YES");
+      } else if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE) {
+        ESP_LOGI(TAG, "manual_live_event_observe_gate_ok original_handshake_done=YES");
       }
       this->manual_handshake_probe_state_ = ManualHandshakeProbeState::OBSERVE;
       this->manual_handshake_deadline_ms_ = now + this->manual_handshake_observe_ms_;
       this->manual_handshake_frames_ = 0;
       if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::TEST_C_APP_INITIAL_READS ||
-          this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE) {
+          this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE ||
+          this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE) {
         if (!this->manual_handshake_original_gate_done_) {
           ESP_LOGE(TAG, "manual_handshake_test_c_abort reason=original_handshake_not_done");
           this->finish_manual_handshake_probe_(now, "handshake_failed");
@@ -3529,9 +3595,11 @@ void JuraComponent::process_manual_handshake_probe_(uint32_t now) {
         }
         this->manual_observe_no_tx_guard_ = true;
         this->run_manual_handshake_app_initial_reads_(now);
-        if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE) {
+        if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE ||
+            (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE &&
+             this->manual_live_event_observe_stayinble_)) {
           if (!this->pmode_key_available_) {
-            this->finish_manual_handshake_probe_(now, "missing_key");
+            this->finish_manual_handshake_probe_(now, "timeout");
             return;
           }
           this->manual_live_trigger_next_tx_ms_ = now;
@@ -3553,7 +3621,10 @@ void JuraComponent::process_manual_handshake_probe_(uint32_t now) {
     return;
   }
 
-  if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE &&
+  const bool live_trigger_mode = this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE;
+  const bool live_event_mode = this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE;
+
+  if ((live_trigger_mode || (live_event_mode && this->manual_live_event_observe_stayinble_)) &&
       !this->manual_handshake_tx_violation_ && this->manual_live_trigger_next_tx_ms_ != 0 &&
       time_reached(now, this->manual_live_trigger_next_tx_ms_)) {
     if (!this->send_manual_live_trigger_stayinble_(now)) {
@@ -3563,40 +3634,45 @@ void JuraComponent::process_manual_handshake_probe_(uint32_t now) {
 
   std::string raw_line;
   while (this->coffee_maker_->connection->read_line_until(raw_line)) {
-    const bool live_trigger_mode =
-        this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE;
-    if (!live_trigger_mode) {
+    const bool strict_uart_mode0_mode = live_trigger_mode || live_event_mode;
+    if (!strict_uart_mode0_mode) {
       this->manual_handshake_frames_++;
     }
-    if (!live_trigger_mode || this->xml_deep_debug_) {
+    if (!strict_uart_mode0_mode || this->xml_deep_debug_) {
       ESP_LOGD(TAG, "manual_handshake_rx_raw hex=\"%s\"", compact_hex_string(raw_line, raw_line.size()).c_str());
     }
     if (!raw_line.empty() && this->xml_decode_inner_transport_ &&
         is_inner_transport_start(static_cast<uint8_t>(raw_line.front()))) {
       if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::TEST_C_APP_INITIAL_READS ||
-          live_trigger_mode) {
+          strict_uart_mode0_mode) {
         InnerTransportDecodeResult decoded =
             decode_inner_transport_with_tables(raw_line, INNER_UART_MODE0_A, INNER_UART_MODE0_B, "uart_mode0");
         if (!decoded.payload.empty()) {
-          if (live_trigger_mode) {
+          if (strict_uart_mode0_mode) {
             this->manual_handshake_frames_++;
           }
           this->handle_manual_handshake_probe_line_(decoded.payload, decoded.table_name, now);
         } else {
-          if (!live_trigger_mode) {
+          if (live_event_mode) {
+            this->manual_handshake_frames_++;
+            this->manual_handshake_unknown_count_++;
+            ESP_LOGI(TAG, "manual_live_event_frame class=unknown line=\"\"");
+          } else if (!strict_uart_mode0_mode) {
             this->manual_handshake_unknown_count_++;
           }
-          if (!live_trigger_mode || this->xml_deep_debug_) {
+          if (!strict_uart_mode0_mode || this->xml_deep_debug_) {
             ESP_LOGD(TAG, "manual_handshake_rx_noise reason=uart_mode0_decode_empty");
           }
         }
-        if (live_trigger_mode && this->xml_deep_debug_) {
+        if (strict_uart_mode0_mode && this->xml_deep_debug_) {
           std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(raw_line);
           for (const auto &candidate : candidates) {
             if (candidate.payload.empty() || std::strcmp(candidate.table_name, "uart_mode0") == 0) {
               continue;
             }
-            ESP_LOGD(TAG, "manual_live_trigger_alt_decode_ignored table=%s line=\"%s\"", candidate.table_name,
+            ESP_LOGD(TAG, "%s table=%s line=\"%s\"",
+                     live_event_mode ? "manual_live_event_alt_decode_ignored" : "manual_live_trigger_alt_decode_ignored",
+                     candidate.table_name,
                      transport_payload_log_text(candidate.payload).c_str());
           }
         }
@@ -3615,16 +3691,27 @@ void JuraComponent::process_manual_handshake_probe_(uint32_t now) {
         ESP_LOGD(TAG, "manual_handshake_rx_noise reason=inner_decode_empty");
       }
     } else if (this->is_printable_status_text_(raw_line)) {
-      if (live_trigger_mode) {
+      if (strict_uart_mode0_mode) {
+        if (live_event_mode) {
+          this->manual_handshake_frames_++;
+          this->handle_manual_handshake_probe_line_(raw_line, "ascii", now);
+          continue;
+        }
         if (this->xml_deep_debug_) {
-          ESP_LOGD(TAG, "manual_live_trigger_ascii_ignored reason=not_uart_mode0 line=\"%s\"",
+          ESP_LOGD(TAG, "%s reason=not_uart_mode0 line=\"%s\"",
+                   live_event_mode ? "manual_live_event_ascii_ignored" : "manual_live_trigger_ascii_ignored",
                    transport_payload_log_text(raw_line).c_str());
         }
         continue;
       }
       this->handle_manual_handshake_probe_line_(raw_line, "ascii", now);
     } else {
-      if (!live_trigger_mode || this->xml_deep_debug_) {
+      if (live_event_mode) {
+        this->manual_handshake_frames_++;
+        this->manual_handshake_unknown_count_++;
+        ESP_LOGI(TAG, "manual_live_event_frame class=unknown line=\"\"");
+      }
+      if (!strict_uart_mode0_mode || this->xml_deep_debug_) {
         ESP_LOGD(TAG, "manual_handshake_rx_noise reason=non_printable hex=\"%s\"",
                  compact_hex_string(raw_line, raw_line.size()).c_str());
       }
@@ -3645,7 +3732,8 @@ void JuraComponent::finish_manual_handshake_probe_(uint32_t now, const char *res
   const char *safe_result = result != nullptr ? result : "done";
   std::string final_result = safe_result;
   if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::TEST_C_APP_INITIAL_READS ||
-      this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE) {
+      this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE ||
+      this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE) {
     if (std::strcmp(safe_result, "handshake_failed") == 0 || std::strcmp(safe_result, "controller_not_ready") == 0) {
       final_result = "gate_failed";
     } else if (std::strcmp(safe_result, "missing_key") == 0) {
@@ -3672,6 +3760,27 @@ void JuraComponent::finish_manual_handshake_probe_(uint32_t now, const char *res
                static_cast<unsigned>(this->manual_handshake_control_count_),
                static_cast<unsigned>(this->manual_handshake_tf_count_),
                static_cast<unsigned>(this->manual_handshake_tv_count_),
+               static_cast<unsigned>(this->manual_handshake_unknown_count_),
+               YESNO(this->manual_handshake_app_initial_reads_done_),
+               this->manual_handshake_cache_1531_present_ ? "PRESENT" : "EMPTY",
+               this->manual_handshake_cache_1524_present_ ? "PRESENT" : "EMPTY",
+               this->manual_handshake_cache_1527_present_ ? "PRESENT" : "EMPTY",
+               YESNO(this->manual_handshake_tx_violation_));
+    } else if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE) {
+      ESP_LOGI(TAG,
+               "manual_live_event_observe_done result=%s observe_ms=%u stayinble=%s interval_ms=%u stayinble_tx_count=%u "
+               "observe_frames_total=%u control_count=%u tf_count=%u tv_count=%u event_other_count=%u "
+               "unknown_count=%u app_initial_reads_done=%s cache_1531=%s cache_1524=%s cache_1527=%s "
+               "unexpected_tx_during_observe=%s",
+               final_result.c_str(), static_cast<unsigned>(this->manual_handshake_observe_ms_),
+               YESNO(this->manual_live_event_observe_stayinble_),
+               static_cast<unsigned>(this->manual_live_trigger_interval_ms_),
+               static_cast<unsigned>(this->manual_live_trigger_stayinble_tx_count_),
+               static_cast<unsigned>(this->manual_handshake_frames_),
+               static_cast<unsigned>(this->manual_handshake_control_count_),
+               static_cast<unsigned>(this->manual_handshake_tf_count_),
+               static_cast<unsigned>(this->manual_handshake_tv_count_),
+               static_cast<unsigned>(this->manual_handshake_event_other_count_),
                static_cast<unsigned>(this->manual_handshake_unknown_count_),
                YESNO(this->manual_handshake_app_initial_reads_done_),
                this->manual_handshake_cache_1531_present_ ? "PRESENT" : "EMPTY",

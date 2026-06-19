@@ -25,6 +25,7 @@ CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_OBSERVE_MS = "observe_ms"
 CONF_INTERVAL_MS = "interval_ms"
+CONF_STAYINBLE = "stayinble"
 CONF_MODE = "mode"
 CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
@@ -127,6 +128,9 @@ ManualHandshakeProbeAction = jutta_component_ns.class_(
 )
 ManualLiveTriggerProbeStayInBleAction = jutta_component_ns.class_(
     "ManualLiveTriggerProbeStayInBleAction", automation.Action
+)
+ManualLiveEventObserveAction = jutta_component_ns.class_(
+    "ManualLiveEventObserveAction", automation.Action
 )
 Ble2TransportProbeAction = jutta_component_ns.class_(
     "Ble2TransportProbeAction", automation.Action
@@ -482,6 +486,19 @@ def _normalize_manual_live_trigger_probe_stayinble(value):
     )(value)
 
 
+def _normalize_manual_live_event_observe(value):
+    if value is None:
+        value = {}
+    return cv.Schema(
+        {
+            cv.Optional(CONF_ID): cv.use_id(JuraComponent),
+            cv.Optional(CONF_OBSERVE_MS, default=120000): cv.int_range(min=1000, max=180000),
+            cv.Optional(CONF_STAYINBLE, default=True): cv.boolean,
+            cv.Optional(CONF_INTERVAL_MS, default=6000): cv.int_range(min=1000, max=30000),
+        }
+    )(value)
+
+
 def _normalize_ble2_transport_probe(value):
     if isinstance(value, str):
         value = {CONF_PROBE: value}
@@ -812,6 +829,23 @@ async def manual_live_trigger_probe_stayinble_action_to_code(config, action_id, 
     parent = await _get_parent(config)
     var = cg.new_Pvariable(action_id, parent)
     cg.add(var.set_observe_ms(config[CONF_OBSERVE_MS]))
+    cg.add(var.set_interval_ms(config[CONF_INTERVAL_MS]))
+    return var
+
+
+@automation.register_action(
+    "jutta_proto.manual_live_event_observe",
+    ManualLiveEventObserveAction,
+    _normalize_manual_live_event_observe,
+    synchronous=False,
+)
+async def manual_live_event_observe_action_to_code(config, action_id, template_args, args):
+    _ = template_args
+    _ = args
+    parent = await _get_parent(config)
+    var = cg.new_Pvariable(action_id, parent)
+    cg.add(var.set_observe_ms(config[CONF_OBSERVE_MS]))
+    cg.add(var.set_stayinble(config[CONF_STAYINBLE]))
     cg.add(var.set_interval_ms(config[CONF_INTERVAL_MS]))
     return var
 
