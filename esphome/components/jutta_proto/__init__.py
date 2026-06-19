@@ -24,6 +24,7 @@ CONF_SLEEP = "sleep"
 CONF_DELAY = "delay"
 CONF_TIMEOUT = "timeout"
 CONF_OBSERVE_MS = "observe_ms"
+CONF_INTERVAL_MS = "interval_ms"
 CONF_MODE = "mode"
 CONF_DESCRIPTION = "description"
 CONF_MACHINE_DATA = "machine_data"
@@ -95,6 +96,7 @@ CONF_LIVE_DB_STATUS_POLL_ENABLED = "live_db_status_poll_enabled"
 CONF_LIVE_DB_STATUS_POLL_INTERVAL_MS = "live_db_status_poll_interval_ms"
 CONF_LIVE_DB_STATUS_RESPONSE_TIMEOUT_MS = "live_db_status_response_timeout_ms"
 CONF_ALLOW_UNSAFE_DEBUG_COMMANDS = "allow_unsafe_debug_commands"
+CONF_PMODE_KEY = "pmode_key"
 CONF_TRANSPORT = "transport"
 CONF_XML_SENSORS = "xml_sensors"
 CONF_DEBUG_UART_FRAMES = "debug_uart_frames"
@@ -122,6 +124,9 @@ ManualStatusProbeAction = jutta_component_ns.class_(
 )
 ManualHandshakeProbeAction = jutta_component_ns.class_(
     "ManualHandshakeProbeAction", automation.Action
+)
+ManualLiveTriggerProbeStayInBleAction = jutta_component_ns.class_(
+    "ManualLiveTriggerProbeStayInBleAction", automation.Action
 )
 Ble2TransportProbeAction = jutta_component_ns.class_(
     "Ble2TransportProbeAction", automation.Action
@@ -291,6 +296,7 @@ CONFIG_SCHEMA = (
                 cv.positive_int, cv.Range(min=1200)
             ),
             cv.Optional(CONF_ALLOW_UNSAFE_DEBUG_COMMANDS, default=False): cv.boolean,
+            cv.Optional(CONF_PMODE_KEY, default=0x02): cv.int_range(min=0, max=255),
             cv.Optional(CONF_XML_SENSORS, default=[]): cv.ensure_list(XML_SENSOR_SCHEMA),
             cv.Optional(CONF_DEBUG_UART_FRAMES, default=False): cv.boolean,
             cv.Optional(CONF_LOG_DECODED_TX, default=True): cv.boolean,
@@ -455,9 +461,23 @@ def _normalize_manual_handshake_probe(value):
                 {
                     "normal": "normal",
                     "test_c_app_initial_reads": "test_c_app_initial_reads",
+                    "manual_live_trigger_probe_stayinble": "manual_live_trigger_probe_stayinble",
+                    "live_trigger_stayinble": "manual_live_trigger_probe_stayinble",
                 },
                 lower=True,
             ),
+        }
+    )(value)
+
+
+def _normalize_manual_live_trigger_probe_stayinble(value):
+    if value is None:
+        value = {}
+    return cv.Schema(
+        {
+            cv.Optional(CONF_ID): cv.use_id(JuraComponent),
+            cv.Optional(CONF_OBSERVE_MS, default=30000): cv.int_range(min=1000, max=30000),
+            cv.Optional(CONF_INTERVAL_MS, default=6000): cv.int_range(min=1000, max=30000),
         }
     )(value)
 
@@ -541,6 +561,7 @@ async def to_code(config):
     cg.add(var.set_live_db_status_poll_enabled(config[CONF_LIVE_DB_STATUS_POLL_ENABLED]))
     cg.add(var.set_live_db_status_poll_interval(config[CONF_LIVE_DB_STATUS_POLL_INTERVAL_MS]))
     cg.add(var.set_live_db_status_response_timeout(config[CONF_LIVE_DB_STATUS_RESPONSE_TIMEOUT_MS]))
+    cg.add(var.set_pmode_key(config[CONF_PMODE_KEY]))
     mapping_path = config[CONF_XML_MAPPING_PATH]
     if mapping_path == "embedded":
         resolved_path = os.path.join(COMPONENT_DIR, "jura_mapping_embed.xml")
@@ -776,6 +797,22 @@ async def manual_handshake_probe_action_to_code(config, action_id, template_args
     var = cg.new_Pvariable(action_id, parent)
     cg.add(var.set_observe_ms(config[CONF_OBSERVE_MS]))
     cg.add(var.set_mode(cg.std_string(config[CONF_MODE])))
+    return var
+
+
+@automation.register_action(
+    "jutta_proto.manual_live_trigger_probe_stayinble",
+    ManualLiveTriggerProbeStayInBleAction,
+    _normalize_manual_live_trigger_probe_stayinble,
+    synchronous=False,
+)
+async def manual_live_trigger_probe_stayinble_action_to_code(config, action_id, template_args, args):
+    _ = template_args
+    _ = args
+    parent = await _get_parent(config)
+    var = cg.new_Pvariable(action_id, parent)
+    cg.add(var.set_observe_ms(config[CONF_OBSERVE_MS]))
+    cg.add(var.set_interval_ms(config[CONF_INTERVAL_MS]))
     return var
 
 
