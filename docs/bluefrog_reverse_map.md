@@ -31,7 +31,7 @@ Limitations:
 - The visible ReVa toolset did not expose a direct data-symbol rename command.
 - Struct creation was not exposed; `apply_data_type` failed on descriptor/string regions because conflicting Ghidra data/instruction markup already exists.
 - RAM/state labels below are therefore documented as intended names and field maps, but may still need manual Ghidra label/struct application.
-- `0x1898c` could only be defined as a 1-byte function stub. Keep the `maybe_` name and treat this address as not fully resolved.
+- The earlier `0x1528 -> 0x1898c` descriptor interpretation is stale. The corrected descriptor slice maps `0x1528` to raw callback `0x00018831` / Thumb-cleared `0x00018830`. `0x1898c` belongs to an adjacent/raw descriptor interpretation and should not be used as the `0x1528` callback without a separate descriptor-format audit.
 
 ## 3. Function Map
 
@@ -58,7 +58,8 @@ Limitations:
 | `0x00018900` | `ble_char_1529_pmode_write_callback` | PMode/control write callback. | confirmed_code | Known `00 7F 80` stayInBLE path. |
 | `0x00017ef4` | `pmode_write_followup_or_cache_notify` | Internal followup after PMode write final byte. | inferred | Called with final payload byte such as `0x80`. |
 | `0x00018844` | `ble_char_1527_progress_control_write_callback` | Product Progress write/control callback. | confirmed_code | Copies up to `0x13` bytes to cache staging; `0x9x` sets TV81/TV82 flags. |
-| `0x0001898c` | `maybe_ble_char_1528_update_product_progress_callback` | Candidate callback for 0x1528 Update Product Progress. | unknown | Defined as 1-byte stub; address/shape not fully understood. |
+| `0x00018830` | `ble_char_1528_update_product_progress_callback` | Corrected callback for characteristic `0x1528` in the raw descriptor slice around `0x24670`. | confirmed_code | The descriptor stores raw Thumb pointer `0x00018831`; this path updates a small progress/cache counter and does not emit machine UART TX. |
+| `0x0001898c` | `maybe_ble_char_1529_adjacent_callback` | Adjacent descriptor callback candidate from the raw descriptor slice, not the `0x1528` callback. | unknown | Earlier docs incorrectly associated this with `0x1528`; keep unresolved until the full descriptor format/name mapping is audited. |
 | `0x0001a6c0` | `set_tv81_tv82_transfer_flags` | Sets flags for `@TV:81` and `@TV:82` transfer TX. | confirmed_code | `mask&1 -> 0x4000`; `mask&2 -> 0x8000`. |
 | `0x0001d8e4` | `machine_rx_tf_status_cache_handler` | Handles machine RX `@TF...` status/alert cachewriter. | confirmed_code | Updates cache and characteristic `0x1524`. |
 | `0x0001da94` | `machine_rx_tv_progress_cache_handler` | Handles machine RX `@TV...` progress/display cachewriter. | confirmed_code | Updates cache and characteristic `0x1527`; also parses TV81 transfer response form. |
@@ -159,13 +160,41 @@ Validate field sizes row-by-row before applying globally.
 | ID | Name | Buffer / callback | Direction | Notes |
 |---|---|---|---|---|
 | `0x1524` | Machine Status Cache | value `0x20002c11`, length `0x14` | Read/cache, notify/update | Read is cache-only. Updated by `machine_rx_tf_status_cache_handler`; update via `ble_characteristic_event_dispatch(0x1524)` and `copy_machine_cache_to_ble_value_buffer(0)`. |
-| `0x1527` | Product Progress Cache | value `0x20002c25`, length `0x14`; write callback `0x18844` | Read/cache plus write/control | Read is cache-only. Updated by `machine_rx_tv_progress_cache_handler`; separate write callback is state-changing/progress-transfer. |
-| `0x1528` | Update Product Progress | callback candidate `0x1898c` | Unknown | Not fully understood; visible function definition is only a 1-byte stub. |
+| `0x1527` | Product Progress Cache | value `0x20002c25`, length `0x14` | Read/cache, notify/update | Read is cache-only. Updated by `machine_rx_tv_progress_cache_handler`. Earlier notes associated progress-control callback `0x18844` with this area, but the corrected raw descriptor slice places raw callback `0x00018845` in the adjacent `0x1530` entry; keep the characteristic ID mapping cautious until a full descriptor struct audit. |
+| `0x1528` | Update Product Progress | callback raw `0x00018831` -> `0x00018830` | Write/control callback | Corrected raw descriptor entry. This is no longer mapped to `0x1898c`; the callback updates a small cache/progress field and has no confirmed machine UART TX side effect. |
 | `0x1529` | PMode / Control Write | callback `ble_char_1529_pmode_write_callback` | Write | Known payloads include `00 7F 80` stayInBLE, `00 47 01` process next/OK, `00 47 FF` cancel/back, `00 4D...` PMode/settings, `00 7F 82...` PIN/auth, `00 7F A5` DFU/bootloader. |
+| `0x1530` | Progress/control adjacent descriptor | callback raw `0x00018845` -> `0x00018844` | Write/control | Corrected raw descriptor slice maps this entry to the legacy-named `ble_char_1527_progress_control_write_callback`; previous naming around `0x1527`/`0x1530` should be treated cautiously until the complete descriptor field layout is manually audited. |
 | `0x1531` | About Machine | source: `@T3` identity | Read/cache/info | Initial app read. |
 | `0x1533` | Statistics Command | command/control | Write/read status | Modes observed in app model: product counter, maintenance counter, maintenance status. |
 | `0x1534` | Statistics Data | data | Read/cache | Statistics data pages. |
 | `0x1538` | PMode / Settings Read | data/cache | Read | PMode/settings readback. |
+
+Corrected raw descriptor slice:
+
+```text
+ble_descriptor_correction:
+  stale_mapping_removed:
+    - 0x1528 must not be mapped to 0x1898c
+  entries:
+    - characteristic: 0x1528
+      descriptor_addr: 0x00024670
+      callback_raw: 0x00018831
+      callback_thumb_clear: 0x00018830
+      corrected_name: ble_char_1528_update_product_progress_callback
+      confidence: confirmed_descriptor_bytes
+    - characteristic: 0x1529
+      descriptor_addr: adjacent descriptor slice before 0x00024670
+      callback_raw: 0x0001898d
+      callback_thumb_clear: 0x0001898c
+      corrected_name: maybe_ble_char_1529_adjacent_callback
+      confidence: confirmed_descriptor_bytes_unresolved_semantics
+    - characteristic: 0x1530
+      descriptor_addr: adjacent descriptor slice after 0x00024670
+      callback_raw: 0x00018845
+      callback_thumb_clear: 0x00018844
+      corrected_name: ble_char_1527_progress_control_write_callback
+      confidence: confirmed_descriptor_bytes_descriptor_layout_still_needs_global_audit
+```
 
 ## 6. 0x26 Encoder/Decoder
 
@@ -444,7 +473,7 @@ Details:
 ## 14. Open Points
 
 - Exact trigger for machine-originated `@TF/@TV` remains unknown.
-- `0x1528` callback is not fully understood; `0x1898c` currently looks like an unresolved stub/thunk/alignment issue.
+- The corrected local descriptor slice maps `0x1528` to callback `0x18830`; the wider descriptor field layout around `0x1529/0x1530` still needs a full manual audit before applying a global struct.
 - No active `@TF/@TV` query was found.
 - No safe runtime test payload for `0x1527/0x9x` is defined.
 - `event_driven_likely=YES`, but the concrete machine event or mode state that emits `@TF/@TV` is not yet proven.
@@ -452,7 +481,7 @@ Details:
 
 ## 15. Highest-Priority Next Targets
 
-1. Resolve the descriptor/table row around `0x1528` and `0x1898c` without forcing a 1-byte stub.
+1. Audit the complete BLE descriptor field layout around `0x1529/0x1530`; do not reuse the stale `0x1528 -> 0x1898c` mapping.
 2. Continue from `machine_ascii_dispatcher` and all state guards that gate `@TF/@TV` handler side effects.
 3. Trace all writers of `bluefrog_state_flags_88` that may enable/disable status/progress acceptance.
 4. Trace all callers and writes feeding `machine_cache_base+0x9c` and `+0xb0` to understand TV81/TV82 transfer payload provenance.
@@ -1159,3 +1188,3344 @@ Encoding note:
 
 These logs do not send any new command. They only compare the observed ESP
 startup events/follow-up TX against the original firmware state consequences.
+
+### Static `bluefrog_machine_state_pump` Startup TX Branches
+
+This subsection is static reverse-map evidence only. It documents the confirmed
+classic BLE/BlueFrog firmware callsites around `bluefrog_machine_state_pump`
+(`0x0001bd0c`) and the direct machine UART TX helpers:
+
+- `machine_uart_send_line_encoded`
+- `machine_uart_sendf_line_encoded`
+- `machine_uart_send_prefix_hex_line`
+
+Common gating seen around these branches:
+
+```text
+common_tx_guards:
+  tx_in_progress_marker == 0
+  state_pump_substate_char == 0
+  passthrough_or_chunk_transport_busy() == false
+  app_mode_state_machine_tx_drain() == 0
+```
+
+Many `bluefrog_state+0x88` branches additionally require `(flags_88 & 0x1) == 0`
+before a new machine TX is emitted.
+
+```text
+startup_static_gap_resolution:
+  ty_branch_resolved=YES
+  tr37_callsite_resolved=YES
+  rx_to_statepump_chain_resolved=NO
+  original_sequence_order_resolved=NO
+  unresolved_reasons:
+    - isolated @t0/@t1/ty: RX handlers and their writes into state70/flags_88 were not fully separated from the generic line dispatcher in this static pass
+    - @t3 has multiple confirmed statepump TX branches and their relative startup order remains unresolved
+    - @T0/@T1/@H1 are confirmed state70-driven branches, but the complete RX-to-state70 producer chain is still incomplete
+    - @TP: is confirmed as a dynamic/cache-driven branch, not a linear startup-order proof
+```
+
+```text
+original_tx_branch:
+  frame_or_format: @T0
+  literal_address: 0x000249b0
+  sender_function: machine_uart_send_line_encoded
+  exact_callsite_address:
+    - 0x0001befe
+    - 0x0001c0aa
+  required_flags:
+    - branch_a: bluefrog_state+0x70 bit0 set and substate ((state70 & 0x1f) >> 3) == 3
+    - branch_b: bluefrog_state+0x88 retry/control bit selected by `flags_88 << 0x1b < 0`
+  required_state_fields:
+    - bluefrog_state+0x70
+    - bluefrog_state+0x88
+    - retry_counter_b for retry branch
+  required_previous_rx: not fully resolved from this local branch alone
+  required_timer_or_counter: retry_counter_b in retry branch
+  encoding_path: line helper -> machine_uart_send_line_encoded
+  flags_set_before_tx: none observed in branch body
+  flags_cleared_after_tx:
+    - branch_a clears state70 mask 0xffffffe7
+    - branch_b clears the retry bit on final retry and sets follow-up/error bits
+  next_expected_rx: @t0 or @T3 seen in runtime; exact static expectation not encoded at callsite
+  confidence: confirmed_code
+
+original_tx_branch:
+  frame_or_format: @H1
+  literal_address: 0x000249a8
+  sender_function: machine_uart_send_line_encoded
+  exact_callsite_address: 0x0001c012
+  required_flags:
+    - bluefrog_state+0x70 bit5 set
+    - bluefrog_state+0x70 bit6 clear
+  required_state_fields:
+    - bluefrog_state+0x70
+  required_previous_rx: not fully resolved
+  required_timer_or_counter: none observed at callsite
+  encoding_path: line helper -> machine_uart_send_line_encoded
+  flags_set_before_tx: none observed
+  flags_cleared_after_tx: clears state70 bit5 before TX
+  next_expected_rx: none proven; runtime `@H1` alone did not start @H? dialog
+  confidence: confirmed_code
+
+original_tx_branch:
+  frame_or_format: TY:
+  literal_address: 0x00024990
+  sender_function: machine_uart_send_line_encoded
+  exact_callsite_address: 0x0001bf3a
+  required_flags:
+    - bluefrog_state+0x88 bit0 / 0x00000001 set
+  required_state_fields:
+    - bluefrog_state+0x88
+    - state_pump_retry_counter_a
+  required_previous_rx: producer of flags_88 bit0 not fully isolated
+  required_timer_or_counter:
+    - state_pump_retry_counter_a is initialized to 4 if zero
+    - send path requires retry_counter_a > 1
+  encoding_path: line helper -> machine_uart_send_line_encoded
+  flags_set_before_tx: none observed in branch body
+  flags_cleared_after_tx:
+    - clears flags_88 bit2 / 0x00000004 before TX
+  next_expected_rx: ty:<machine type/version>
+  confidence: confirmed_code
+
+original_tx_branch:
+  frame_or_format: @T1
+  literal_address: 0x000249b8
+  sender_function: machine_uart_send_line_encoded
+  exact_callsite_address:
+    - primary branch: 0x0001c012 adjacent branch path
+    - retry branch: 0x0001c0fc
+  required_flags:
+    - primary branch: bluefrog_state+0x70 bit5 set and bit6 set
+    - retry branch: bluefrog_state+0x88 retry/control bit selected by `flags_88 << 0x1a < 0`
+  required_state_fields:
+    - bluefrog_state+0x70
+    - bluefrog_state+0x88
+    - retry_counter_b for retry branch
+  required_previous_rx: not fully resolved
+  required_timer_or_counter: retry_counter_b in retry branch
+  encoding_path: line helper -> machine_uart_send_line_encoded
+  flags_set_before_tx:
+    - retry final path sets flags_88 |= 0x100 and flags_88 |= 0x2 before follow-up handling
+  flags_cleared_after_tx:
+    - primary branch clears state70 bit5 and bit6 before TX
+    - retry branch clears the retry bit on final retry
+  next_expected_rx: @t1
+  confidence: confirmed_code
+
+original_tx_branch:
+  frame_or_format: @t2:<hex payload>
+  literal_address: 0x00024998
+  sender_function: machine_uart_send_prefix_hex_line
+  exact_callsite_address: 0x0001bfc8
+  required_flags:
+    - (flags_88 & 0x1) == 0
+    - bluefrog_state+0x88 bit selected by `flags_88 << 0x15 < 0`
+  required_state_fields:
+    - bluefrog_state+0x88
+    - bluefrog_state+0x8c payload length/source selector
+    - bluefrog_state+0x2c payload/control byte source
+    - session_state_flag19-derived bits for second payload byte
+  required_previous_rx: not fully resolved
+  required_timer_or_counter: none observed at callsite
+  encoding_path: prefix+hex builder -> machine_uart_send_line_encoded
+  flags_set_before_tx: tx_in_progress_marker set to 'P'
+  flags_cleared_after_tx: clears the prefix-hex status bit before TX
+  next_expected_rx: no direct callsite proof; runtime startup uses this as @t2:<...> control
+  confidence: confirmed_code
+
+original_tx_branch:
+  frame_or_format: @t3
+  literal_address: 0x000249a0
+  sender_function: machine_uart_send_line_encoded
+  exact_callsite_address:
+    - 0x0001be36
+    - 0x0001c10c
+  required_flags:
+    - branch_a: bluefrog_state+0x88 bit24 set, then bit25 gates actual send
+    - branch_b: bluefrog_state+0x88 bit selected by `flags_88 << 0x14 < 0`
+  required_state_fields:
+    - bluefrog_state+0x88
+    - bluefrog_state+0x8c set to 0x0b in branch_a
+  required_previous_rx: not fully resolved
+  required_timer_or_counter: none observed at callsite
+  encoding_path: line helper -> machine_uart_send_line_encoded
+  flags_set_before_tx:
+    - branch_a writes bluefrog_state+0x8c = 0x0b
+    - branch_b sets tx_in_progress_marker = 1
+  flags_cleared_after_tx:
+    - branch_a clears bit24 and, if sending, bit25
+    - branch_b clears the line-TX bit before sending
+  next_expected_rx: no direct callsite proof
+  confidence: confirmed_code_multiple_candidate_branches
+
+original_tx_branch:
+  frame_or_format: @TR:37
+  literal_address: 0x000249c0
+  sender_function: machine_uart_send_prefix_hex_line
+  exact_callsite_address: 0x0001c164
+  static_or_formatted: static prefix with zero-length payload; helper emits @TR:37 plus CRLF
+  required_flags:
+    - bluefrog_state+0x88 bit6 / 0x00000040 set
+  required_state_fields:
+    - bluefrog_state+0x88
+    - state_pump_retry_counter_b
+  required_previous_rx: producer of flags_88 bit6 not fully isolated
+  required_timer_or_counter:
+    - state_pump_retry_counter_b is initialized to 4 if zero
+    - send path requires retry_counter_b > 1
+  encoding_path: prefix+hex builder with zero payload -> machine_uart_send_line_encoded
+  flags_set_before_tx: none observed in send branch
+  flags_cleared_after_tx:
+    - not cleared in the send path
+    - final retry/failover path at 0x0001c1ce clears flags_88 bit6
+  next_expected_rx: @tr:37,<hex>
+  confidence: confirmed_code
+
+original_tx_branch:
+  frame_or_format: @TP:<single-byte hex payload>
+  literal_address: 0x00024a20
+  sender_function: machine_uart_send_prefix_hex_line
+  exact_callsite_address: 0x0001c358
+  required_flags:
+    - bluefrog_state+0x88 bit selected by `flags_88 << 0x16 < 0`
+  required_state_fields:
+    - machine_cache_base+0x3a nonzero in dynamic branch
+    - machine_cache_base+0x21 == 0 in dynamic branch
+    - high halfword of bluefrog_state+0x8c == 0
+  required_previous_rx: not fully resolved; not a linear startup-only step
+  required_timer_or_counter: none observed at callsite
+  encoding_path: prefix+hex builder -> machine_uart_send_line_encoded
+  flags_set_before_tx: none proven
+  flags_cleared_after_tx:
+    - dynamic branch clears the dynamic prefix branch bit before TX
+  next_expected_rx: @tp/@TP-related response not proven at this callsite
+  confidence: confirmed_code
+```
+
+RX to statepump chain:
+
+```text
+rx_to_statepump_chain:
+  handler: machine_rx_t2_state_handler
+  rx_line: @T2...
+  parsed_fields:
+    - ASCII hex byte sequence
+  writes_to_bluefrog_state:
+    - bluefrog_state+0x2c.. style mirrored T2 bytes
+  writes_to_machine_cache:
+    - machine_cache_base+0x72.. style mirrored T2 bytes
+  flags_88_set:
+    - 0x00000400
+    - 0x00000100 conditionally
+  flags_88_clear: none confirmed in handler body
+  enabled_statepump_branch:
+    - @t2:<hex payload> branch at 0x0001bfc8 when flags_88 bit0 is clear
+  next_expected_tx_candidate: @t2:<hex payload>
+  confidence: confirmed_code
+
+rx_to_statepump_chain:
+  handler: machine_rx_t3_identity_handler
+  rx_line: @T3...
+  parsed_fields:
+    - identity code at line+4
+    - identity/version string at line+8
+  writes_to_bluefrog_state: none beyond flags confirmed
+  writes_to_machine_cache:
+    - machine_cache_base+0x68 = parsed identity code
+    - machine_cache_base+0x88 = identity/version string, max 0x10 bytes
+  flags_88_set:
+    - 0x00000800
+    - 0x00000100 conditionally
+  flags_88_clear: none confirmed in handler body
+  enabled_statepump_branch:
+    - @t3 branch candidate at 0x0001c10c
+  next_expected_tx_candidate: @t3
+  confidence: confirmed_code
+
+rx_to_statepump_chain:
+  handler: ty_response_handler
+  rx_line: ty:<machine type/version>
+  parsed_fields: not fully isolated
+  writes_to_bluefrog_state: unresolved
+  writes_to_machine_cache: unresolved
+  flags_88_set: unresolved
+  flags_88_clear: unresolved
+  enabled_statepump_branch: unresolved
+  next_expected_tx_candidate: unresolved
+  confidence: unknown
+
+rx_to_statepump_chain:
+  handler: machine_rx_t0_handler
+  rx_line: @t0
+  parsed_fields: none proven
+  writes_to_bluefrog_state: unresolved; likely state70-related but not statically proven
+  writes_to_machine_cache: unresolved
+  flags_88_set: unresolved
+  flags_88_clear: unresolved
+  enabled_statepump_branch: unresolved
+  next_expected_tx_candidate: unresolved
+  confidence: unknown
+
+rx_to_statepump_chain:
+  handler: machine_rx_t1_handler
+  rx_line: @t1
+  parsed_fields: none proven
+  writes_to_bluefrog_state: unresolved; likely state70/session-related but not statically proven
+  writes_to_machine_cache: unresolved
+  flags_88_set: unresolved
+  flags_88_clear: unresolved
+  enabled_statepump_branch: unresolved
+  next_expected_tx_candidate: unresolved
+  confidence: unknown
+
+rx_to_statepump_chain:
+  handler: machine_rx_tr37_gate_handler -> @tr:37 subhandler 0x0001d806
+  rx_line: @tr:37,...
+  parsed_fields:
+    - four 16-bit ASCII-hex values from the response payload
+  writes_to_bluefrog_state:
+    - bluefrog_state+0x88 flags update
+  writes_to_machine_cache:
+    - machine_cache_base+0x6a = parsed u16[0]
+    - machine_cache_base+0x6c = parsed u16[1]
+    - machine_cache_base+0x6e = parsed u16[2]
+    - machine_cache_base+0x70 = parsed u16[3]
+  flags_88_set:
+    - 0x00000200
+  flags_88_clear:
+    - 0x00000040
+  enabled_statepump_branch:
+    - post-gate/session latch via flags_88 bit9, not a direct next startup TX by itself
+  next_expected_tx_candidate: none proven at this handler
+  confidence: confirmed_code
+```
+
+Derived static startup ordering:
+
+```text
+original_bluefrog_startup_sequence:
+  sequence_order: not_fully_resolved
+  confirmed_tx_frames:
+    - @T0
+    - @H1
+    - TY:
+    - @T1
+    - @t2:
+    - @t3
+    - @TR:37
+    - @TP:
+  missing_static_evidence:
+    - exact mapping from @t0/@t1/ty: RX handlers to state70/flags_88 bits
+    - complete producer chain for state70 bits that select @T0/@H1/@T1
+    - relative ordering between the two confirmed @t3 statepump branches
+    - separation of @TP: startup/heartbeat/control use from later PMode/control branches
+```
+
+`@D1` exclusion:
+
+```text
+@D1:
+  in_original_ble_firmware: NO
+  do_not_use_as_original_bluefrog_evidence: YES
+  evidence: decompilation search for @D1/@D%c/@D%d/@D:/@D returned no classic BLE firmware hits
+```
+
+### Startup Producer Chain: RX -> state70 / flags_88 -> TX
+
+This section narrows the still-open startup sequence gap to the concrete producers and consumers of
+`bluefrog_state+0x70` and `bluefrog_state_flags_88`. The focus is the classic BlueFrog state pump
+only. `@D1` remains excluded as original BlueFrog evidence.
+
+#### `bluefrog_state+0x70` writers and bit operations
+
+```text
+state70_writer:
+  address: 0x000163cc / decompile line 17 in main_loop_or_scheduler
+  function: main_loop_or_scheduler
+  instruction_or_decompiled_stmt: piVar1[0x1c] = piVar1[0x1c] | 1
+  bit_or_mask: 0x00000001
+  operation: set
+  caller_context: boot/init after reading FICR/device-id word
+  required_rx_or_event: device-id word0 cache equals 2
+  enables_tx_candidate: @T0, but only if the low substate bits also satisfy ((state70 & 0x1f) >> 3) == 3
+  disables_tx_candidate: none
+  confidence: confirmed_code for bit0 set; inferred for device-id meaning
+
+state70_writer:
+  address: 0x0001e876
+  function: maybe_session_tick_counter_and_timeout_pump
+  instruction_or_decompiled_stmt: *(uint *)(bluefrog_state + 0x70) |= 0x20
+  bit_or_mask: 0x00000020
+  operation: set
+  caller_context: periodic/session tick path
+  required_rx_or_event: service_channel_any_countdown_active() returns true
+  enables_tx_candidate: @T1, together with state70 bit6
+  disables_tx_candidate: none
+  confidence: confirmed_code
+
+state70_writer:
+  address: 0x0001e87e
+  function: maybe_session_tick_counter_and_timeout_pump
+  instruction_or_decompiled_stmt: *(uint *)(bluefrog_state + 0x70) |= 0x40
+  bit_or_mask: 0x00000040
+  operation: set
+  caller_context: periodic/session tick path
+  required_rx_or_event: service_channel_any_countdown_active() returns true
+  enables_tx_candidate: @T1 selector bit
+  disables_tx_candidate: @H1 selector path
+  confidence: confirmed_code
+
+state70_writer:
+  address: 0x0001e858
+  function: maybe_session_tick_counter_and_timeout_pump
+  instruction_or_decompiled_stmt: *(uint *)(bluefrog_state + 0x70) |= 0x20
+  bit_or_mask: 0x00000020
+  operation: set
+  caller_context: periodic/session tick path
+  required_rx_or_event: session tick counter reaches zero while no service countdown is active
+  enables_tx_candidate: @H1, because bit6 is cleared in the next statement
+  disables_tx_candidate: none
+  confidence: confirmed_code
+
+state70_writer:
+  address: 0x0001e860
+  function: maybe_session_tick_counter_and_timeout_pump
+  instruction_or_decompiled_stmt: *(uint *)(bluefrog_state + 0x70) &= 0xffffffbf
+  bit_or_mask: 0x00000040
+  operation: clear
+  caller_context: periodic/session tick timeout path
+  required_rx_or_event: session tick counter reaches zero while no service countdown is active
+  enables_tx_candidate: @H1 selector path
+  disables_tx_candidate: @T1 selector path
+  confidence: confirmed_code
+
+state70_writer:
+  address: 0x0001befe
+  function: bluefrog_machine_state_pump
+  instruction_or_decompiled_stmt: *(uint *)(bluefrog_state + 0x70) &= 0xffffffe7
+  bit_or_mask: clears 0x00000018 and 0x00000001
+  operation: clear
+  caller_context: @T0 TX branch
+  required_rx_or_event: state70 bit0 set and ((state70 & 0x1f) >> 3) == 3
+  enables_tx_candidate: none
+  disables_tx_candidate: @T0 retry/re-send until rearmed
+  confidence: confirmed_code
+
+state70_writer:
+  address: 0x0001bfd4 / 0x0001be26
+  function: bluefrog_machine_state_pump
+  instruction_or_decompiled_stmt: state70 &= 0xffffffdf; optionally state70 &= 0xffffffbf
+  bit_or_mask: clears 0x00000020; clears 0x00000040 on @T1 path
+  operation: clear
+  caller_context: @H1/@T1 TX branch
+  required_rx_or_event: state70 bit5 set
+  enables_tx_candidate: none
+  disables_tx_candidate: @H1/@T1 retry/re-send until rearmed
+  confidence: confirmed_code
+```
+
+`machine_rx_tr37_code37_subhandler` writes `machine_cache_base+0x70`, not `bluefrog_state+0x70`.
+That store belongs to the parsed `@tr:37,<hex>` response cache and is not a producer for the
+startup state70 TX selector bits.
+
+#### `bluefrog_state+0x70` state-pump consumers
+
+```text
+state70_consumer:
+  address: 0x0001bdb2..0x0001befe
+  function: bluefrog_machine_state_pump
+  tested_bit_or_mask: state70 bit0 and substate ((state70 & 0x1f) >> 3) == 3
+  required_substate: low state70 substate equals 3 after shifting bits3/4 down
+  tx_frame: @T0
+  tx_literal_or_format_addr: 0x000249b0
+  sender_helper: machine_uart_send_line_encoded
+  clears_after_tx: state70 &= 0xffffffe7
+  expected_rx: @T3... and/or @t0 observed in runtime; exact static expected-rx edge not encoded at callsite
+  confidence: confirmed_code for branch, inferred for expected_rx
+
+state70_consumer:
+  address: 0x0001be06..0x0001bfd4
+  function: bluefrog_machine_state_pump
+  tested_bit_or_mask: state70 bit5 set and state70 bit6 clear
+  required_substate: none beyond selector bits
+  tx_frame: @H1
+  tx_literal_or_format_addr: 0x000249a8
+  sender_helper: machine_uart_send_line_encoded
+  clears_after_tx: state70 &= 0xffffffdf
+  expected_rx: none directly proven; no @H? identity dialog was statically linked to this TX branch
+  confidence: confirmed_code
+
+state70_consumer:
+  address: 0x0001be06..0x0001be26
+  function: bluefrog_machine_state_pump
+  tested_bit_or_mask: state70 bit5 set and state70 bit6 set
+  required_substate: none beyond selector bits
+  tx_frame: @T1
+  tx_literal_or_format_addr: 0x000249b8
+  sender_helper: machine_uart_send_line_encoded
+  clears_after_tx: state70 &= 0xffffffdf; state70 &= 0xffffffbf
+  expected_rx: @t1
+  confidence: confirmed_code
+```
+
+#### `flags_88` writers and bit operations
+
+```text
+flags88_writer:
+  address: 0x0001a650
+  function: arm_scheduler_event1_clear_event10_if_not_forced
+  instruction_or_decompiled_stmt: flags_88 |= 0x00000001; flags_88 &= 0xffffffef
+  mask: 0x00000001 set, 0x00000010 clear
+  operation: set/clear
+  caller_context: main_loop_or_scheduler and periodic/session loop
+  required_rx_or_event: state70 bit0 is clear
+  enables_tx_candidate: TY:
+  disables_tx_candidate: event10 path represented by flags_88 0x10
+  confidence: confirmed_code
+
+flags88_writer:
+  address: 0x0001d9c8
+  function: maybe_ty_response_state_handler
+  instruction_or_decompiled_stmt: flags_88 &= 0xfffffffe; flags_88 &= 0xfffffffd; flags_88 |= 4
+  mask: 0x00000001 clear, 0x00000002 clear, 0x00000004 set
+  operation: clear/set
+  caller_context: ty: dispatcher entry points to 0x0001d9d1 Thumb, contained in this function body
+  required_rx_or_event: ty:<machine type/version>
+  enables_tx_candidate: later startup/session phase; also satisfies one gate for set_cachewriter_event40_if_session_flags_allow
+  disables_tx_candidate: TY: retry path
+  confidence: confirmed_code
+
+flags88_writer:
+  address: 0x0001a690
+  function: set_cachewriter_event40_if_session_flags_allow
+  instruction_or_decompiled_stmt: flags_88 |= 0x00000040
+  mask: 0x00000040
+  operation: set
+  caller_context: called by machine_rx_tf_status_cache_handler and machine_rx_tv_progress_cache_handler
+  required_rx_or_event: machine-originated @TF/@TV cachewriter, flags_88 0x200 clear, 0x100 set, 0x04 set, 0x40 clear
+  enables_tx_candidate: @TR:37 statepump branch
+  disables_tx_candidate: none
+  confidence: confirmed_code for cachewriter producer; not confirmed as startup producer
+
+flags88_writer:
+  address: 0x0001ced8
+  function: machine_rx_t2_state_handler
+  instruction_or_decompiled_stmt: flags_88 &= 0xffffffdf; flags_88 |= 0x400; conditionally flags_88 |= 0x100
+  mask: 0x00000020 clear, 0x00000400 set, 0x00000100 conditional set
+  operation: clear/set
+  caller_context: @T2 dispatcher entry
+  required_rx_or_event: @T2:<hex> frame accepted and parsed
+  enables_tx_candidate: @t2:<hex payload>
+  disables_tx_candidate: flags_88 0x20 phase/retry marker
+  confidence: confirmed_code
+
+flags88_writer:
+  address: 0x0001da24
+  function: machine_rx_t3_identity_handler
+  instruction_or_decompiled_stmt: flags_88 |= 0x800; conditionally flags_88 |= 0x100
+  mask: 0x00000800 set, 0x00000100 conditional set
+  operation: set
+  caller_context: @T3 dispatcher entry
+  required_rx_or_event: @T3:<identity/version> frame accepted and parsed
+  enables_tx_candidate: @t3
+  disables_tx_candidate: none
+  confidence: confirmed_code
+
+flags88_writer:
+  address: 0x0001d806
+  function: machine_rx_tr37_code37_subhandler
+  instruction_or_decompiled_stmt: flags_88 &= 0xffffffbf; flags_88 |= 0x200
+  mask: 0x00000040 clear, 0x00000200 set
+  operation: clear/set
+  caller_context: @tr dispatcher subhandler for code 0x37
+  required_rx_or_event: @tr:37,<four parsed u16 fields>
+  enables_tx_candidate: post-gate/session latch; no direct startup TX proven from this handler
+  disables_tx_candidate: @TR:37 retry/re-send until rearmed
+  confidence: confirmed_code
+
+flags88_writer:
+  address: 0x000163cc / decompile line 79
+  function: main_loop_or_scheduler
+  instruction_or_decompiled_stmt: flags_88 |= 0x00040000
+  mask: 0x00040000
+  operation: set
+  caller_context: startup/init
+  required_rx_or_event: boot/startup init path
+  enables_tx_candidate: startup one-shot state not yet tied to a specific TX branch
+  disables_tx_candidate: none
+  confidence: confirmed_code for set; unknown for consumer meaning
+
+flags88_writer:
+  address: 0x0001bf3a branch
+  function: bluefrog_machine_state_pump
+  instruction_or_decompiled_stmt: flags_88 &= 0xfffffffb before TY: TX; retry exhaustion clears 0x01 and sets 0x02
+  mask: 0x00000004 clear, 0x00000001 clear on failure, 0x00000002 set on failure
+  operation: clear/set
+  caller_context: TY: TX branch
+  required_rx_or_event: flags_88 0x01 set
+  enables_tx_candidate: failure/fallback phase if retry exhausted
+  disables_tx_candidate: TY: immediate repeat until rearmed
+  confidence: confirmed_code
+
+flags88_writer:
+  address: 0x0001c164 branch
+  function: bluefrog_machine_state_pump
+  instruction_or_decompiled_stmt: retry exhaustion clears flags_88 0x40
+  mask: 0x00000040
+  operation: clear
+  caller_context: @TR:37 TX branch
+  required_rx_or_event: flags_88 0x40 set and retry counter exhausted
+  enables_tx_candidate: none
+  disables_tx_candidate: @TR:37 repeat
+  confidence: confirmed_code
+
+flags88_writer:
+  address: 0x0001c1a8 / decompile line 210
+  function: bluefrog_machine_state_pump
+  instruction_or_decompiled_stmt: flags_88 |= 0x100; flags_88 |= 0x02 after @T1 retry/failover path
+  mask: 0x00000100 set, 0x00000002 set
+  operation: set
+  caller_context: startup-control retry/failover path
+  required_rx_or_event: retry/counter exhaustion on the surrounding startup branch
+  enables_tx_candidate: session transition/fallback phase
+  disables_tx_candidate: none directly
+  confidence: confirmed_code for writes; inferred for branch label
+```
+
+#### `flags_88` state-pump consumers
+
+```text
+flags88_consumer:
+  address: 0x0001bf3a
+  tested_mask: 0x00000001
+  tx_frame_or_family: TY:
+  tx_literal_or_format_addr: 0x00024990
+  sender_helper: machine_uart_send_line_encoded
+  required_cache_or_state_fields: retry counter A
+  clears_before_or_after_tx: clears 0x00000004 before TX; failure path clears 0x01 and sets 0x02
+  expected_rx: ty:<machine type/version>
+  confidence: confirmed_code
+
+flags88_consumer:
+  address: 0x0001bf3a / 0x0001a690
+  tested_mask: 0x00000004
+  tx_frame_or_family: TY:/cachewriter session gate
+  tx_literal_or_format_addr: 0x00024990 for TY:
+  sender_helper: machine_uart_send_line_encoded for TY:
+  required_cache_or_state_fields: for event40 helper requires flags_88 0x100 set and 0x200 clear
+  clears_before_or_after_tx: TY: branch clears 0x04 before sending
+  expected_rx: ty:<machine type/version> for TY: branch
+  confidence: confirmed_code
+
+flags88_consumer:
+  address: 0x0001c164
+  tested_mask: 0x00000040
+  tx_frame_or_family: @TR:37
+  tx_literal_or_format_addr: 0x000249c0
+  sender_helper: machine_uart_send_prefix_hex_line
+  required_cache_or_state_fields: retry counter B; zero payload
+  clears_before_or_after_tx: success subhandler clears 0x40; retry exhaustion clears 0x40
+  expected_rx: @tr:37,<hex>
+  confidence: confirmed_code
+
+flags88_consumer:
+  address: 0x0001bfc8
+  tested_mask: 0x00000400
+  tx_frame_or_family: @t2:<hex payload>
+  tx_literal_or_format_addr: 0x00024998
+  sender_helper: machine_uart_send_prefix_hex_line
+  required_cache_or_state_fields: bluefrog_state+0x8c, bluefrog_state+0x2c, session_state_flag19 bits
+  clears_before_or_after_tx: clears the prefix-hex/status transfer bit before TX
+  expected_rx: not proven at callsite
+  confidence: confirmed_code
+
+flags88_consumer:
+  address: 0x0001c10c
+  tested_mask: 0x00000800
+  tx_frame_or_family: @t3
+  tx_literal_or_format_addr: 0x000249a0
+  sender_helper: machine_uart_send_line_encoded
+  required_cache_or_state_fields: statepump line-TX marker
+  clears_before_or_after_tx: clears line-TX bit before TX and sets TX marker 1
+  expected_rx: not proven at callsite
+  confidence: confirmed_code
+
+flags88_consumer:
+  address: multiple session/cache gates
+  tested_mask: 0x00000100
+  tx_frame_or_family: no direct startup TX proven
+  tx_literal_or_format_addr: none
+  sender_helper: none
+  required_cache_or_state_fields: used by set_cachewriter_event40_if_session_flags_allow and session transition paths
+  clears_before_or_after_tx: none tied to direct TX
+  expected_rx: none
+  confidence: confirmed_code for tests; inferred for meaning
+
+flags88_consumer:
+  address: unresolved direct consumer
+  tested_mask: 0x00040000
+  tx_frame_or_family: startup one-shot state
+  tx_literal_or_format_addr: none proven
+  sender_helper: none proven
+  required_cache_or_state_fields: unknown
+  clears_before_or_after_tx: unknown
+  expected_rx: unknown
+  confidence: unknown
+```
+
+#### RX handler state effects
+
+```text
+rx_handler_state_effect:
+  rx_prefix: @t0
+  handler_address: 0x0001d9b4
+  parsed_fields: none
+  writes_state70: none confirmed
+  writes_flags88:
+    - via FUN_0001bc6c: flags_88 &= 0xffffffef
+  writes_bluefrog_state_offsets:
+    - bluefrog_state+0x8f = 0
+  writes_machine_cache_offsets:
+    - calls init_machine_status_progress_caches_and_ble_values()
+  sets_events_or_timers:
+    - clears two local byte flags near the ty/startup handler block
+  enables_next_statepump_branch: none directly proven
+  expected_next_tx: none directly proven
+  confidence: confirmed_code
+
+rx_handler_state_effect:
+  rx_prefix: @t1
+  handler_address: 0x0001ce78
+  parsed_fields: none
+  writes_state70: none confirmed
+  writes_flags88:
+    - flags_88 &= 0xfffffffd
+  writes_bluefrog_state_offsets:
+    - clears machine_handshake_rx_pending_flag
+    - clears machine_rx_line_first_byte_ptr
+    - writes line_first_byte_ptr = 0x50 ('P')
+  writes_machine_cache_offsets: none confirmed
+  sets_events_or_timers: none confirmed
+  enables_next_statepump_branch: none directly proven
+  expected_next_tx: none directly proven
+  confidence: confirmed_code
+
+rx_handler_state_effect:
+  rx_prefix: ty:
+  handler_address: 0x0001d9c8 / dispatcher pointer 0x0001d9d1 Thumb
+  parsed_fields: machine type/version line accepted by dispatcher; detailed field copy not isolated in this handler body
+  writes_state70: none confirmed
+  writes_flags88:
+    - flags_88 &= 0xfffffffe
+    - if 0x04 was clear: flags_88 &= 0xfffffffd; flags_88 |= 0x00000004
+  writes_bluefrog_state_offsets: none directly confirmed beyond flags_88
+  writes_machine_cache_offsets: none directly confirmed in handler body
+  sets_events_or_timers:
+    - optional app_mode_set_flag08_if_state_allows()
+    - arm_state_event20_clear_event10_if_allowed()
+  enables_next_statepump_branch: later startup/session phase; exact next TX not uniquely encoded in this handler
+  expected_next_tx: unresolved
+  confidence: confirmed_code
+
+rx_handler_state_effect:
+  rx_prefix: @T2
+  handler_address: 0x0001ced8
+  parsed_fields:
+    - ASCII-hex bytes from line+4 up to line+0x1e
+  writes_state70: none confirmed
+  writes_flags88:
+    - flags_88 &= 0xffffffdf
+    - flags_88 |= 0x00000400
+    - if ((bluefrog_state+0x2c) & 0x7f) == 0: flags_88 |= 0x00000100
+  writes_bluefrog_state_offsets:
+    - bluefrog_state+0x2c.. receives parsed T2 bytes
+    - bluefrog_state+0x8d receives length/marker
+  writes_machine_cache_offsets:
+    - machine_cache_base+0x72.. mirrors parsed T2 bytes
+  sets_events_or_timers: none separately proven
+  enables_next_statepump_branch: @t2:<hex payload> branch at 0x0001bfc8
+  expected_next_tx: @t2:<hex payload>
+  confidence: confirmed_code
+
+rx_handler_state_effect:
+  rx_prefix: @T3
+  handler_address: 0x0001da24
+  parsed_fields:
+    - u16 identity code from line+4
+    - identity/version string from line+8
+  writes_state70: none confirmed
+  writes_flags88:
+    - flags_88 |= 0x00000800
+    - if ((bluefrog_state+0x2c) & 0x7f) != 0: flags_88 |= 0x00000100
+  writes_bluefrog_state_offsets: none directly confirmed beyond flags_88
+  writes_machine_cache_offsets:
+    - machine_cache_base+0x68 = parsed identity code
+    - machine_cache_base+0x88 = identity/version string, max 0x10 bytes
+  sets_events_or_timers: none separately proven
+  enables_next_statepump_branch: @t3 branch at 0x0001c10c
+  expected_next_tx: @t3
+  confidence: confirmed_code
+
+rx_handler_state_effect:
+  rx_prefix: @tr:37
+  handler_address: 0x0001d788 dispatcher -> 0x0001d806 code37 subhandler
+  parsed_fields:
+    - four 16-bit ASCII-hex fields from @tr:37 payload
+  writes_state70: none; writes machine_cache_base+0x70, not bluefrog_state+0x70
+  writes_flags88:
+    - flags_88 &= 0xffffffbf
+    - flags_88 |= 0x00000200
+  writes_bluefrog_state_offsets:
+    - flags_88 only
+  writes_machine_cache_offsets:
+    - machine_cache_base+0x6a = parsed u16[0]
+    - machine_cache_base+0x6c = parsed u16[1]
+    - machine_cache_base+0x6e = parsed u16[2]
+    - machine_cache_base+0x70 = parsed u16[3]
+  sets_events_or_timers:
+    - clears DAT_20002798 marker
+  enables_next_statepump_branch: post-gate/session latch via flags_88 0x200
+  expected_next_tx: none directly proven
+  confidence: confirmed_code
+```
+
+#### Static sequence conclusion
+
+```text
+startup_static_gap_resolution:
+  state70_writers_mapped_for_requested_bits: YES
+  flags88_writers_mapped_for_requested_masks: YES
+  rx_handler_state_effects_mapped: YES
+  original_sequence_order_resolved: NO
+```
+
+The individual producer/consumer edges are now mapped for the requested `state70` bits and
+`flags_88` masks, but the exact original startup order is still not fully statically derivable.
+The remaining gaps are no longer broad "unknown handler" gaps; they are specific missing producer
+or relation points:
+
+```text
+unresolved_sequence_blockers:
+  - missing_writer_for: state70_bits3_4_substate
+    affects_tx: @T0
+    why_unresolved: state70 bit0 producer is confirmed, but the producer for the substate required by ((state70 & 0x1f) >> 3) == 3 was not found in the focused XREF pass.
+    next_static_target: all low-byte/low-nibble assignments to bluefrog_state+0x70, especially init and table-driven writes around main_loop_or_scheduler.
+
+  - missing_writer_for: session_tick_counter_state seed feeding state70 bit5/bit6
+    affects_tx: @H1 / @T1
+    why_unresolved: the bit5/bit6 writer is confirmed in maybe_session_tick_counter_and_timeout_pump, but the RX/event that seeds the session tick counter consumed by that function is not yet mapped.
+    next_static_target: writers of session_tick_counter_state+2/+4 and caller chain around 0x0001e8b4 / 0x0001e94a.
+
+  - missing_writer_for: flags88_0x40_startup_producer
+    affects_tx: @TR:37
+    why_unresolved: a confirmed 0x40 producer exists after @TF/@TV cachewriter handling, but the startup producer that arms @TR:37 before the observed gate response was not found in this pass.
+    next_static_target: all writes to flags_88 bit6 through non-literal assignments, retry/failover paths, and aliases of bluefrog_state_flags_88.
+
+  - missing_consumer_for: flags88_0x40000
+    affects_tx: startup one-shot state
+    why_unresolved: main_loop_or_scheduler sets 0x00040000, but no direct startup TX consumer was proven.
+    next_static_target: high-bit tests in bluefrog_machine_state_pump and companion startup helpers.
+```
+
+`@D1` remains excluded:
+
+```text
+@D1:
+  in_original_ble_firmware: NO
+  do_not_use_as_original_bluefrog_evidence: YES
+```
+
+### Final Remaining Blocker: `session_tick_counter_state+4` seed for `@H1/@T1`
+
+Scope for this pass:
+
+```text
+target_range:
+  - 0x20002788..0x20002790
+
+target_field:
+  - 0x2000278c = session_tick_counter_state+4 halfword countdown
+
+out_of_scope:
+  - 0x25058 / 0x16294 / GPIO button watch / @T0 substate
+  - @TF/@TV
+  - @TV:81/@TV:82
+  - @TS:9x
+  - PMode / DFU / product commands
+  - WLAN firmware
+  - ESP runtime changes
+```
+
+#### Alias / block writer search
+
+Direct XREFs remain restricted to the consumer/maintenance routine:
+
+```text
+session_tick_seed_alias_candidate:
+  address: 0x0001e824..0x0001e887
+  function: maybe_session_tick_counter_and_timeout_pump
+  instruction_or_decompiled_stmt:
+    - 0x0001e83c reads *(uint16_t *)0x2000278c
+    - 0x0001e84c reads *(uint16_t *)0x2000278c
+    - 0x0001e852 writes decremented halfword back to 0x2000278c
+    - 0x0001e874 clears 0x2000278c to zero on service-channel active path
+  access: read/write/clear
+  target_range: 0x20002788..0x20002790
+  covers_0x2000278c: YES
+  value_or_source:
+    - decrement current value by 1
+    - clear to 0 when service_channel_any_countdown_active() is true
+  condition:
+    - state70 bit5 currently clear
+    - *(uint16_t *)0x2000278c != 0
+    - function is called on the scheduler/tick cadence
+  caller_chain:
+    - main_loop_or_scheduler
+    - backend scheduler handle registered by backend_register_callback_handle_guarded()
+    - backend callback 0x0001e8b5
+    - maybe_session_tick_counter_and_timeout_pump()
+  confidence: confirmed_code
+```
+
+Boot/runtime init aliasing:
+
+```text
+session_tick_seed_alias_candidate:
+  address: 0x0003ef98 / init table at 0x0003f1d4
+  function: bootloader_runtime_init_copy_table_then_main
+  instruction_or_decompiled_stmt:
+    - table entry 0x0003f1e4: src=0x0003f318, dst=0x20002124, byte_count=0x186c, handler=0x0003efe6
+    - range covers 0x20002124..0x20003990, including 0x2000278c
+  access: init/clear
+  target_range: 0x20002124..0x20003990
+  covers_0x2000278c: YES
+  value_or_source: zero-fill style bootloader/BSS init entry
+  condition: bootloader runtime init path before bootloader_main()
+  caller_chain:
+    - bootloader_entry_after_reset
+    - bootloader_runtime_init_copy_table_then_main
+  confidence: confirmed_code for range coverage; inferred for zero-fill handler because 0x0003efe6 is table-handler data adjacent to bootloader memset helpers
+  note:
+    - This clears the field to zero. It does not seed a nonzero countdown for @H1/@T1.
+    - It belongs to bootloader runtime initialization and is not evidence of a BlueFrog runtime seed.
+```
+
+Application `.data` copy aliasing:
+
+```text
+session_tick_seed_alias_candidate:
+  address: 0x00020798..0x000207c2
+  function: app/runtime .data copy helper
+  instruction_or_decompiled_stmt:
+    - source 0x0002504c
+    - destination 0x20002000
+    - end 0x200020f8
+  access: copy/init
+  target_range: 0x20002000..0x200020f8
+  covers_0x2000278c: NO
+  value_or_source: flash .data image
+  condition: reset/runtime init
+  caller_chain: reset/startup path
+  confidence: confirmed_code
+```
+
+Other memset/copy candidates checked:
+
+```text
+session_tick_seed_alias_candidate:
+  address: multiple crt_memset_bytes callers
+  function: searched memset/copy callers
+  instruction_or_decompiled_stmt:
+    - machine_transport_state_clear clears machine_transport_state_block only
+    - machine_passthrough_fifo_init clears machine_passthrough_fifo_struct only
+    - init_machine_status_progress_caches_and_ble_values clears machine_cache/progress areas only
+    - gpio_watch_table_init clears GPIO watch table only
+    - app_mode and cache init clears unrelated blocks
+  access: clear/copy
+  target_range: varied, none overlap 0x20002788..0x20002790
+  covers_0x2000278c: NO
+  value_or_source: zero/copy unrelated state
+  condition: init/runtime helpers
+  caller_chain: varied
+  confidence: confirmed_code from crt_memset_bytes XREF list
+```
+
+Raw pointer scan summary:
+
+```text
+raw_pointer_scan_checked: YES
+
+raw_pointer_hits_near_target:
+  - 0x20002784 referenced at 0x0001e5cc, app-mode notification byte/state; adjacent but separate
+  - 0x20002788 referenced at 0x0001e888 and 0x0001e8b0; both literals for maybe_session_tick_counter_and_timeout_pump
+  - 0x20002790 referenced at 0x0001eb9c, 0x0001ebdc, 0x0001ec04, 0x0001ec24; backend scheduler handle/toggle state adjacent after target object
+
+raw_pointer_hits_absent:
+  - no flash pointer to 0x2000278c
+  - no flash pointer to 0x2000278a
+  - no direct larger-struct pointer that is consumed as a write source for 0x2000278c
+```
+
+#### Structure around `0x20002788`
+
+```text
+session_tick_counter_state_layout:
+  base: 0x20002788
+  suspected_struct_start: 0x20002788
+  suspected_struct_end: 0x20002790
+  fields:
+    - offset: +0x00
+      width: 4 bytes
+      access_pattern:
+        - read at 0x0001e828
+        - increment/write at 0x0001e830 while value <= 0x32
+        - clear/write at 0x0001e86c when threshold exceeded
+      meaning: coarse tick accumulator; every rollover calls decrement_service_channel_countdowns()
+
+    - offset: +0x04
+      width: 2 bytes
+      access_pattern:
+        - read/test nonzero at 0x0001e83c
+        - read/decrement at 0x0001e84c
+        - write decremented value at 0x0001e852
+        - clear to zero at 0x0001e874
+      meaning: H1/T1 halfword countdown gate; nonzero enables production of state70 bit5
+
+    - offset: +0x06
+      width: 2 bytes
+      access_pattern: no direct XREF in this pass
+      meaning: padding or unused/reserved in this small object
+
+  neighboring_ram_symbols_or_literals:
+    - 0x20002784: app-mode/notification adjacent state, referenced by ble_mode_state_update_enqueue
+    - 0x20002790: backend callback/toggle state used by 0x0001e8b4 and backend_start_or_enable_handle_guarded
+    - 0x20002794: backend handle slot written by backend_register_callback_handle_guarded, read by backend_start_or_enable_handle_guarded
+
+  confidence: PARTIAL
+```
+
+Layout interpretation:
+
+```text
+session_tick_counter_state:
+  0x20002788..0x2000278f is a small standalone BSS object immediately before backend handle state.
+  0x20002790 begins the scheduler/toggle state for the periodic callback that invokes the tick routine.
+  The target halfword is not part of bluefrog_state and not part of the 0x20002000 .data copy image.
+```
+
+#### Tick caller chain
+
+Registration path:
+
+```text
+tick_caller_chain:
+  - function: main_loop_or_scheduler
+    callsite: 0x0001647a
+    cadence_or_trigger: startup initialization
+    condition: after GPIO/backend setup and before machine transport init/start
+    relationship_to_session_tick_counter_state:
+      - calls backend_register_callback_handle_guarded()
+
+  - function: backend_register_callback_handle_guarded
+    callsite: 0x0001ebc8..0x0001ebca
+    cadence_or_trigger: registration only
+    condition: startup init
+    relationship_to_session_tick_counter_state:
+      - registers callback pointer 0x0001e8b5
+      - writes returned handle index into 0x20002794
+
+  - function: main_loop_or_scheduler
+    callsite: 0x00016482
+    cadence_or_trigger: startup enable
+    condition: after backend_register_callback_handle_guarded()
+    relationship_to_session_tick_counter_state:
+      - calls backend_start_or_enable_handle_guarded()
+
+  - function: backend_start_or_enable_handle_guarded
+    callsite: 0x0001ebee..0x0001ebf2
+    cadence_or_trigger: backend enqueue/start
+    condition: reads handle from 0x20002794
+    relationship_to_session_tick_counter_state:
+      - calls backend_enqueue_start_handle(handle, 0x10, 0)
+      - 0x10 is the scheduler interval/timeout value for callback 0x0001e8b5
+
+  - function: backend scheduler dispatch
+    callsite: indirect, callback pointer 0x0001e8b5
+    cadence_or_trigger: backend interval callback
+    condition: scheduler handle active
+    relationship_to_session_tick_counter_state:
+      - invokes 0x0001e8b4 tick body
+
+  - function: 0x0001e8b4 tick body
+    callsite: 0x0001e94a
+    cadence_or_trigger:
+      - callback toggles/accumulates state at 0x20002790 and 0x20002050
+      - calls maybe_session_tick_counter_and_timeout_pump() only on its internal 10-tick cadence and when state70 bit0 is set
+    condition:
+      - state70 bit0 set
+      - internal halfword puVar6[3] exceeds 9
+    relationship_to_session_tick_counter_state:
+      - calls maybe_session_tick_counter_and_timeout_pump()
+
+  - function: maybe_session_tick_counter_and_timeout_pump
+    callsite: entered from 0x0001e94a
+    cadence_or_trigger: every tenth backend tick while state70 bit0 is set
+    condition:
+      - reads/increments 0x20002788
+      - only uses 0x2000278c if it is already nonzero and state70 bit5 is clear
+    relationship_to_session_tick_counter_state:
+      - decrements/clears 0x2000278c
+      - sets state70 bit5 and optionally bit6
+```
+
+#### Seed result
+
+```text
+session_tick_counter_state_seed_result:
+  seed_writer_found: NO
+  direct_xrefs_checked: YES
+  raw_pointer_scan_checked: YES
+  block_copy_aliasing_checked: YES
+  larger_struct_checked: PARTIAL
+  caller_chain_checked: YES
+  seed_writer_address: none found
+  seed_writer_function: none found
+  seed_value_or_source: none found
+  condition: unresolved
+  can_explain_H1_T1_timing: PARTIAL
+  likely_reason_unresolved:
+    - 0x2000278c is explicitly consumed as a nonzero countdown gate, but the nonzero seed is not present in direct data XREFs.
+    - Boot/runtime block writers found in this pass either do not cover the target or clear it to zero.
+    - The seed may be written through an unresolved alias, an event/scheduler data structure not recovered by Ghidra XREFs, or a store whose base register is not associated with 0x20002788.
+  next_static_target:
+    - recover backend scheduler queue/event writes that can pass context into callback 0x0001e8b5
+    - inspect low-level stores into RAM window 0x20002780..0x20002798 by instruction pattern rather than symbol XREF
+    - inspect unresolved computed-call targets around backend scheduler dispatch
+```
+
+Consequence for `@H1/@T1`:
+
+```text
+H1_T1_consequence:
+  known:
+    - If 0x2000278c is nonzero and service_channel_any_countdown_active() is false until countdown reaches zero, state70 bit5 is set and bit6 is clear -> @H1 branch.
+    - If 0x2000278c is nonzero and service_channel_any_countdown_active() is true, state70 bit5 and bit6 are set -> @T1 branch.
+    - The periodic backend callback path and cadence are statically mapped.
+  unknown:
+    - Which original event seeds 0x2000278c to a nonzero value.
+  confidence:
+    - confirmed_code for consumer/timing mechanics
+    - unknown for seed producer
+```
+
+`@D1` remains excluded:
+
+```text
+@D1:
+  in_original_ble_firmware: NO
+  do_not_use_as_original_bluefrog_evidence: YES
+```
+
+### Backend Scheduler Role of `session_tick_counter_state`
+
+Scope for this pass:
+
+```text
+focus:
+  - maybe_session_tick_counter_and_timeout_pump
+  - registered backend callback 0x0001e8b5 / clear address 0x0001e8b4
+  - session_tick_counter_state = 0x20002788
+  - session_tick_counter_state+4 = 0x2000278c
+  - backend registration/start wrappers around 0x20002790 / 0x20002794
+
+out_of_scope:
+  - 0x25058 / 0x16294 / GPIO button watch / @T0 substate
+  - @TF/@TV
+  - @TV:81/@TV:82
+  - @TS:9x
+  - PMode / DFU / product commands
+  - WLAN firmware
+  - ESP runtime changes
+```
+
+#### Backend registration of callback `0x0001e8b5`
+
+```text
+tick_backend_registration:
+  callsite: 0x0001647a
+  caller_function: main_loop_or_scheduler
+  registration_function: backend_register_callback_handle_guarded
+  callback_arg: indirect, wrapper-local literal backend_callback_guard_value = 0x0001e8b5
+  context_arg: none at registration site
+  interval_or_period_arg: none at registration site
+  flags_arg: enabled byte 0x01 passed to backend_register_handle()
+  handle_storage: 0x20002794 = backend_callback_handle_state+4
+  enabled_immediately: NO
+  condition:
+    - after backend_scheduler_init()
+    - after GPIO watch/button-watch init
+    - before machine_transport_ring_and_peripheral_init()
+  confidence: confirmed_code
+
+tick_backend_registration:
+  callsite: 0x0001ebca
+  caller_function: backend_register_callback_handle_guarded
+  registration_function: backend_register_handle
+  callback_arg: 0x0001e8b5
+  context_arg: not passed as separate context; callback_or_context parameter is the callback pointer
+  interval_or_period_arg: none
+  flags_arg: 0x01
+  handle_storage: 0x20002794
+  enabled_immediately: NO
+  condition: wrapper called from main_loop_or_scheduler during startup init
+  confidence: confirmed_code
+
+tick_backend_registration:
+  callsite: 0x00016482
+  caller_function: main_loop_or_scheduler
+  registration_function: backend_start_or_enable_handle_guarded
+  callback_arg: previously registered handle read from 0x20002794
+  context_arg: 0
+  interval_or_period_arg: 0x10
+  flags_arg: none visible; third argument is 0
+  handle_storage: 0x20002794
+  enabled_immediately: YES
+  condition:
+    - immediately after machine_transport_ring_and_peripheral_init()
+    - before session record load and BLE/service init
+  confidence: confirmed_code
+
+tick_backend_registration:
+  callsite: 0x0001ebf2
+  caller_function: backend_start_or_enable_handle_guarded
+  registration_function: backend_enqueue_start_handle
+  callback_arg: handle index read from 0x20002794
+  context_arg: 0
+  interval_or_period_arg: 0x10
+  flags_arg: none visible
+  handle_storage: 0x20002794
+  enabled_immediately: YES
+  condition: wrapper called from startup and after flash/session persistence operations
+  confidence: confirmed_code
+```
+
+Handle and neighboring object relation:
+
+```text
+backend_handle_relation:
+  0x20002788..0x2000278f:
+    role: session_tick_counter_state object used directly by maybe_session_tick_counter_and_timeout_pump
+    contains:
+      - +0x00 word coarse tick accumulator
+      - +0x04 halfword H1/T1 countdown gate
+      - +0x06 no recovered access, likely padding/reserved
+
+  0x20002790:
+    role: adjacent backend callback handle state base used by start/stop wrappers
+    evidence:
+      - backend_start_or_enable_handle_guarded passes backend_handle_start_state+4 to read the handle
+      - backend_stop_or_disable_handle_guarded passes backend_handle_stop_state+4 to read the handle
+
+  0x20002794:
+    role: stored backend handle index for callback 0x0001e8b5
+    evidence:
+      - backend_register_callback_handle_guarded passes (0x20002790 + 4) as out_handle_index
+      - backend_start_or_enable_handle_guarded reads *(uint32_t *)0x20002794
+      - backend_stop_or_disable_handle_guarded reads *(uint32_t *)0x20002794
+
+  interpretation:
+    - The handle state is adjacent to, but distinct from, the countdown object.
+    - No callback context pointer to 0x20002788 is passed via backend_enqueue_start_handle(); the callback uses globals.
+  confidence: confirmed_code for addresses and accesses; inferred for object boundary
+```
+
+#### Callback ABI
+
+```text
+tick_callback_abi:
+  function: 0x0001e8b4 tick body, registered as Thumb pointer 0x0001e8b5
+  param_1_source: none recovered / unused
+  param_2_source: none recovered / unused
+  uses_context_pointer: NO
+  uses_global_0x20002788: YES
+  reads_0x2000278c: YES
+  writes_0x2000278c: YES
+  writes_state70: YES
+  relationship_to_H1_T1:
+    - callback body reaches maybe_session_tick_counter_and_timeout_pump() on its internal cadence
+    - maybe_session_tick_counter_and_timeout_pump() consumes the halfword countdown at 0x2000278c
+    - when countdown expires with no active service-channel countdown, it sets state70 bit5 and clears bit6 -> @H1 branch
+    - when a service-channel countdown is active, it clears 0x2000278c and sets state70 bit5 and bit6 -> @T1 branch
+  confidence: confirmed_code
+```
+
+The direct consumer remains:
+
+```text
+maybe_session_tick_counter_and_timeout_pump:
+  function: 0x0001e824
+  signature: void maybe_session_tick_counter_and_timeout_pump(void)
+  coarse_tick:
+    - increments *(uint32_t *)0x20002788 while below 0x32
+    - resets *(uint32_t *)0x20002788 to 0 and calls decrement_service_channel_countdowns() on rollover
+  countdown_gate:
+    - only evaluated when state70 bit5 is clear
+    - only evaluated when *(uint16_t *)0x2000278c is nonzero
+  service_channel_branch:
+    - service_channel_any_countdown_active() == true:
+      - *(uint16_t *)0x2000278c = 0
+      - state70 |= 0x20
+      - state70 |= 0x40
+      - enables @T1 selector
+    - service_channel_any_countdown_active() == false:
+      - decrement *(uint16_t *)0x2000278c
+      - if countdown reaches zero:
+        - state70 |= 0x20
+        - state70 &= ~0x40
+        - enables @H1 selector
+  confidence: confirmed_code
+```
+
+#### Classification of `0x2000278c`
+
+```text
+session_tick_counter_classification:
+  candidate_role: timeout_counter
+  evidence_for_startup_seed:
+    - Weak/inconclusive: state70 bit5/bit6 feed startup-looking TX branches @H1/@T1.
+    - No seed writer from startup RX handlers or linear startup state was found.
+  evidence_for_timeout_counter:
+    - registered through backend scheduler as callback 0x0001e8b5
+    - started with interval_or_period_arg=0x10
+    - consumed only by a periodically invoked tick/timeout pump
+    - value is decremented to zero rather than matched against a startup state
+    - one branch explicitly depends on service_channel_any_countdown_active()
+  evidence_for_periodic_poll:
+    - callback registration/start is unconditional during main_loop_or_scheduler init
+    - tick body is independent of machine RX lines once state70 bit0 is set
+    - repeated start/stop occurs around flash/session persistence, consistent with backend timing rather than machine startup sequencing
+  evidence_for_service_channel:
+    - calls decrement_service_channel_countdowns()
+    - calls service_channel_any_countdown_active()
+    - @T1-vs-@H1 selector is chosen by service_channel_any_countdown_active()
+  evidence_against_startup_sequence:
+    - no direct RX handler was found writing 0x2000278c
+    - no direct startup init writer seeds 0x2000278c nonzero
+    - backend_enqueue_start_handle() passes context_arg=0, so 0x20002788 is not a callback context object seeded by registration
+    - @H1/@T1 production requires elapsed backend ticks and the nonzero countdown gate
+  confidence: PARTIAL
+```
+
+#### Relationship to original startup sequence
+
+```text
+h1_t1_sequence_role:
+  is_linear_startup_step: NO
+  is_timeout_generated: YES
+  is_periodic_backend_generated: YES
+  should_be_required_for_esp_startup_emulation: UNKNOWN
+  reason:
+    - The static code path proves @H1/@T1 can be produced from a periodic backend timeout chain.
+    - The path does not prove that @H1/@T1 are mandatory ordered startup frames.
+    - The remaining missing piece is not a statepump order relation but the nonzero seed writer for 0x2000278c.
+    - Until that seed is found, @H1/@T1 should be treated as timeout/backend side effects that may occur during startup, not as confirmed required linear startup steps.
+```
+
+Updated blocker interpretation:
+
+```text
+remaining_static_blockers_after_this_run:
+  - blocker: session_tick_counter_state+4_nonzero_seed_writer
+    why_unresolved:
+      - The backend registration, callback ABI, callback cadence, and H1/T1 consumer logic are mapped.
+      - The nonzero seed writer for 0x2000278c is still not found.
+      - The code now indicates that the unresolved item is more likely a timeout/service-channel seed than a missing linear startup-sequence writer.
+    next_static_target:
+      - backend/service-channel setup paths that can seed delayed operations
+      - stores into service-channel countdown state which may be paired with 0x2000278c
+      - unresolved scheduler/event callbacks that write small global timeout objects
+```
+
+`@D1` remains excluded:
+
+```text
+@D1:
+  in_original_ble_firmware: NO
+  do_not_use_as_original_bluefrog_evidence: YES
+```
+
+### Core Session Gate Chain: `TY` / `T2` / `T3` / `TR37`
+
+Scope for this pass:
+
+```text
+focus:
+  - TY:
+  - @T2 / @t2:
+  - @T3 / @t3
+  - @TR:37 / @tr:37
+  - bluefrog_state_flags_88 masks 0x100, 0x400, 0x800, 0x40
+
+out_of_scope:
+  - @T0
+  - @H1 / @T1
+  - @D1
+  - state70 / GPIO button watch
+  - backend scheduler callback 0x0001e8b5
+  - @TV:81 / @TV:82
+  - @TS:9x
+  - PMode / DFU / product commands
+  - WLAN firmware
+```
+
+#### Core session chain steps
+
+```text
+core_session_chain_step:
+  step_id: rx_t2
+  direction: RX
+  frame_or_prefix: @T2...
+  handler_or_callsite: machine_rx_t2_state_handler @ 0x0001ced8
+  required_flags_before: none proven
+  required_state_before: valid machine line dispatched as @T2
+  writes_flags_88:
+    - clears 0x20 phase/retry marker with flags_88 &= 0xffffffdf
+    - sets 0x400
+    - conditionally sets 0x100 when first parsed T2 byte masked with 0x7f is zero
+  clears_flags_88:
+    - 0x20
+  writes_machine_cache:
+    - machine_cache_base+0x72.. mirrored T2 bytes
+  writes_bluefrog_state:
+    - bluefrog_state+0x2c.. mirrored T2 bytes
+    - DAT_20002791 tx-in-progress marker/state byte is cleared
+  enables_next_tx:
+    - @t2:<hex payload> branch at 0x0001bfc8 when flags_88 bit selected by `flags_88 << 0x15 < 0` is consumed
+  expected_next_rx:
+    - not encoded in handler body; @T2 is a producer for @t2: state
+  confidence: confirmed_code
+
+core_session_chain_step:
+  step_id: tx_t2
+  direction: TX
+  frame_or_prefix: @t2:<hex payload>
+  handler_or_callsite: bluefrog_machine_state_pump @ 0x0001bfc8
+  required_flags_before:
+    - (flags_88 & 0x1) == 0
+    - flags_88 bit tested by `flags_88 << 0x15 < 0`
+  required_state_before:
+    - bluefrog_state+0x8c payload length/source selector
+    - bluefrog_state+0x2c payload/control byte source from @T2 handler
+    - session_state_flag19-derived second payload byte
+  writes_flags_88: none proven before TX
+  clears_flags_88:
+    - clears the consumed prefix-hex status bit before TX
+  writes_machine_cache: none at TX callsite
+  writes_bluefrog_state:
+    - tx_in_progress_marker = 'P'
+  enables_next_tx: none directly; sends response/control line toward machine
+  expected_next_rx: not statically encoded at callsite
+  confidence: confirmed_code
+
+core_session_chain_step:
+  step_id: rx_t3
+  direction: RX
+  frame_or_prefix: @T3:<identity/version>
+  handler_or_callsite: machine_rx_t3_identity_handler @ 0x0001da24
+  required_flags_before: none proven
+  required_state_before: valid machine line dispatched as @T3
+  writes_flags_88:
+    - sets 0x800
+    - conditionally sets 0x100 when (bluefrog_state+0x2c & 0x7f) is nonzero
+  clears_flags_88: none confirmed in handler body
+  writes_machine_cache:
+    - machine_cache_base+0x68 = parsed u16 from line+4
+    - machine_cache_base+0x88 = identity/version text from line+8, max 0x10 bytes
+  writes_bluefrog_state: none confirmed beyond flags_88
+  enables_next_tx:
+    - @t3 branch candidate at 0x0001c10c
+  expected_next_rx:
+    - not encoded in handler body; @T3 is a producer for identity/cache and @t3 state
+  confidence: confirmed_code
+
+core_session_chain_step:
+  step_id: tx_t3
+  direction: TX
+  frame_or_prefix: @t3
+  handler_or_callsite:
+    - bluefrog_machine_state_pump @ 0x0001be36
+    - bluefrog_machine_state_pump @ 0x0001c10c
+  required_flags_before:
+    - branch_a: flags_88 bit24 set; bit25 gates actual send
+    - branch_b: flags_88 bit tested by `flags_88 << 0x14 < 0`
+  required_state_before:
+    - bluefrog_state+0x88
+    - branch_a writes bluefrog_state+0x8c = 0x0b
+  writes_flags_88: none as a session-ready latch
+  clears_flags_88:
+    - branch_a clears bit24 and, if sending, bit25
+    - branch_b clears the consumed line-TX bit
+  writes_machine_cache: none at TX callsite
+  writes_bluefrog_state:
+    - branch_a writes bluefrog_state+0x8c = 0x0b
+    - branch_b sets tx_in_progress_marker = 1
+  enables_next_tx: none directly proven
+  expected_next_rx: not statically encoded at callsite
+  confidence: confirmed_code_multiple_candidate_branches
+
+core_session_chain_step:
+  step_id: tx_ty
+  direction: TX
+  frame_or_prefix: TY:
+  handler_or_callsite: bluefrog_machine_state_pump @ 0x0001bf3a
+  required_flags_before:
+    - flags_88 0x01 set
+  required_state_before:
+    - retry_counter_a initialized to 4 if zero
+    - send path requires retry_counter_a > 1
+  writes_flags_88: none before TX
+  clears_flags_88:
+    - clears 0x04 before TX
+  writes_machine_cache: none at TX callsite
+  writes_bluefrog_state: retry counter state
+  enables_next_tx: none directly; waits for type response
+  expected_next_rx: ty:<machine type/version>
+  confidence: confirmed_code
+
+core_session_chain_step:
+  step_id: rx_ty
+  direction: RX
+  frame_or_prefix: ty:<machine type/version>
+  handler_or_callsite: ty_response_handler / startup branch, not fully isolated in this pass
+  required_flags_before: unresolved
+  required_state_before: valid machine type line
+  writes_flags_88:
+    - existing reverse map confirms interaction with 0x04 around TY phase
+  clears_flags_88: unresolved
+  writes_machine_cache: unresolved
+  writes_bluefrog_state: unresolved
+  enables_next_tx: unresolved
+  expected_next_rx: unresolved
+  confidence: PARTIAL
+
+core_session_chain_step:
+  step_id: tx_tr37
+  direction: TX
+  frame_or_prefix: @TR:37
+  handler_or_callsite: bluefrog_machine_state_pump @ 0x0001c164
+  required_flags_before:
+    - flags_88 0x40 set
+  required_state_before:
+    - retry_counter_b initialized to 4 if zero
+    - send path requires retry_counter_b > 1
+  writes_flags_88: none before TX
+  clears_flags_88:
+    - not cleared in send path
+    - final retry/failover path clears 0x40
+  writes_machine_cache: none at TX callsite
+  writes_bluefrog_state: retry counter state
+  enables_next_tx: none directly; waits for gate response
+  expected_next_rx: @tr:37,<hex>
+  confidence: confirmed_code
+
+core_session_chain_step:
+  step_id: rx_tr37
+  direction: RX
+  frame_or_prefix: @tr:37,...
+  handler_or_callsite:
+    - machine_rx_tr37_gate_handler @ 0x0001d788
+    - @tr:37 subhandler @ 0x0001d806
+  required_flags_before: @TR:37 response path expected, but handler dispatch itself does not prove a flag precheck
+  required_state_before: valid @tr line with subcode 0x37
+  writes_flags_88:
+    - clears 0x40
+    - sets 0x200
+  clears_flags_88:
+    - 0x40
+  writes_machine_cache:
+    - machine_cache_base+0x6a = parsed u16[0]
+    - machine_cache_base+0x6c = parsed u16[1]
+    - machine_cache_base+0x6e = parsed u16[2]
+    - machine_cache_base+0x70 = parsed u16[3]
+  writes_bluefrog_state:
+    - bluefrog_state+0x88 flags update
+  enables_next_tx:
+    - post-gate/session latch via flags_88 0x200; no direct next startup TX proven
+  expected_next_rx: none proven
+  confidence: confirmed_code
+```
+
+#### Core `flags_88` semantics
+
+```text
+flags88_core_session_bit:
+  mask: 0x00000100
+  known_writers:
+    - machine_rx_t2_state_handler conditionally sets it when first parsed @T2 byte masked with 0x7f is zero
+    - machine_rx_t3_identity_handler conditionally sets it when (bluefrog_state+0x2c & 0x7f) is nonzero
+    - @T1 retry/failover path can set 0x100 together with 0x02
+  known_clearers: none confirmed in the focused core-session path
+  known_consumers:
+    - set_cachewriter_event40_if_session_flags_allow requires 0x100 set
+    - statepump/cachewriter event logic uses it as a session/cachewriter eligibility bit
+  produced_by_rx:
+    - @T2 and @T3, conditionally
+  consumed_by_tx:
+    - indirectly enables arming of 0x40 through cachewriter event helper
+  likely_meaning:
+    - core session data sufficient / T2/T3 handshake-completeness candidate
+  relationship_to_gate_ready:
+    - prerequisite for the confirmed helper that can arm @TR:37 via flags_88 0x40
+  relationship_to_tf_tv_cachewriter_acceptance:
+    - not required for raw parsing/copying itself, but required by set_cachewriter_event40_if_session_flags_allow() to set 0x40 after cachewriter events
+  confidence: PARTIAL
+
+flags88_core_session_bit:
+  mask: 0x00000400
+  known_writers:
+    - machine_rx_t2_state_handler @ 0x0001ced8
+  known_clearers:
+    - consumed/cleared by the @t2:<hex payload> statepump branch before TX
+  known_consumers:
+    - bluefrog_machine_state_pump @t2:<hex payload> branch
+  produced_by_rx:
+    - @T2
+  consumed_by_tx:
+    - @t2:<hex payload>
+  likely_meaning:
+    - @T2 state/cache bytes available; @t2 response/control payload pending
+  relationship_to_gate_ready:
+    - contributes to core T2/T3 session state and may participate in 0x100 production
+  relationship_to_tf_tv_cachewriter_acceptance:
+    - no direct TF/TV handler gate found for 0x400
+  confidence: YES
+
+flags88_core_session_bit:
+  mask: 0x00000800
+  known_writers:
+    - machine_rx_t3_identity_handler @ 0x0001da24
+  known_clearers:
+    - consumed/cleared by at least one @t3 statepump branch
+  known_consumers:
+    - bluefrog_machine_state_pump @t3 branch candidate
+  produced_by_rx:
+    - @T3
+  consumed_by_tx:
+    - @t3
+  likely_meaning:
+    - @T3 identity/version available; @t3 response/control line pending
+  relationship_to_gate_ready:
+    - contributes to core identity/session state and may participate in 0x100 production
+  relationship_to_tf_tv_cachewriter_acceptance:
+    - no direct TF/TV handler gate found for 0x800
+  confidence: YES
+
+flags88_core_session_bit:
+  mask: 0x00000040
+  known_writers:
+    - set_cachewriter_event40_if_session_flags_allow() sets 0x40 when session/cachewriter flags allow
+    - startup-specific producer before @TR:37 remains unresolved
+  known_clearers:
+    - @tr:37 code37 subhandler clears 0x40
+    - @TR:37 retry/failover path clears 0x40 on exhaustion
+  known_consumers:
+    - bluefrog_machine_state_pump @TR:37 TX branch @ 0x0001c164
+  produced_by_rx:
+    - confirmed helper is called from @TF and @TV cachewriter handlers
+    - no direct @T2/@T3 producer for 0x40 found in this focused pass
+  consumed_by_tx:
+    - @TR:37
+  likely_meaning:
+    - @TR:37 gate command pending / gate-refresh request armed
+  relationship_to_gate_ready:
+    - pre-gate request bit; cleared by @tr:37 response and then flags_88 0x200 is set
+  relationship_to_tf_tv_cachewriter_acceptance:
+    - cachewriter events can arm this bit when 0x100 is set, 0x200 is clear, 0x04 is set, and 0x40 is clear
+  confidence: PARTIAL
+```
+
+#### `@TF/@TV` cachewriter acceptance relationship
+
+This section does not identify a query or trigger for `@TF/@TV`; it only documents whether the cachewriter handlers are gated by the core-session flags.
+
+```text
+tf_tv_acceptance_gate:
+  handler: machine_rx_tf_status_cache_handler @ 0x0001d8e4
+  entry_condition_flags:
+    - reads flags_88 at entry
+    - if flags_88 bit selected by `flags_88 << 0x16 < 0` is set, calls update_status_cache_flag02_and_encode_ble_1524_value(1)
+    - always then calls set_cachewriter_event40_if_session_flags_allow()
+  entry_condition_state:
+    - valid @TF line dispatched by machine_ascii_dispatcher
+  ignored_if_not_gated: NO for parsing/cache copy; UNKNOWN for optional side effects
+  cache_update_requires_flags:
+    - no core-session flag gate found for parsing @TF payload into machine_cache_base
+    - no core-session flag gate found for ble_characteristic_event_dispatch(0x1524)
+    - no core-session flag gate found for copy_machine_cache_to_ble_value_buffer(0)
+  ble_notify_requires_flags:
+    - handler calls ble_characteristic_event_dispatch(0x1524) unconditionally after parsing loop completes
+  relationship_to_flags_88_0x100_0x400_0x800_0x40:
+    - 0x100 is used by set_cachewriter_event40_if_session_flags_allow()
+    - 0x40 can be set by that helper when session flags allow
+    - no direct gate found for 0x400 or 0x800 in @TF cache parsing/copying
+  confidence: PARTIAL
+
+tf_tv_acceptance_gate:
+  handler: machine_rx_tv_progress_cache_handler @ 0x0001da94
+  entry_condition_flags:
+    - reads flags_88 at entry
+    - if flags_88 bit selected by `flags_88 << 0x16 < 0` is set, calls update_status_cache_flag02_and_encode_ble_1524_value(1)
+    - always then calls set_cachewriter_event40_if_session_flags_allow()
+  entry_condition_state:
+    - valid @TV line dispatched by machine_ascii_dispatcher
+  ignored_if_not_gated: NO for normal progress-cache parsing; UNKNOWN for optional side effects
+  cache_update_requires_flags:
+    - no core-session flag gate found for normal @TV payload parsing into machine_cache_base+0x13..
+    - no core-session flag gate found for copy_machine_cache_to_ble_value_buffer(1)
+    - no core-session flag gate found for ble_characteristic_event_dispatch(0x1527)
+  ble_notify_requires_flags:
+    - handler calls ble_characteristic_event_dispatch(0x1527) after normal progress-cache parse
+  relationship_to_flags_88_0x100_0x400_0x800_0x40:
+    - 0x100 is used by set_cachewriter_event40_if_session_flags_allow()
+    - 0x40 can be set by that helper when session flags allow
+    - no direct gate found for 0x400 or 0x800 in @TV cache parsing/copying
+  confidence: PARTIAL
+```
+
+The helper called by both cachewriters:
+
+```text
+set_cachewriter_event40_if_session_flags_allow:
+  address: 0x0001a690
+  callers:
+    - machine_rx_tf_status_cache_handler
+    - machine_rx_tv_progress_cache_handler
+  condition_summary:
+    - requires flags_88 0x100 set
+    - requires flags_88 0x200 clear
+    - requires flags_88 0x04 set
+    - requires flags_88 0x40 clear
+  effect:
+    - flags_88 |= 0x40
+  meaning:
+    - cachewriter/session event can arm @TR:37 gate command when core-session state is ready but post-gate 0x200 is not set
+  confidence: confirmed_code for bit tests/effect; inferred for semantic label
+```
+
+#### Minimal original core session
+
+```text
+minimal_original_core_session_resolved: PARTIAL
+
+minimal_original_core_session:
+  - step: 1
+    tx: TY:
+    expected_rx: ty:<machine type/version>
+    required_previous_state:
+      - flags_88 0x01 set; producer not part of this focused core pass
+    state_after:
+      - TY phase advances through a handler not fully isolated here
+    confidence: PARTIAL
+
+  - step: 2
+    tx: none; machine-originated @T2 observed/handled
+    expected_rx: @T2...
+    required_previous_state:
+      - valid decoded machine line
+    state_after:
+      - flags_88 0x400 set
+      - possible flags_88 0x100 set
+      - T2 bytes mirrored to bluefrog_state+0x2c and machine_cache_base+0x72
+    confidence: confirmed_code
+
+  - step: 3
+    tx: @t2:<hex payload>
+    expected_rx: not proven at callsite
+    required_previous_state:
+      - flags_88 0x400-style statepump branch active
+      - (flags_88 & 0x1) == 0
+    state_after:
+      - consumed @t2 pending bit cleared
+    confidence: confirmed_code
+
+  - step: 4
+    tx: none; machine-originated @T3 observed/handled
+    expected_rx: @T3:<identity/version>
+    required_previous_state:
+      - valid decoded machine line
+    state_after:
+      - flags_88 0x800 set
+      - possible flags_88 0x100 set
+      - identity/version copied to machine_cache_base
+    confidence: confirmed_code
+
+  - step: 5
+    tx: @t3
+    expected_rx: not proven at callsite
+    required_previous_state:
+      - flags_88 0x800-style statepump branch active
+    state_after:
+      - consumed @t3 pending bit cleared
+    confidence: confirmed_code_multiple_candidate_branches
+
+  - step: 6
+    tx: @TR:37
+    expected_rx: @tr:37,<hex>
+    required_previous_state:
+      - flags_88 0x40 set
+      - producer of 0x40 in pure startup path not fully resolved
+    state_after:
+      - waits for @tr:37 response
+    confidence: PARTIAL
+
+  - step: 7
+    tx: none
+    expected_rx: @tr:37,<hex>
+    required_previous_state:
+      - valid @tr response with subcode 0x37
+    state_after:
+      - flags_88 0x40 cleared
+      - flags_88 0x200 set
+      - gate response words copied to machine_cache_base+0x6a..0x70
+    confidence: confirmed_code
+
+unresolved_core_session_blockers:
+  - blocker: flags88_0x40_startup_producer
+    missing_relation:
+      - The confirmed 0x40 writer is cachewriter/session helper set_cachewriter_event40_if_session_flags_allow().
+      - A direct TY/T2/T3-to-0x40 startup writer was not found in this focused pass.
+    affected_frame: @TR:37
+    next_static_target:
+      - non-cachewriter writers of flags_88 0x40 or aliases of bluefrog_state_flags_88
+
+  - blocker: ty_response_handler_exact_state_effect
+    missing_relation:
+      - TY: TX and expected ty: RX are confirmed, but the exact ty: handler state writes remain only partially isolated.
+    affected_frame: TY: -> later core state
+    next_static_target:
+      - machine_ascii_dispatcher branches for lowercase `ty:`
+```
+
+Notes:
+
+```text
+core_session_required_exclusions:
+  @T0: not proven required for this core-session chain
+  @H1/@T1: now classified as backend/timeout path, not a required linear core-session step
+  @D1: not present as original BlueFrog evidence
+```
+
+### Core Session Remaining Blockers: `ty:` and `flags_88 0x40`
+
+Scope for this pass:
+
+```text
+primary_targets:
+  - ty_response_handler_exact_state_effect
+  - flags88_0x40_startup_producer
+out_of_scope:
+  - @T0 / @H1 / @T1 / @D1
+  - state70 / GPIO button-watch / backend scheduler 0x1e8b5
+  - session_tick_counter_state 0x20002788
+  - @TV:81 / @TV:82 / @TS:9x
+  - PMode / DFU / product commands / WLAN firmware
+  - ESP runtime or TX changes
+```
+
+#### `ty:` handler exact state effect
+
+```text
+ty_response_handler_exact_state_effect:
+  handler_address: 0x0001d9c8
+  handler_body_address: 0x0001d9d0
+  rx_prefix: ty:
+  parsed_fields:
+    - no payload parser call recovered in this handler
+    - line content is accepted by dispatcher prefix routing before entry
+  required_line_format:
+    - lowercase `ty:` response line from the machine
+    - expected after confirmed TY: TX branch at 0x0001bf3a
+  writes_flags_88:
+    - mask: 0x00000001
+      operation: clear
+      address: 0x0001d9e6
+      condition: after handler entry
+      confidence: confirmed_code
+    - mask: 0x00000002
+      operation: clear
+      address: 0x0001d9f4
+      condition: after branch over previous flag test
+      confidence: confirmed_code
+    - mask: 0x00000004
+      operation: set
+      address: 0x0001d9fc
+      condition: after TY pending bits are cleared
+      confidence: confirmed_code
+  writes_bluefrog_state:
+    - offset: 0x88
+      width: word
+      value_or_source: flags_88 bit operations above
+      condition: handler entry
+  writes_machine_cache:
+    - none found in this handler
+  sets_events_or_timers:
+    - address: 0x0001d9d6
+      effect: DAT_20002798 = 0
+      confidence: confirmed_code
+    - address: 0x0001d9dc
+      effect: DAT_20002791 = 0
+      confidence: confirmed_code
+    - address: 0x0001da06 / 0x0001da0e
+      effect: calls arm_state_event20_clear_event10_if_allowed()
+      confidence: confirmed_code
+    - address: 0x0001da00..0x0001da0c
+      effect: conditionally calls app_mode_set_flag08_if_state_allows() when app_mode_state_flags condition matches
+      confidence: confirmed_code
+  enables_next_tx:
+    - indirectly enables set_cachewriter_event40_if_session_flags_allow() by setting flags_88 0x04
+  disables_next_tx:
+    - clears TY pending/phase bits flags_88 0x01 and 0x02
+  relationship_to_0x04:
+    - directly sets flags_88 0x04
+  relationship_to_0x01:
+    - directly clears flags_88 0x01
+  relationship_to_0x100:
+    - no direct read/write found in ty_response_handler
+  relationship_to_0x40:
+    - no direct read/write found in ty_response_handler
+    - indirect only: flags_88 0x04 is one prerequisite for set_cachewriter_event40_if_session_flags_allow()
+  confidence: confirmed_code
+```
+
+This resolves the `ty:` side of the gate relation: `ty:` does not itself arm `@TR:37`; it advances the TY phase by clearing `0x01/0x02` and setting `0x04`.
+
+#### `flags_88 0x40` writer candidates
+
+```text
+flags88_0x40_writer_candidate:
+  address: 0x0001a6b2
+  function: set_cachewriter_event40_if_session_flags_allow
+  instruction_or_decompiled_stmt: flags_88 |= 0x40
+  operation: set
+  direct_or_alias: direct
+  condition:
+    - flags_88 0x100 set
+    - flags_88 0x200 clear
+    - flags_88 0x04 set
+    - flags_88 0x40 clear
+  caller_context:
+    - machine_rx_tf_status_cache_handler
+    - machine_rx_tv_progress_cache_handler
+  required_rx_or_event:
+    - @TF or @TV cachewriter handler execution
+  relationship_to_startup_TR37:
+    - does not explain first startup @TR:37 unless a cachewriter event already occurred
+  relationship_to_cachewriter_TR37:
+    - confirmed re-arm path for @TR:37 after cachewriter/session activity
+  confidence: confirmed_code
+
+flags88_0x40_writer_candidate:
+  address: 0x0001d862
+  function: machine_rx_tr37_code37_subhandler
+  instruction_or_decompiled_stmt: flags_88 &= ~0x40
+  operation: clear
+  direct_or_alias: direct
+  condition:
+    - valid @tr:37 response parsed
+  caller_context:
+    - machine_rx_tr37_gate_handler / @tr subdispatch
+  required_rx_or_event:
+    - @tr:37,<hex>
+  relationship_to_startup_TR37:
+    - consumes/completes @TR:37 phase; not a producer
+  relationship_to_cachewriter_TR37:
+    - clears pending gate bit after response
+  confidence: confirmed_code
+
+flags88_0x40_writer_candidate:
+  address: 0x0001c1da
+  function: bluefrog_machine_state_pump
+  instruction_or_decompiled_stmt: clears pending @TR:37 branch bit on retry/failover path
+  operation: clear
+  direct_or_alias: direct
+  condition:
+    - @TR:37 branch retry/failover state
+  caller_context:
+    - statepump
+  required_rx_or_event:
+    - timeout/retry condition, not a machine RX line
+  relationship_to_startup_TR37:
+    - prevents stale @TR:37 pending state; not a producer
+  relationship_to_cachewriter_TR37:
+    - prevents repeated branch after failure
+  confidence: confirmed_code
+
+flags88_0x40_writer_candidate:
+  address: 0x0001d9c8
+  function: ty_response_handler
+  instruction_or_decompiled_stmt:
+    - clears 0x01 and 0x02
+    - sets 0x04
+    - no 0x40 write found
+  operation: test/clear/set-other-bits
+  direct_or_alias: direct
+  condition:
+    - valid ty: response
+  caller_context:
+    - machine_ascii_dispatcher lowercase ty: branch
+  required_rx_or_event:
+    - ty:<machine type/version>
+  relationship_to_startup_TR37:
+    - establishes 0x04 prerequisite only
+  relationship_to_cachewriter_TR37:
+    - required by set_cachewriter_event40_if_session_flags_allow()
+  confidence: confirmed_code
+```
+
+No non-cachewriter startup producer for `flags_88 0x40` was found in this focused pass. The confirmed set path is still the `@TF/@TV` cachewriter helper, not the pure `TY:/@T2/@T3` startup chain.
+
+```text
+flags88_0x40_startup_producer_result:
+  startup_producer_found: NO
+  producer_address: none found
+  producer_function: none found
+  producer_condition: unresolved
+  producer_depends_on_ty: PARTIAL
+  producer_depends_on_t2: PARTIAL
+  producer_depends_on_t3: PARTIAL
+  producer_depends_on_tf_tv: YES for confirmed helper path
+  can_explain_first_TR37: NO
+  unresolved_reason:
+    - ty: directly sets 0x04 but not 0x40
+    - @T2/@T3 establish core identity/session bits but no direct 0x40 producer was found
+    - confirmed 0x40 writer requires @TF/@TV handler execution, so it explains cachewriter-triggered @TR:37 re-arm but not first startup @TR:37
+```
+
+#### `ty:` -> `0x04/0x100/0x40` relation
+
+```text
+ty_to_tr37_gate_relation:
+  ty_sets_0x04: YES
+  ty_clears_0x01: YES
+  ty_interacts_with_0x100: NO
+  ty_can_directly_arm_0x40: NO
+  ty_required_for_cachewriter_0x40_helper: YES
+  can_explain_TR37_after_TY_T2_T3: NO
+  confidence: confirmed_code for direct TY effects; PARTIAL for complete first-TR37 chain
+```
+
+#### Minimal core session update after `ty:` / `0x40` pass
+
+```text
+minimal_original_core_session_after_ty_0x40_pass:
+  resolved: PARTIAL
+  steps:
+    - step: 1
+      tx: TY:
+      expected_rx: ty:<machine type/version>
+      state_after:
+        - flags_88 0x01 cleared
+        - flags_88 0x02 cleared
+        - flags_88 0x04 set
+        - no direct flags_88 0x40 write
+      confidence: confirmed_code
+
+    - step: 2
+      tx: @t2:<payload>
+      expected_rx: not directly proven by this focused pass
+      state_after:
+        - depends on prior @T2 handler / flags_88 0x400 path from previous section
+      confidence: PARTIAL
+
+    - step: 3
+      tx: @t3
+      expected_rx: not directly proven by this focused pass
+      state_after:
+        - depends on prior @T3 handler / flags_88 0x800 path from previous section
+      confidence: PARTIAL
+
+    - step: 4
+      tx: @TR:37
+      expected_rx: @tr:37,<hex>
+      state_after:
+        - requires flags_88 0x40 before TX
+        - first-startup producer for 0x40 remains unresolved
+      confidence: PARTIAL
+
+  remaining_blockers:
+    - flags88_0x40_first_startup_producer
+```
+
+Notes:
+
+```text
+@T0/@H1/@T1:
+  - not required for the core TY/T2/T3/TR37 chain by current static evidence
+
+@D1:
+  - in_original_ble_firmware: NO
+  - do_not_use_as_original_bluefrog_evidence: YES
+```
+
+### First `@TR:37` TX Path and `flags_88 0x40` Split
+
+Scope for this pass:
+
+```text
+primary_target:
+  - first @TR:37 TX callsite at 0x0001c164
+  - literal 0x000249c0
+  - concrete branch condition immediately before TX
+out_of_scope:
+  - @T0 / @H1 / @T1 / @D1
+  - state70 / GPIO button-watch / backend scheduler
+  - session_tick_counter_state
+  - @TV:81 / @TV:82 / @TS:9x
+  - PMode / DFU / product commands / WLAN firmware
+  - ESP runtime or TX changes
+```
+
+#### `@TR:37` TX callsite detail
+
+```text
+tr37_tx_callsite_detail:
+  callsite: 0x0001c164
+  function: bluefrog_machine_state_pump
+  basic_block_or_label:
+    - branch reached from 0x0001c13e..0x0001c164
+    - decompiler line: else if (*(int *)(iVar2 + 0x88) << 0x19 < 0)
+  literal_addr: 0x000249c0
+  literal_value: @TR:37
+  sender_helper: machine_uart_send_prefix_hex_line
+  sender_call:
+    - machine_uart_send_prefix_hex_line(0x000249c0, NULL, 0)
+  required_flags_before:
+    - flags_88 bit 0x40 set
+    - tested as signed `(flags_88 << 0x19) < 0`
+  required_state_before:
+    - state_pump_tx_in_progress_marker == 0
+    - state_pump_substate_char == 0
+    - passthrough_or_chunk_transport_busy() == false
+    - app_mode_state_machine_tx_drain() returned 0
+    - earlier priority branches in the startup/identity TX block did not fire
+    - local_44 == 0, i.e. flags_88 0x01 clear
+  required_cache_before:
+    - none for the @TR:37 call itself
+  condition_chain:
+    - RX/read/dispatcher portion of statepump completes first
+    - machine_passthrough_fifo_drain() must not consume TX slot
+    - app_mode_state_machine_tx_drain() must not consume TX slot
+    - state70 @H1/@T1 branch skipped
+    - flags_88 0x800-style prefix-hex branch skipped
+    - flags_88 0x1000-style line branch skipped
+    - progress_control_flags_block_state_pump+4 bit3 retry branch skipped
+    - flags_88 0x10 retry branch skipped
+    - flags_88 0x20 retry branch skipped
+    - flags_88 0x40 branch taken
+  clears_or_sets_after_tx:
+    - if retry_counter_b >= 2:
+      - retry_counter_b decremented
+      - flags_88 0x40 remains set
+      - @TR:37 is sent
+    - if retry_counter_b < 2:
+      - retry_counter_b cleared
+      - flags_88 0x40 cleared at 0x0001c1da
+      - no @TR:37 TX in that final-fail path
+  retry_counter_used:
+    - state_pump_retry_counter_b
+    - initialized to 4 if zero
+    - decremented before each @TR:37 send
+  expected_rx: @tr:37,<hex>
+  confidence: confirmed_code
+```
+
+The callsite itself does not distinguish a first-startup `@TR:37` from a later re-arm. It only checks the pending state bit and the shared TX guards above.
+
+#### Branch backtrace
+
+```text
+tr37_branch_backtrace:
+  branch_address: 0x0001c13e..0x0001c142
+  condition: signed `(flags_88 << 0x19) < 0`
+  tested_register:
+    - r3/r0 in the assembly block
+  tested_memory:
+    - bluefrog_state+0x88
+  tested_mask_or_value:
+    - flags_88 0x00000040
+  source_of_tested_value:
+    - load from bluefrog_state_ptr_literal_state_pump + 0x88
+  previous_basic_block:
+    - shared startup/identity TX priority chain after tx-in-progress/substate/busy guards
+  producer_candidates:
+    - confirmed: set_cachewriter_event40_if_session_flags_allow() at 0x0001a690
+    - unresolved: no separate non-cachewriter startup producer found for first @TR:37
+  confidence: confirmed_code
+
+tr37_branch_backtrace:
+  branch_address: 0x0001c150..0x0001c164
+  condition:
+    - retry_counter_b > 1 sends @TR:37
+    - retry_counter_b <= 1 clears flags_88 0x40 and does not send
+  tested_register:
+    - r2 loaded from state_pump_retry_counter_b
+  tested_memory:
+    - state_pump_retry_counter_b
+  tested_mask_or_value:
+    - byte counter threshold 2
+  source_of_tested_value:
+    - state_pump_retry_counter_b, initialized to 4 if zero at 0x0001c146..0x0001c14e
+  previous_basic_block:
+    - flags_88 0x40 branch
+  producer_candidates:
+    - retry counter is local retry pacing, not the original producer of the @TR:37 state
+  confidence: confirmed_code
+```
+
+The `@TR:37` branch is therefore a two-part gate: `flags_88 0x40` arms the branch; `retry_counter_b` decides whether the current pump iteration sends or gives up and clears `0x40`.
+
+#### Producer of the tested state
+
+```text
+tr37_startup_state_producer:
+  tested_state: flags_88_0x40
+  producer_found: PARTIAL
+  producer_address: 0x0001a6b2
+  producer_function: set_cachewriter_event40_if_session_flags_allow
+  producer_condition:
+    - flags_88 0x100 set
+    - flags_88 0x200 clear
+    - flags_88 0x04 set
+    - flags_88 0x40 clear
+  depends_on_ty: YES for 0x04 prerequisite
+  depends_on_T2: PARTIAL via 0x100/session-ready path from previous core-session analysis
+  depends_on_T3: PARTIAL via 0x100/session-ready path from previous core-session analysis
+  depends_on_t3: UNKNOWN
+  depends_on_cachewriter_TF_TV: YES for the confirmed producer callsites
+  can_explain_first_TR37: NO
+  confidence: confirmed_code for producer and callsites; PARTIAL for first-startup relation
+```
+
+The confirmed producer is called only from:
+
+```text
+set_cachewriter_event40_if_session_flags_allow_callers:
+  - machine_rx_tf_status_cache_handler @ 0x0001d8fe
+  - machine_rx_tv_progress_cache_handler @ 0x0001daac
+```
+
+No additional direct reference to the `@TR:37` literal was found:
+
+```text
+tr37_literal_refs:
+  literal_addr: 0x000249c0
+  refs:
+    - 0x0001c160 PARAM into machine_uart_send_prefix_hex_line
+  other_refs_found: NO
+```
+
+#### Path split assessment
+
+```text
+tr37_path_split:
+  first_startup_path_found: PARTIAL
+  first_startup_callsite: 0x0001c164
+  first_startup_required_state:
+    - same visible state as cachewriter path: flags_88 0x40 set
+    - no separate first-startup-only callsite found
+  cachewriter_rearm_path_found: YES
+  cachewriter_rearm_required_state:
+    - set_cachewriter_event40_if_session_flags_allow() must set flags_88 0x40
+    - helper is called from @TF/@TV RX handlers
+  same_callsite: YES
+  same_flag: YES
+  confidence: confirmed_code for same callsite/flag; PARTIAL for first-startup producer
+```
+
+Interpretation:
+
+```text
+tr37_path_split_interpretation:
+  - There is one visible @TR:37 TX callsite in bluefrog_machine_state_pump.
+  - The callsite is shared for any path that sets flags_88 0x40.
+  - The only confirmed 0x40 producer remains the @TF/@TV cachewriter helper.
+  - A distinct first-startup 0x40 producer was not found in this focused pass.
+  - Therefore first startup @TR:37 is not statically explained yet, even though the TX branch itself is fully mapped.
+```
+
+#### Minimal core session update after `@TR:37` callsite pass
+
+```text
+minimal_original_core_session_after_tr37_callsite_pass:
+  resolved: PARTIAL
+  steps:
+    - step: 1
+      tx: TY:
+      expected_rx: ty:<machine type/version>
+      required_previous_state:
+        - flags_88 0x01 set
+      state_after:
+        - flags_88 0x01 cleared
+        - flags_88 0x02 cleared
+        - flags_88 0x04 set
+      confidence: confirmed_code
+
+    - step: 2
+      tx: @t2:<payload>
+      expected_rx: not resolved by this pass
+      required_previous_state:
+        - @T2-derived state / flags_88 0x400 path from previous core-session section
+      state_after:
+        - @t2 branch consumed by statepump
+      confidence: PARTIAL
+
+    - step: 3
+      tx: @t3
+      expected_rx: not resolved by this pass
+      required_previous_state:
+        - @T3-derived state / flags_88 0x800 path from previous core-session section
+      state_after:
+        - @t3 branch consumed by statepump
+      confidence: PARTIAL
+
+    - step: 4
+      tx: @TR:37
+      expected_rx: @tr:37,<hex>
+      required_previous_state:
+        - flags_88 0x40 set
+        - retry_counter_b > 1
+        - shared TX guards clear
+      state_after:
+        - if sent: retry_counter_b decremented, flags_88 0x40 remains pending until response or retry fail
+        - if @tr:37 response received: @tr:37 handler clears 0x40 and sets post-gate 0x200
+      confidence: confirmed_code for TX branch; PARTIAL for first-startup state producer
+
+  remaining_blockers:
+    - flags88_0x40_first_startup_producer
+```
+
+Notes:
+
+```text
+@T0/@H1/@T1:
+  - not required for the core TY/T2/T3/TR37 chain by current static evidence
+
+@D1:
+  - in_original_ble_firmware: NO
+  - do_not_use_as_original_bluefrog_evidence: YES
+```
+
+### Indirect table around `0x25058` -> `maybe_advance_t0_state70_substate`
+
+Scope for this pass:
+
+```text
+primary_target: table/descriptor owner for raw Thumb pointer 0x00016295 at 0x00025058
+out_of_scope:
+  - @TF/@TV
+  - @TV:81/@TV:82
+  - @TS:9x
+  - PMode / DFU / product commands
+  - App-mode @mn/@mo/@me/@me1
+  - WLAN firmware
+  - ESP runtime changes
+```
+
+#### Raw dump `0x00025020..0x00025090`
+
+```text
+table_25058_raw_dump:
+  addr: 0x00025020
+  u32_le: 0x36353433
+  possible_pointer: NO
+  possible_thumb_func: NO
+  ascii_if_any: "3456"
+  comment: printf/hex-format literal tail before .data init image
+
+  addr: 0x00025024
+  u32_le: 0x41393837
+  possible_pointer: NO
+  possible_thumb_func: NO
+  ascii_if_any: "789A"
+  comment: printf/hex-format literal tail
+
+  addr: 0x00025028
+  u32_le: 0x45444342
+  possible_pointer: NO
+  possible_thumb_func: NO
+  ascii_if_any: "BCDE"
+  comment: printf/hex-format literal tail
+
+  addr: 0x0002502c
+  u32_le: 0x31300046
+  possible_pointer: NO
+  possible_thumb_func: NO
+  ascii_if_any: "F\\x0001"
+  comment: string terminator and next small literal bytes
+
+  addr: 0x00025030
+  u32_le: 0x35343332
+  possible_pointer: NO
+  possible_thumb_func: NO
+  ascii_if_any: "2345"
+  comment: second hex literal
+
+  addr: 0x00025034
+  u32_le: 0x39383736
+  possible_pointer: NO
+  possible_thumb_func: NO
+  ascii_if_any: "6789"
+  comment: second hex literal
+
+  addr: 0x00025038
+  u32_le: 0x64636261
+  possible_pointer: NO
+  possible_thumb_func: NO
+  ascii_if_any: "abcd"
+  comment: second hex literal
+
+  addr: 0x0002503c
+  u32_le: 0x00006665
+  possible_pointer: accidental low flash-looking value
+  possible_thumb_func: NO
+  ascii_if_any: "ef\\x00\\x00"
+  comment: second hex literal terminator, not a callback entry
+
+  addr: 0x00025040
+  u32_le: 0x00000000
+  possible_pointer: NO
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: guard/one-shot value referenced by 0x000160c0 helper, before .data copy source
+
+  addr: 0x00025044
+  u32_le: 0x7fff10dc
+  possible_pointer: NO
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: unrelated constant before .data copy source
+
+  addr: 0x00025048
+  u32_le: 0x00000001
+  possible_pointer: scalar
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: unrelated scalar before .data copy source
+
+  addr: 0x0002504c
+  u32_le: 0x00000000
+  possible_pointer: NO
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: start of .data init image copied to RAM 0x20002000
+
+  addr: 0x00025050
+  u32_le: 0x0000ffff
+  possible_pointer: scalar
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: RAM copy at 0x20002004, adjacent context field
+
+  addr: 0x00025054
+  u32_le: 0x00000000
+  possible_pointer: scalar
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: RAM copy at 0x20002008; first 4 bytes of gpio_button_entry[0]
+
+  addr: 0x00025058
+  u32_le: 0x00016295
+  possible_pointer: YES
+  possible_thumb_func: 0x00016294
+  ascii_if_any: ""
+  comment: RAM copy at 0x2000200c; gpio_button_entry[0].callback = maybe_advance_t0_state70_substate
+
+  addr: 0x0002505c
+  u32_le: 0x00000001
+  possible_pointer: scalar
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: RAM copy at 0x20002010, following context/DFU-adjacent data; not part of 8-byte button entry
+
+  addr: 0x00025060
+  u32_le: 0x000000ab
+  possible_pointer: scalar
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: scalar in .data init image
+
+  addr: 0x00025064
+  u32_le: 0x0000001b
+  possible_pointer: scalar
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: scalar in .data init image
+
+  addr: 0x00025068
+  u32_le: 0x20002ae4
+  possible_pointer: RAM
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: RAM pointer in .data init image
+
+  addr: 0x0002506c
+  u32_le: 0x20002028
+  possible_pointer: RAM
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: RAM pointer in .data init image
+
+  addr: 0x00025070
+  u32_le: 0x2000203c
+  possible_pointer: RAM
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: RAM pointer in .data init image
+
+  addr: 0x00025074
+  u32_le: 0x00011523
+  possible_pointer: YES
+  possible_thumb_func: 0x00011522
+  ascii_if_any: ""
+  comment: separate Thumb pointer in later .data region, no direct relation to 0x16294 found in this pass
+
+  addr: 0x00025078
+  u32_le: 0x00024614
+  possible_pointer: FLASH
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: flash pointer in later .data region
+
+  addr: 0x0002507c
+  u32_le: 0x0000000e
+  possible_pointer: scalar
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: scalar in later .data region
+
+  addr: 0x00025080
+  u32_le: 0x20002564
+  possible_pointer: RAM
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: RAM pointer in later .data region
+
+  addr: 0x00025084
+  u32_le: 0x00000000
+  possible_pointer: NO
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: zero field in later .data region
+
+  addr: 0x00025088
+  u32_le: 0x00011623
+  possible_pointer: YES
+  possible_thumb_func: 0x00011622
+  ascii_if_any: ""
+  comment: separate Thumb pointer in later .data region, no direct relation to 0x16294 found in this pass
+
+  addr: 0x0002508c
+  u32_le: 0x000248b0
+  possible_pointer: FLASH
+  possible_thumb_func: NO
+  ascii_if_any: ""
+  comment: flash pointer in later .data region
+```
+
+#### Layout / owner result
+
+The bytes around `0x00025058` are not a directly consumed Flash callback table. They are part of the C runtime `.data` init image.
+
+```text
+table_25058_layout_guess:
+  table_start: 0x0002504c
+  table_end: 0x00025144
+  entry_size: not a homogeneous table; block copy image
+  entry_count: not applicable for full block
+  entry_containing_0x25058:
+    flash_source: 0x00025054..0x0002505b
+    ram_destination: 0x20002008..0x2000200f
+    interpreted_as: gpio_button_entry[0]
+    entry_size: 8
+    fields:
+      +0x00: pin/index byte = 0
+      +0x01: polarity/edge mode byte = 0
+      +0x02: pin config byte = 0
+      +0x03: reserved/padding byte = 0
+      +0x04: callback Thumb pointer = 0x00016295 -> maybe_advance_t0_state70_substate
+  previous_entry: none in this one-entry button array
+  next_entry: none; 0x0002505c maps to the next RAM context field at 0x20002010
+  confidence: confirmed_code for .data copy and gpio_button_watch_init consumer
+
+layout_evidence:
+  - reset/init function 0x00020798 copies from 0x0002504c to 0x20002000 up to 0x200020f8.
+  - main_loop_or_scheduler callsite 0x00016460 passes 0x20002008 as button_entries to gpio_button_watch_init().
+  - gpio_button_watch_init treats button_entries as 8-byte entries and reads callback from entry + 4.
+  - direct code XREFs to flash address 0x00025058 are absent because code consumes the RAM copy at 0x2000200c.
+```
+
+#### Consumer candidates
+
+```text
+table_25058_consumer_candidate:
+  candidate_function: reset/.data init copier at 0x00020798
+  callsite_or_xref: 0x000207aa..0x000207b8
+  evidence:
+    - DAT_000207cc = 0x0002504c source
+    - DAT_000207d0 = 0x20002000 destination
+    - DAT_000207d4 = 0x200020f8 end
+    - loop copies words from flash source to RAM destination
+  reads_table_start: YES, as block-copy source
+  reads_entry_size: NO, copies whole .data block backward by words
+  indirect_call_instruction: none
+  passes_param_1: none
+  passes_param_2: none
+  relationship_to_0x16294: materializes the Thumb pointer into RAM at 0x2000200c
+  confidence: confirmed_code
+
+table_25058_consumer_candidate:
+  candidate_function: main_loop_or_scheduler
+  callsite_or_xref: 0x00016460 -> gpio_button_watch_init((byte *)(gpio_button_watch_context + 4), 1, 0x32, 0)
+  evidence:
+    - xref to DAT_20002008 at 0x00016460
+    - button_entries pointer equals RAM copy of flash source 0x00025054
+  reads_table_start: YES, via RAM copy 0x20002008
+  reads_entry_size: passes entry_count=1; entry size inferred by callee as 8 bytes
+  indirect_call_instruction: none at callsite
+  passes_param_1: button_entries=0x20002008
+  passes_param_2: entry_count=1
+  relationship_to_0x16294: registers the entry containing callback pointer 0x00016295
+  confidence: confirmed_code
+
+table_25058_consumer_candidate:
+  candidate_function: gpio_button_watch_init
+  callsite_or_xref: 0x0001f34c..0x0001f376
+  evidence:
+    - loops entries as button_entries + index * 8
+    - reads entry[0] as pin/index
+    - reads entry[2] as GPIO config bits
+    - calls gpio_watch_allocate(..., gpio_button_watch_default_callback)
+    - installs gpio_button_watch_dispatch as wrapper callback after successful allocation
+  reads_table_start: YES, RAM copy 0x20002008
+  reads_entry_size: 8 bytes
+  indirect_call_instruction: none in init
+  passes_param_1: out_watch_index and pin mask to gpio_watch_allocate
+  passes_param_2: not applicable
+  relationship_to_0x16294: stores the button entry pointer in gpio_button_watch_state; callback remains entry[+4]
+  confidence: confirmed_code
+
+table_25058_consumer_candidate:
+  candidate_function: gpio_button_watch_dispatch
+  callsite_or_xref: 0x0001f214..0x0001f319
+  evidence:
+    - reads entries from gpio_button_watch_state[0x10] with stride 8
+    - loads pcVar7 = *(code **)(entry + 4)
+    - invokes either pcVar7(pin, logical_state) or wrapper(pcVar7, pin, logical_state)
+  reads_table_start: YES, RAM copy pointer retained in gpio_button_watch_state
+  reads_entry_size: 8 bytes
+  indirect_call_instruction:
+    - 0x0001f2a8 / 0x0001f2ec: wrapper callback with pcVar7, pin, logical_state
+    - 0x0001f2dc / 0x0001f300 / 0x0001f308 / 0x0001f314: direct pcVar7(pin, logical_state) when wrapper absent
+  passes_param_1: pin/index from entry[0], initialized to 0
+  passes_param_2: logical edge/state 0 or 1 after GPIO debounce/polarity handling
+  relationship_to_0x16294: this is the indirect caller path for maybe_advance_t0_state70_substate
+  confidence: confirmed_code
+
+table_25058_consumer_candidate:
+  candidate_function: gpio_button_watch_default_callback at 0x0001f1f8
+  callsite_or_xref: registered by gpio_watch_allocate at 0x0001f374
+  evidence:
+    - called by lower gpio_watch layer
+    - records callback/event data and arms gpio_button_watch_dispatch through state+0x10
+  reads_table_start: NO
+  reads_entry_size: NO
+  indirect_call_instruction: none
+  passes_param_1: records callback/event parameters
+  passes_param_2: records callback/event parameters
+  relationship_to_0x16294: schedules the higher-level dispatch that later invokes the entry callback
+  confidence: confirmed_code / inferred role
+```
+
+#### Callback ABI for `0x00016294`
+
+```text
+callback_0x16294_indirect_abi:
+  param_1_source:
+    - gpio_button_watch_dispatch loads entry[0] as pin/index.
+    - For the initialized entry copied from 0x00025054, entry[0] = 0.
+  param_2_source:
+    - logical edge/state value produced by gpio_button_watch_dispatch after comparing GPIO watch masks and entry[1] polarity/mode.
+    - For the initialized entry, entry[1] = 0, so both logical states 0 and 1 can be delivered on opposite observed transitions.
+  return_value_used:
+    - If wrapper callback is active, gpio_button_watch_dispatch checks wrapper return and asserts on nonzero.
+    - For direct callback path, return value is ignored.
+    - maybe_advance_t0_state70_substate returns param_1 / boolean-ish status, but no protocol TX is emitted directly from the callback.
+  caller_condition:
+    - main_loop_or_scheduler initializes GPIO watch table and button watch.
+    - gpio_watch detects a masked GPIO state transition.
+    - gpio_button_watch_dispatch debounces/maps the transition and invokes entry callback.
+  expected_state70_before:
+    - state70 bit0 set for the substate-advance path.
+    - current substate bits3/4 must be 1 for param_2=1 to advance to 2.
+    - current substate bits3/4 must be 2 for param_2=0 to advance to 3.
+  expected_state70_after:
+    - param_2=1 with current substate 1 writes substate 2.
+    - param_2=0 with current substate 2 writes substate 3.
+    - substate 3 satisfies the @T0 branch in bluefrog_machine_state_pump.
+  can_advance_to_substate_3: YES
+  relationship_to_@T0: YES
+  confidence: confirmed_code for ABI and state writes; inferred_hardware for exact physical GPIO/button meaning
+```
+
+#### Consequence for `@T0`
+
+```text
+t0_substate_caller_result:
+  caller_found: YES
+  caller_count: indirect path, no direct code XREF
+  callers:
+    - callsite: 0x0001f2a8 / 0x0001f2ec via wrapper or 0x0001f2dc / 0x0001f300 / 0x0001f308 / 0x0001f314 direct
+      function: gpio_button_watch_dispatch
+      param_2: logical edge/state 0 or 1
+      effect: invokes maybe_advance_t0_state70_substate(pin_index, logical_state)
+  can_explain_T0_substate_3: YES
+  unresolved_reason:
+    - direct XREF remains absent because the pointer is initialized through .data copy and consumed through RAM entry 0x2000200c.
+    - physical meaning of GPIO pin/index 0 is not named here; it is not required to prove the indirect caller ABI.
+```
+
+Partial `@T0` chain after this pass:
+
+```text
+partial_T0_substate_chain:
+  - prerequisite: state70 bit0 set
+  - prerequisite: substate bits3/4 initially set to 1, confirmed from @HF parsed byte 0x04 path
+  - event: GPIO/button logical state 1
+  - callback: maybe_advance_t0_state70_substate(0, 1)
+  - state_change: substate 1 -> 2
+  - event: GPIO/button logical state 0
+  - callback: maybe_advance_t0_state70_substate(0, 0)
+  - state_change: substate 2 -> 3
+  - consumer: bluefrog_machine_state_pump @T0 branch at 0x0001befe
+  - tx: @T0
+  - confidence: confirmed_code for callback chain; inferred_hardware for exact GPIO stimulus
+```
+
+Remaining blocker status:
+
+```text
+remaining_static_blockers_after_this_run:
+  - blocker: session_tick_counter_state+4_seed_for_@H1/@T1
+    why_unresolved: unchanged; no writer outside maybe_session_tick_counter_and_timeout_pump was found in the focused seed pass.
+    next_static_target: BSS/init-copy aliasing or non-direct writes to 0x2000278c.
+```
+
+`@D1` remains excluded:
+
+```text
+@D1:
+  in_original_ble_firmware: NO
+  do_not_use_as_original_bluefrog_evidence: YES
+```
+
+### Focused Remaining State70 Blockers
+
+Scope of this pass:
+
+```text
+primary_targets:
+  - session_tick_counter_state+4_seed_for_@H1/@T1
+  - caller_for_maybe_advance_t0_state70_substate
+explicitly_out_of_scope:
+  - flags88_0x40_startup_producer_for_@TR37
+  - flags88_0x40000_direct_consumer
+  - @TF/@TV
+  - TV81/TV82
+  - @TS:9x
+  - PMode / DFU / product commands
+  - app-mode @mn/@mo/@me/@me1
+  - WLAN firmware
+```
+
+#### `session_tick_counter_state+4` XREF table
+
+`session_tick_counter_state` is a code literal at `0x0001e888` with value `0x20002788`.
+The relevant H1/T1 countdown halfword is `0x2000278c`.
+
+```text
+session_tick_seed_xref:
+  address: 0x0001e828
+  function: maybe_session_tick_counter_and_timeout_pump
+  instruction_or_decompiled_stmt: if (*session_tick_counter_state < 0x32)
+  access: read
+  width: word
+  target_offset: +0
+  value_or_source: 0x20002788 tick accumulator
+  caller: timer/tick function body at 0x0001e8b4, callsite 0x0001e94a
+  required_condition: function entered
+  relationship_to_state70_bit5_bit6: cadence accumulator only; does not directly arm @H1/@T1
+  confidence: confirmed_code
+
+session_tick_seed_xref:
+  address: 0x0001e830
+  function: maybe_session_tick_counter_and_timeout_pump
+  instruction_or_decompiled_stmt: *session_tick_counter_state = *session_tick_counter_state + 1
+  access: increment
+  width: word
+  target_offset: +0
+  value_or_source: previous tick accumulator + 1
+  caller: timer/tick function body at 0x0001e8b4, callsite 0x0001e94a
+  required_condition: accumulator < 0x32
+  relationship_to_state70_bit5_bit6: cadence accumulator only
+  confidence: confirmed_code
+
+session_tick_seed_xref:
+  address: 0x0001e86c
+  function: maybe_session_tick_counter_and_timeout_pump
+  instruction_or_decompiled_stmt: *session_tick_counter_state = 0; decrement_service_channel_countdowns()
+  access: clear
+  width: word
+  target_offset: +0
+  value_or_source: zero
+  caller: timer/tick function body at 0x0001e8b4, callsite 0x0001e94a
+  required_condition: accumulator >= 0x32
+  relationship_to_state70_bit5_bit6: resets cadence and ticks service countdowns
+  confidence: confirmed_code
+
+session_tick_seed_xref:
+  address: 0x0001e83c
+  function: maybe_session_tick_counter_and_timeout_pump
+  instruction_or_decompiled_stmt: ((short)session_tick_counter_state[1] != 0)
+  access: read
+  width: halfword
+  target_offset: +4
+  value_or_source: 0x2000278c countdown
+  caller: timer/tick function body at 0x0001e8b4, callsite 0x0001e94a
+  required_condition: state70 bit5 is clear
+  relationship_to_state70_bit5_bit6: nonzero value is mandatory before bit5/bit6 can be produced
+  confidence: confirmed_code
+
+session_tick_seed_xref:
+  address: 0x0001e84c
+  function: maybe_session_tick_counter_and_timeout_pump
+  instruction_or_decompiled_stmt: sVar4 = (short)session_tick_counter_state[1] + -1
+  access: read/decrement
+  width: halfword
+  target_offset: +4
+  value_or_source: 0x2000278c countdown - 1
+  caller: timer/tick function body at 0x0001e8b4, callsite 0x0001e94a
+  required_condition: state70 bit5 clear, countdown nonzero, service_channel_any_countdown_active() false
+  relationship_to_state70_bit5_bit6: when decrement reaches zero, produces state70 bit5 and clears bit6, enabling @H1
+  confidence: confirmed_code
+
+session_tick_seed_xref:
+  address: 0x0001e852
+  function: maybe_session_tick_counter_and_timeout_pump
+  instruction_or_decompiled_stmt: session_tick_counter_state[1] = sVar4
+  access: write
+  width: halfword
+  target_offset: +4
+  value_or_source: decremented countdown value
+  caller: timer/tick function body at 0x0001e8b4, callsite 0x0001e94a
+  required_condition: service_channel_any_countdown_active() false
+  relationship_to_state70_bit5_bit6: if written value is zero, same basic block sets bit5 and clears bit6 for @H1
+  confidence: confirmed_code
+
+session_tick_seed_xref:
+  address: 0x0001e874
+  function: maybe_session_tick_counter_and_timeout_pump
+  instruction_or_decompiled_stmt: session_tick_counter_state[1] = 0
+  access: clear
+  width: halfword
+  target_offset: +4
+  value_or_source: zero
+  caller: timer/tick function body at 0x0001e8b4, callsite 0x0001e94a
+  required_condition: state70 bit5 clear, countdown nonzero, service_channel_any_countdown_active() true
+  relationship_to_state70_bit5_bit6: same basic block sets bit5 and bit6 for @T1
+  confidence: confirmed_code
+```
+
+Negative XREF/search results:
+
+```text
+session_tick_counter_state_external_seed_search:
+  searched_addresses:
+    - 0x20002788
+    - 0x2000278a
+    - 0x2000278c
+    - 0x2000278e
+  direct_xrefs:
+    - 0x20002788: only maybe_session_tick_counter_and_timeout_pump
+    - 0x2000278a: none
+    - 0x2000278c: only maybe_session_tick_counter_and_timeout_pump
+    - 0x2000278e: none
+  literal_pointer_scan:
+    - raw 0x20002788 pointer occurs at 0x0001e888 and 0x0001e8b0 only
+    - raw 0x2000278c pointer occurs nowhere
+  block_init_or_copy:
+    - no memset/copy-style decompiler hit found that clearly covers 0x20002788..0x20002790
+  conclusion: external seed writer for 0x2000278c was not found
+```
+
+```text
+session_tick_counter_state_seed_result:
+  seed_writer_found: NO
+  seed_writer_address: none
+  seed_writer_function: none
+  seed_value_or_source: unresolved
+  condition: unresolved
+  can_explain_H1_T1_timing: PARTIAL
+  unresolved_reason:
+    - The consumer/producer logic is fully visible: nonzero 0x2000278c gates production of state70 bit5/bit6.
+    - No external writer or initializer for 0x2000278c was found via direct XREF, decompiler search, literal pointer scan, or adjacent-address XREFs.
+    - The value may be seeded through an unrecognized block initialization, aliasing, startup data copy, or an indirect runtime path not represented as a direct data XREF.
+```
+
+#### Caller search for `maybe_advance_t0_state70_substate`
+
+Known helper:
+
+```text
+maybe_advance_t0_state70_substate:
+  function_address: 0x00016294
+  thumb_address: 0x00016295
+  behavior:
+    - if state70 bit0 set and param_2 == 1 and current substate == 1: substate becomes 2
+    - if state70 bit0 set and param_2 == 0 and current substate == 2: substate becomes 3
+    - substate write: state70 = (state70 & 0xffffffe7) | ((uVar3 & uVar4) << 3)
+```
+
+Direct XREF result:
+
+```text
+t0_substate_advance_caller:
+  callsite: none found as direct code XREF
+  caller_function: none
+  param_1_source: unresolved
+  param_2_value_or_source: unresolved
+  required_condition: unresolved
+  prior_rx_or_event: unresolved
+  state70_before: substate 1 or 2 required by helper
+  state70_after:
+    - substate 1 -> 2 if param_2 == 1
+    - substate 2 -> 3 if param_2 == 0
+  advances:
+    - from_substate: 1
+      to_substate: 2
+    - from_substate: 2
+      to_substate: 3
+  relationship_to_T0: reaches the required substate 3 for @T0, but caller/event remains unresolved
+  confidence: confirmed_code for helper behavior; unknown for direct caller
+```
+
+Raw pointer result:
+
+```text
+t0_substate_advance_caller:
+  callsite: raw data pointer at 0x00025058
+  caller_function: unresolved indirect descriptor/table user
+  raw_entry: 95 62 01 00
+  target: 0x00016295 Thumb -> 0x00016294
+  surrounding_data:
+    - 0x00025058: callback pointer 0x00016295
+    - following words include 0x00000001, 0x000000ab, 0x0000001b, 0x20002ae4, 0x20002028, 0x2000203c
+  param_1_source: unresolved table/user callback ABI
+  param_2_value_or_source: unresolved table/user callback ABI
+  required_condition: unresolved
+  prior_rx_or_event: unresolved
+  state70_before: helper still requires state70 bit0 set and substate 1/2
+  state70_after:
+    - potentially 1 -> 2 or 2 -> 3, depending callback argument param_2
+  advances:
+    - from_substate: 1
+      to_substate: 2
+    - from_substate: 2
+      to_substate: 3
+  relationship_to_T0: likely intended indirect/timer callback path for @T0 substate progression, but not enough to resolve order
+  confidence: PARTIAL
+```
+
+Negative caller checks:
+
+```text
+t0_substate_advance_negative_checks:
+  direct_xref_to_0x00016294: none
+  direct_xref_to_thumb_0x00016295: none
+  raw_pointer_scan:
+    - 0x00016295 occurs once at 0x00025058
+    - 0x00016294 occurs zero times as a raw word
+  pointer_to_descriptor_scan:
+    - no raw pointer to 0x00025058 / 0x00025020 / 0x00025044 found in the local firmware byte scan
+  rx_handler_callers:
+    - no direct RX-handler call to 0x00016294 found
+  scheduler_tick_callers:
+    - no direct scheduler/tick call to 0x00016294 found
+  host_handler_callers:
+    - no direct @HF/@HP/@HT call to 0x00016294 found; @HF only seeds substate 1 directly
+```
+
+```text
+t0_substate_caller_result:
+  caller_found: PARTIAL
+  caller_count: 1 raw function-pointer entry, 0 direct code callers
+  callers:
+    - callsite: data entry 0x00025058
+      function: unresolved indirect descriptor/table user
+      param_2: unresolved
+      effect: points to maybe_advance_t0_state70_substate, which can advance 1->2 or 2->3
+  can_explain_T0_substate_3: PARTIAL
+  unresolved_reason:
+    - The helper and raw Thumb function pointer are confirmed.
+    - No direct caller or referenced descriptor/table owner was found.
+    - Without the indirect callback ABI, param_2 cannot be tied to the 1->2 or 2->3 transitions.
+```
+
+#### Partial sequence result for `@T0/@H1/@T1`
+
+```text
+partial_sequence_T0_H1_T1_resolved: NO
+
+remaining_static_blockers_after_this_run:
+  - blocker: session_tick_counter_state+4_seed_for_@H1/@T1
+    why_unresolved: 0x2000278c is consumed and modified only inside maybe_session_tick_counter_and_timeout_pump; no external seed writer was found.
+    next_static_target: investigate startup/BSS/init-copy tables and aliasing around 0x20002788; inspect any runtime allocator/zero-init path that may write RAM without direct data XREF.
+
+  - blocker: indirect_table_owner_for_0x25058_callback_to_0x16294
+    why_unresolved: raw Thumb pointer 0x00016295 is present at 0x00025058, but no XREF to that table/descriptor was found, so the callback caller and param_2 source remain unknown.
+    next_static_target: identify the table structure around 0x00025044..0x00025080 and its owner; inspect startup descriptor scans or linker-section iteration code that may consume unreferenced tables.
+```
+
+`@D1` remains excluded:
+
+```text
+@D1:
+  in_original_ble_firmware: NO
+  do_not_use_as_original_bluefrog_evidence: YES
+```
+
+### Focused Producer Chain: state70 -> @T0/@H1/@T1
+
+Scope of this focused pass:
+
+```text
+PRIMARY_TARGET: session_tick_counter_state_seed_for_state70_bit5_bit6_@H1_@T1
+SECONDARY_TARGET: state70_bits3_4_substate_for_@T0
+out_of_scope_for_this_pass:
+  - flags88_0x40_startup_producer_for_@TR37
+  - flags88_0x40000_direct_consumer
+  - @TF/@TV
+  - TV81/TV82
+  - PMode / DFU / product paths
+```
+
+#### XREF details for `bluefrog_state+0x70` bits 0/3/4/5/6
+
+```text
+state70_xref_detail:
+  address: 0x00016822..0x00016828
+  function: main_loop_or_scheduler
+  basic_block_or_label: LAB_00016822
+  instruction_or_decompiled_stmt: if (*bluefrog_device_id_word0_cache == 2) state70 |= 0x00000001
+  bit_or_mask: bit0 / 0x00000001
+  operation: set
+  direct_caller: reset/start path into main_loop_or_scheduler
+  caller_chain_if_known: start -> main_loop_or_scheduler
+  required_state_before: FICR/device-id word copied into bluefrog_device_id_word0_cache
+  required_rx_before: none
+  required_timer_or_counter: none
+  related_global_or_state_offset: bluefrog_state+0x70 at 0x2000298c
+  enables_tx_candidate: @T0 if bits3/4 substate later becomes 3
+  disables_tx_candidate: none
+  confidence: confirmed_code
+
+state70_xref_detail:
+  address: 0x0001d638..0x0001d642
+  function: host_reply_hf_state70_control_handler (handler body at 0x0001d0a4; @HF table entry)
+  basic_block_or_label: @HF payload bVar2 == 0x04 branch
+  instruction_or_decompiled_stmt: state70 = (state70 & 0xffffffe7) | 0x00000008
+  bit_or_mask: bits3/4 mask 0x00000018, value 0x00000008
+  operation: assign substate bits to 1
+  direct_caller: host_subdispatcher table entry for @HF
+  caller_chain_if_known: machine_ascii_dispatcher -> host_subdispatcher -> @HF handler
+  required_state_before: (*DAT_0001d408 == 0) and (state70 bit0 set or high nibble of parsed byte is 0x20)
+  required_rx_before: @HF with parsed byte 0x04
+  required_timer_or_counter: none
+  related_global_or_state_offset: bluefrog_state+0x70 at 0x2000298c
+  enables_tx_candidate: not @T0 yet; prepares substate 1
+  disables_tx_candidate: previous @T0 substate value
+  confidence: confirmed_code
+
+state70_xref_detail:
+  address: 0x00016294..0x00016300
+  function: maybe_advance_t0_state70_substate
+  basic_block_or_label: state70 bit0 set, param_2-controlled state advance
+  instruction_or_decompiled_stmt: state70 = (state70 & 0xffffffe7) | ((uVar3 & uVar4) << 3)
+  bit_or_mask: bits3/4 mask 0x00000018
+  operation: assign/advance substate
+  direct_caller: unresolved; no direct XREF to 0x00016294/0x00016295 was emitted by Ghidra
+  caller_chain_if_known: likely mainloop/jumptable-adjacent helper; not statically resolved
+  required_state_before:
+    - state70 bit0 set
+    - for param_2 == 1: current substate must be 1; writes substate 2
+    - for param_2 == 0: current substate must be 2; writes substate 3
+  required_rx_before: unresolved
+  required_timer_or_counter: none inside helper
+  related_global_or_state_offset: bluefrog_state+0x70 at 0x2000298c
+  enables_tx_candidate: @T0 once substate reaches 3
+  disables_tx_candidate: none
+  confidence: confirmed_code for state transition; unknown for caller/event source
+
+state70_xref_detail:
+  address: 0x0001bdb2..0x0001befe
+  function: bluefrog_machine_state_pump
+  basic_block_or_label: first startup state70 TX branch
+  instruction_or_decompiled_stmt: if ((state70 bit0 set) && (((state70 & 0x1f) >> 3) == 3)) { state70 &= 0xffffffe7; send @T0; }
+  bit_or_mask: tests bit0 and bits3/4 substate; clears 0x00000019/0x00000018 region with 0xffffffe7
+  operation: test/clear
+  direct_caller: main_loop_or_scheduler
+  caller_chain_if_known: main_loop_or_scheduler -> bluefrog_machine_state_pump
+  required_state_before: state70 bit0 set and substate bits3/4 == 3
+  required_rx_before: unresolved; substate 3 source is only partially mapped
+  required_timer_or_counter: none at TX callsite
+  related_global_or_state_offset: bluefrog_state+0x70 at 0x2000298c
+  enables_tx_candidate: @T0
+  disables_tx_candidate: re-sending @T0 until state70 is rearmed
+  confidence: confirmed_code
+
+state70_xref_detail:
+  address: 0x0001e858..0x0001e866
+  function: maybe_session_tick_counter_and_timeout_pump
+  basic_block_or_label: countdown reaches zero without active service countdown
+  instruction_or_decompiled_stmt: state70 |= 0x20; state70 &= 0xffffffbf
+  bit_or_mask: bit5 set, bit6 clear
+  operation: set/clear
+  direct_caller: timer/tick function body at 0x0001e8b4, callsite 0x0001e94a
+  caller_chain_if_known: main_loop_or_scheduler timer path -> 0x0001e8b4 -> maybe_session_tick_counter_and_timeout_pump
+  required_state_before:
+    - state70 bit5 clear
+    - session_tick_counter_state+4 halfword nonzero
+    - service_channel_any_countdown_active() returns false
+    - decrement makes session_tick_counter_state+4 reach zero
+  required_rx_before: none directly proven
+  required_timer_or_counter: session_tick_counter_state+4 halfword countdown
+  related_global_or_state_offset:
+    - session_tick_counter_state literal 0x0001e888 -> RAM 0x20002788
+    - consumed halfword at 0x2000278c
+  enables_tx_candidate: @H1
+  disables_tx_candidate: @T1 selector bit
+  confidence: confirmed_code for producer; seed source unresolved
+
+state70_xref_detail:
+  address: 0x0001e874..0x0001e884
+  function: maybe_session_tick_counter_and_timeout_pump
+  basic_block_or_label: service countdown active
+  instruction_or_decompiled_stmt: session_tick_counter_state+4 = 0; state70 |= 0x20; state70 |= 0x40
+  bit_or_mask: bit5 set, bit6 set
+  operation: set
+  direct_caller: timer/tick function body at 0x0001e8b4, callsite 0x0001e94a
+  caller_chain_if_known: main_loop_or_scheduler timer path -> 0x0001e8b4 -> maybe_session_tick_counter_and_timeout_pump
+  required_state_before:
+    - state70 bit5 clear
+    - session_tick_counter_state+4 halfword nonzero
+    - service_channel_any_countdown_active() returns true
+  required_rx_before: none directly proven
+  required_timer_or_counter: session_tick_counter_state+4 halfword nonzero; service countdown active
+  related_global_or_state_offset:
+    - session_tick_counter_state literal 0x0001e888 -> RAM 0x20002788
+    - consumed halfword at 0x2000278c
+  enables_tx_candidate: @T1
+  disables_tx_candidate: @H1 selector path
+  confidence: confirmed_code for producer; seed source unresolved
+
+state70_xref_detail:
+  address: 0x0001be06..0x0001be26 / 0x0001bfd4
+  function: bluefrog_machine_state_pump
+  basic_block_or_label: @H1/@T1 selector branch
+  instruction_or_decompiled_stmt:
+    - if state70 bit5 set: clear bit5
+    - if state70 bit6 set: clear bit6 and send @T1
+    - else send @H1
+  bit_or_mask: bit5 / 0x20, bit6 / 0x40
+  operation: test/clear
+  direct_caller: main_loop_or_scheduler
+  caller_chain_if_known: main_loop_or_scheduler -> bluefrog_machine_state_pump
+  required_state_before:
+    - @H1: state70 bit5 set, bit6 clear
+    - @T1: state70 bit5 set, bit6 set
+  required_rx_before: none directly proven
+  required_timer_or_counter: state produced by maybe_session_tick_counter_and_timeout_pump
+  related_global_or_state_offset: bluefrog_state+0x70 at 0x2000298c
+  enables_tx_candidate: @H1 or @T1
+  disables_tx_candidate: re-send until bit5/bit6 are rearmed
+  confidence: confirmed_code
+```
+
+#### Session/tick/counter analysis for state70 bit5/bit6
+
+```text
+state70_bit5_bit6_seed:
+  seed_source_address: 0x0001e824 consumer; external seed writer not found
+  seed_source_function: maybe_session_tick_counter_and_timeout_pump
+  seed_state_offset:
+    - session_tick_counter_state literal at 0x0001e888 -> 0x20002788
+    - tick accumulator: 0x20002788
+    - H1/T1 countdown halfword: 0x2000278c
+  seed_type: timer/countdown with unresolved external seed
+  bit5_set_condition:
+    - state70 bit5 is currently clear
+    - *(uint16_t *)0x2000278c != 0
+    - either service countdown active, or the countdown decrements to zero
+  bit6_set_condition:
+    - service_channel_any_countdown_active() returns true while 0x2000278c != 0
+  bit5_clear_condition:
+    - bluefrog_machine_state_pump clears bit5 before sending @H1 or @T1
+  bit6_clear_condition:
+    - maybe_session_tick_counter_and_timeout_pump clears bit6 when countdown reaches zero without active service countdown
+    - bluefrog_machine_state_pump clears bit6 before sending @T1
+  produces_H1: PARTIAL
+  produces_T1: PARTIAL
+  expected_rx_after_H1: not statically proven; no @H? identity dialog is encoded at the @H1 callsite
+  expected_rx_after_T1: @t1
+  unresolved_reason_if_any:
+    - XREFs to 0x2000278c show reads/writes only inside maybe_session_tick_counter_and_timeout_pump.
+    - No direct writer that seeds the nonzero halfword countdown was found in this focused pass.
+    - The caller at 0x0001e8b4 invokes the tick pump only when state70 bit0 is set and on its 10-tick cadence, but does not seed 0x2000278c itself in the visible decompilation.
+  confidence: confirmed_code for bit production; unknown for countdown seed origin
+```
+
+Supporting call context:
+
+```text
+session_tick_caller:
+  function: timer/tick function body at 0x0001e8b4
+  callsite: 0x0001e94a
+  condition:
+    - periodic local counter puVar6[3] reaches a 10-tick cadence
+    - state70 bit0 set
+  calls: maybe_session_tick_counter_and_timeout_pump()
+  notes:
+    - the same function owns several timing fields at 0x20002050, 0x20002054, 0x20002056, 0x20002058
+    - these are broader timer/scheduler fields; they do not directly seed 0x2000278c in the recovered code
+  confidence: confirmed_code
+```
+
+#### `@T0` substate bits3/4 analysis
+
+```text
+state70_t0_substate:
+  substate_bits: state70 bits3/4
+  substate_mask: 0x00000018
+  substate_shift: decompiler shows ((state70 & 0x1f) >> 3); equivalent effective substate is bits3/4
+  required_substate_for_T0: 3
+  t0_tx_callsite: 0x0001befe
+  t0_literal_addr: 0x000249b0
+  sender_helper: machine_uart_send_line_encoded
+  substate_writer_address:
+    - 0x0001d638..0x0001d642 sets substate to 1 from @HF parsed byte 0x04
+    - 0x00016294..0x00016300 advances substate 1 -> 2 or 2 -> 3 depending param_2
+    - 0x0001d0e0..0x0001d0e6 clears substate bits on @HF parsed byte 0xff
+    - 0x0001bdb2..0x0001befe clears substate bits after @T0 TX
+  substate_writer_function:
+    - host_reply_hf_state70_control_handler at 0x0001d0a4 for @HF-controlled direct writes
+    - maybe_advance_t0_state70_substate at 0x00016294 for substate progression
+    - bluefrog_machine_state_pump for post-TX clear
+  required_previous_rx_or_event:
+    - @HF with parsed byte 0x04 sets substate 1
+    - unknown caller/event invokes maybe_advance_t0_state70_substate(param_2=1) to move 1 -> 2
+    - unknown caller/event invokes maybe_advance_t0_state70_substate(param_2=0) to move 2 -> 3
+  clears_after_T0: state70 &= 0xffffffe7
+  expected_rx_after_T0: @T3... and/or @t0 seen in runtime, but not directly encoded at the @T0 callsite
+  unresolved_reason_if_any:
+    - the helper that advances substate 1->2->3 is decompilable at 0x00016294, but Ghidra exposes no direct XREF/caller.
+    - likely entry is mainloop/jumptable-adjacent, but the main_loop_or_scheduler jumptable at 0x00016506 is not fully recovered.
+  confidence: PARTIAL
+```
+
+Substate progression helper:
+
+```text
+maybe_advance_t0_state70_substate:
+  address: 0x00016294
+  behavior_when_state70_bit0_set:
+    - param_2 == 1 and current substate == 1: write substate 2
+    - param_2 == 0 and current substate == 2: write substate 3
+    - otherwise return without write
+  behavior_when_state70_bit0_clear:
+    - param_2 == 1: state+0x0c = 1
+    - param_2 == 0 and 0 < state+0x0c < 0x1f: maybe_set_flag46_bit0_and_refresh_scheduler(0), then state+0x0c = 0
+  direct_xrefs: none found by ReVa/Ghidra
+  confidence: confirmed_code for behavior; unknown for caller/event source
+```
+
+`@HF` control handler relation:
+
+```text
+host_reply_hf_state70_control_handler:
+  address: 0x0001d0a4
+  table_relation: @H? subhandler table entry index 4, corresponding to @HF if indexed as line[2] - 'B'
+  parsed_payload: parse_ascii_hex_byte_or_nibble(line+4)
+  relevant_state70_effects:
+    - parsed 0x00: write DAT_20002058 = 1; clear state70 bit1; send literal at 0x00024978
+    - parsed 0x01: write DAT_20002058 = 10; set state70 bit1; send literal at 0x00024978
+    - parsed 0x02: clear state70 bit2; send literal at 0x00024978
+    - parsed 0x03: set state70 bit2; send literal at 0x00024978
+    - parsed 0x04: state70 = (state70 & 0xffffffe7) | 0x08
+    - parsed 0xff: state70 &= 0xffffffe7; send literal at 0x00024978
+  role_for_T0: establishes only substate 1; does not by itself satisfy @T0 required substate 3
+  confidence: confirmed_code for writes; inferred for @HF table mapping
+```
+
+#### Partial sequence for `@T0/@H1/@T1`
+
+```text
+partial_sequence_resolved: NO
+
+partial_original_sequence_T0_H1_T1:
+  - step: H1/T1 producer
+    state_condition:
+      - state70 bit0 set
+      - session_tick_counter_state+4 halfword nonzero
+      - state70 bit5 currently clear
+    tx:
+      - @H1 if service_channel_any_countdown_active() is false and countdown reaches zero
+      - @T1 if service_channel_any_countdown_active() is true
+    callsite:
+      - producer: 0x0001e824
+      - consumer/TX: 0x0001be06..0x0001be26 / 0x0001bfd4
+    expected_rx:
+      - @T1 path: @t1
+      - @H1 path: not statically proven
+    state_after_rx: @t1 handler clears flags_88 bit1 but does not directly seed state70 bit5/bit6
+    confidence: PARTIAL
+
+  - step: T0 producer
+    state_condition:
+      - state70 bit0 set
+      - state70 bits3/4 reach substate 3
+    tx: @T0
+    callsite: 0x0001befe
+    expected_rx: not statically encoded at callsite; runtime showed @T3/@t0 nearby
+    state_after_rx: @T0 branch clears bit0/substate bits with state70 &= 0xffffffe7
+    confidence: PARTIAL
+
+partial_sequence_blockers:
+  - missing_writer_for: session_tick_counter_state+4 seed
+    affects_tx: @H1/@T1
+    why_unresolved: only reads/writes found for 0x2000278c are inside maybe_session_tick_counter_and_timeout_pump; no external seeding function or RX handler was found in this focused pass.
+    next_static_target: non-data-reference writes to 0x2000278c, BSS/init-copy analysis, and unresolved aliasing around 0x20002788.
+
+  - missing_caller_for: maybe_advance_t0_state70_substate
+    affects_tx: @T0
+    why_unresolved: function at 0x00016294 advances substate 1->2->3, but no direct XREF/caller is exposed; likely mainloop/jumptable-adjacent relation remains unresolved.
+    next_static_target: recover/annotate main_loop_or_scheduler jumptable at 0x00016506 and targets 0x00016508..0x000166a8.
+```
+
+`@D1` remains excluded:
+
+```text
+@D1:
+  in_original_ble_firmware: NO
+  do_not_use_as_original_bluefrog_evidence: YES
+```

@@ -501,6 +501,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void log_normal_startup_sequence_();
   void log_startup_sequence_diff_original_vs_esp_();
   std::string startup_pending_followup_tx_() const;
+  void update_original_like_flags88_from_line_(const std::string &line);
+  void log_original_like_tx_tr37_(const char *source, const char *reason);
+  void log_original_like_session_summary_(const char *context);
+  void log_original_like_core_session_diff_();
   void log_startup_state_after_rx_(const std::string &line);
   void log_original_startup_state_diff_();
   void log_startup_sequence_result_(const char *mode);
@@ -856,6 +860,17 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool startup_trace_sends_d1_{false};
   std::vector<std::string> startup_trace_tx_sequence_;
   std::vector<std::string> startup_trace_rx_sequence_;
+  // Diagnostic-only mirror of selected original BlueFrog flags_88 bits.
+  // This must not drive control flow or TX decisions.
+  uint32_t original_like_flags88_{0};
+  std::string original_like_last_rx_{};
+  std::string original_like_last_tx_{};
+  uint8_t original_like_t2_first_byte_{0};
+  bool original_like_t2_first_byte_known_{false};
+  std::string original_like_t3_code_{};
+  bool original_like_tr37_seen_{false};
+  bool original_like_tf_seen_{false};
+  bool original_like_tv_seen_{false};
   bool manual_handshake_prev_xml_dongle_startup_{false};
   bool manual_handshake_prev_xml_dongle_startup_debug_{false};
   std::string manual_handshake_prev_xml_dongle_startup_mode_{};

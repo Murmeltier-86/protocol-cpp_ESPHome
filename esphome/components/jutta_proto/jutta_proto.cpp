@@ -71,6 +71,12 @@ constexpr uint32_t DONGLE_EVENT_TF = 0x80;
 constexpr uint32_t DONGLE_STARTUP_CLEAR_MASK =
     DONGLE_EVENT_TY | DONGLE_EVENT_T0 | DONGLE_EVENT_T1 | DONGLE_EVENT_T2 | DONGLE_EVENT_T3 | DONGLE_EVENT_TR;
 constexpr uint32_t DONGLE_STARTUP_READY_MASK = DONGLE_EVENT_T2 | DONGLE_EVENT_T3 | DONGLE_EVENT_TR;
+constexpr uint32_t ORIGINAL_LIKE_FLAGS88_TY_CONTEXT = 0x00000004;
+constexpr uint32_t ORIGINAL_LIKE_FLAGS88_TR37_ARM = 0x00000040;
+constexpr uint32_t ORIGINAL_LIKE_FLAGS88_CORE_LATCH = 0x00000100;
+constexpr uint32_t ORIGINAL_LIKE_FLAGS88_GATE_ACTIVE = 0x00000200;
+constexpr uint32_t ORIGINAL_LIKE_FLAGS88_T2_SEEN = 0x00000400;
+constexpr uint32_t ORIGINAL_LIKE_FLAGS88_T3_SEEN = 0x00000800;
 constexpr uint8_t INNER_UART_MODE0_A[16] = {0x08, 0x0E, 0x0C, 0x04, 0x03, 0x0D, 0x0A, 0x0B,
                                             0x00, 0x0F, 0x06, 0x07, 0x02, 0x05, 0x01, 0x09};
 constexpr uint8_t INNER_UART_MODE0_B[16] = {0x04, 0x0B, 0x0D, 0x0A, 0x00, 0x07, 0x0F, 0x05,
@@ -1143,6 +1149,21 @@ bool parse_t2_word_from_response(const std::string &response, uint16_t &word) {
     return false;
   }
   word = static_cast<uint16_t>(parsed);
+  return true;
+}
+
+bool parse_first_hex_byte_after_colon(const std::string &response, uint8_t &byte) {
+  size_t colon = response.find(':');
+  if (colon == std::string::npos || colon + 2 >= response.size()) {
+    return false;
+  }
+  std::string candidate = response.substr(colon + 1, 2);
+  char *end = nullptr;
+  unsigned long parsed = std::strtoul(candidate.c_str(), &end, 16);
+  if (end == candidate.c_str() || end == nullptr || *end != '\0' || parsed > 0xFFUL) {
+    return false;
+  }
+  byte = static_cast<uint8_t>(parsed);
   return true;
 }
 
@@ -3894,6 +3915,10 @@ void JuraComponent::trace_machine_tx_startup_(const char *source, const std::str
   } else if (normalized.rfind("@TP:", 0) == 0) {
     this->startup_trace_sends_tp_ = true;
   }
+  if (normalized == "@TR:37") {
+    this->original_like_last_tx_ = normalized;
+    this->log_original_like_tx_tr37_(source, reason != nullptr ? reason : this->startup_tx_reason_(normalized));
+  }
   if (source != nullptr && std::strcmp(source, "dongle_startup") == 0 && this->startup_trace_tx_sequence_.size() < 64) {
     this->startup_trace_tx_sequence_.push_back(normalized);
   }
@@ -4090,6 +4115,173 @@ std::string JuraComponent::startup_pending_followup_tx_() const {
       break;
   }
   return join_values(pending, ",");
+}
+
+void JuraComponent::update_original_like_flags88_from_line_(const std::string &line) {
+  std::string trimmed = line;
+  trim_in_place(trimmed);
+  if (trimmed.empty()) {
+    return;
+  }
+
+  std::string lower = to_lower_copy(trimmed);
+  uint32_t set_mask = 0;
+  this->original_like_last_rx_ = trimmed;
+
+  if (lower.rfind("ty:", 0) == 0) {
+    set_mask = ORIGINAL_LIKE_FLAGS88_TY_CONTEXT;
+    this->original_like_flags88_ |= set_mask;
+    ESP_LOGI(TAG, "original_like_flags88 event=rx_ty set=0x%08X flags=0x%08X line=\"%s\"",
+             static_cast<unsigned>(set_mask), static_cast<unsigned>(this->original_like_flags88_),
+             sanitize_text_for_api(trimmed).c_str());
+    return;
+  }
+
+  if (trimmed.rfind("@T2", 0) == 0) {
+    uint8_t t2_first = 0;
+    bool parsed = parse_first_hex_byte_after_colon(trimmed, t2_first);
+    set_mask = ORIGINAL_LIKE_FLAGS88_T2_SEEN;
+    if (parsed) {
+      this->original_like_t2_first_byte_ = t2_first;
+      this->original_like_t2_first_byte_known_ = true;
+      if ((t2_first & 0x7f) == 0) {
+        set_mask |= ORIGINAL_LIKE_FLAGS88_CORE_LATCH;
+      }
+      this->original_like_flags88_ |= set_mask;
+      ESP_LOGI(TAG, "original_like_flags88 event=rx_T2 t2_first=0x%02X set=0x%08X flags=0x%08X line=\"%s\"",
+               static_cast<unsigned>(t2_first), static_cast<unsigned>(set_mask),
+               static_cast<unsigned>(this->original_like_flags88_), sanitize_text_for_api(trimmed).c_str());
+    } else {
+      this->original_like_flags88_ |= set_mask;
+      ESP_LOGI(TAG,
+               "original_like_flags88 event=rx_T2 t2_first_unknown=YES set=0x%08X flags=0x%08X line=\"%s\"",
+               static_cast<unsigned>(set_mask), static_cast<unsigned>(this->original_like_flags88_),
+               sanitize_text_for_api(trimmed).c_str());
+    }
+    return;
+  }
+
+  if (trimmed.rfind("@T3", 0) == 0) {
+    set_mask = ORIGINAL_LIKE_FLAGS88_T3_SEEN;
+    size_t colon = trimmed.find(':');
+    this->original_like_t3_code_ = colon == std::string::npos ? trimmed : trimmed.substr(colon + 1);
+    if (this->original_like_t2_first_byte_known_) {
+      if ((this->original_like_t2_first_byte_ & 0x7f) != 0) {
+        set_mask |= ORIGINAL_LIKE_FLAGS88_CORE_LATCH;
+      }
+      this->original_like_flags88_ |= set_mask;
+      ESP_LOGI(TAG, "original_like_flags88 event=rx_T3 t2_first=0x%02X set=0x%08X flags=0x%08X line=\"%s\"",
+               static_cast<unsigned>(this->original_like_t2_first_byte_), static_cast<unsigned>(set_mask),
+               static_cast<unsigned>(this->original_like_flags88_), sanitize_text_for_api(trimmed).c_str());
+    } else {
+      this->original_like_flags88_ |= set_mask;
+      ESP_LOGI(TAG, "original_like_flags88 event=rx_T3 t2_first_unknown=YES flags=0x%08X line=\"%s\"",
+               static_cast<unsigned>(this->original_like_flags88_), sanitize_text_for_api(trimmed).c_str());
+    }
+    return;
+  }
+
+  if (lower.rfind("@tr:37", 0) == 0 || lower.rfind("@tr37", 0) == 0) {
+    set_mask = ORIGINAL_LIKE_FLAGS88_GATE_ACTIVE;
+    this->original_like_tr37_seen_ = true;
+    this->original_like_flags88_ |= set_mask;
+    ESP_LOGI(TAG, "original_like_flags88 event=rx_tr37 set=0x%08X flags=0x%08X line=\"%s\"",
+             static_cast<unsigned>(set_mask), static_cast<unsigned>(this->original_like_flags88_),
+             sanitize_text_for_api(trimmed).c_str());
+    return;
+  }
+
+  const bool is_tf = lower.rfind("@tf", 0) == 0;
+  const bool is_tv = lower.rfind("@tv", 0) == 0;
+  if (is_tf || is_tv) {
+    if (is_tf) {
+      this->original_like_tf_seen_ = true;
+    } else {
+      this->original_like_tv_seen_ = true;
+    }
+    const bool has_0x100 = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_CORE_LATCH) != 0;
+    const bool has_0x04 = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_TY_CONTEXT) != 0;
+    const bool not_0x200 = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_GATE_ACTIVE) == 0;
+    const bool not_0x40 = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_TR37_ARM) == 0;
+    const bool would_set_0x40 = has_0x100 && has_0x04 && not_0x200 && not_0x40;
+    ESP_LOGI(TAG,
+             "original_like_flags88 event=%s flags=0x%08X gate_helper_condition_0x100=%d "
+             "gate_helper_condition_0x04=%d gate_helper_condition_not_0x200=%d would_set_0x40=%d line=\"%s\"",
+             is_tf ? "rx_TF" : "rx_TV", static_cast<unsigned>(this->original_like_flags88_), has_0x100 ? 1 : 0,
+             has_0x04 ? 1 : 0, not_0x200 ? 1 : 0, would_set_0x40 ? 1 : 0,
+             sanitize_text_for_api(trimmed).c_str());
+  }
+}
+
+void JuraComponent::log_original_like_tx_tr37_(const char *source, const char *reason) {
+  const bool has_original_arm = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_TR37_ARM) != 0;
+  ESP_LOGI(TAG,
+           "original_like_flags88 event=tx_TR37 flags=0x%08X has_0x40=%s would_need_0x40_for_original=%s "
+           "source=%s reason=%s",
+           static_cast<unsigned>(this->original_like_flags88_), YESNO(has_original_arm), YESNO(!has_original_arm),
+           source != nullptr ? source : "unknown", reason != nullptr ? reason : "existing_startup_tx");
+}
+
+void JuraComponent::log_original_like_session_summary_(const char *context) {
+  std::vector<std::string> missing;
+  if ((this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_TY_CONTEXT) == 0) {
+    missing.emplace_back("0x04_ty");
+  }
+  if ((this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_T2_SEEN) == 0) {
+    missing.emplace_back("0x400_T2");
+  }
+  if ((this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_T3_SEEN) == 0) {
+    missing.emplace_back("0x800_T3");
+  }
+  if ((this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_CORE_LATCH) == 0) {
+    missing.emplace_back("0x100_core_latch");
+  }
+  if ((this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_GATE_ACTIVE) == 0) {
+    missing.emplace_back("0x200_tr37_gate");
+  }
+  if (!this->original_like_tf_seen_) {
+    missing.emplace_back("TF");
+  }
+  if (!this->original_like_tv_seen_) {
+    missing.emplace_back("TV");
+  }
+  ESP_LOGI(TAG,
+           "original_like_session_summary context=%s flags=0x%08X has_ty=%d has_T2=%d has_T3=%d has_0x100=%d "
+           "has_tr37=%d has_TF=%d has_TV=%d missing=[%s]",
+           context != nullptr ? context : "unknown", static_cast<unsigned>(this->original_like_flags88_),
+           (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_TY_CONTEXT) != 0 ? 1 : 0,
+           (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_T2_SEEN) != 0 ? 1 : 0,
+           (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_T3_SEEN) != 0 ? 1 : 0,
+           (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_CORE_LATCH) != 0 ? 1 : 0,
+           this->original_like_tr37_seen_ ? 1 : 0, this->original_like_tf_seen_ ? 1 : 0,
+           this->original_like_tv_seen_ ? 1 : 0, join_values(missing, ",").c_str());
+}
+
+void JuraComponent::log_original_like_core_session_diff_() {
+  const bool has_ty = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_TY_CONTEXT) != 0;
+  const bool has_t2 = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_T2_SEEN) != 0;
+  const bool has_t3 = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_T3_SEEN) != 0;
+  const bool has_core = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_CORE_LATCH) != 0;
+  const bool has_gate = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_GATE_ACTIVE) != 0;
+  const char *likely_problem = "core_session_complete_but_no_tf_tv";
+  if (!has_ty) {
+    likely_problem = "waiting_for_TY";
+  } else if (!has_t2) {
+    likely_problem = "waiting_for_T2";
+  } else if (!has_t3) {
+    likely_problem = "waiting_for_T3";
+  } else if (!has_core) {
+    likely_problem = "missing_core_latch_0x100";
+  } else if (!has_gate) {
+    likely_problem = "tr37_not_seen";
+  } else if (!this->original_like_tf_seen_ && !this->original_like_tv_seen_) {
+    likely_problem = "tf_tv_not_emitted_by_machine";
+  }
+  ESP_LOGI(TAG,
+           "original_like_core_session_diff ty=%d T2=%d T3=%d core_latch_0x100=%d tr37_gate_0x200=%d "
+           "tf_seen=%d tv_seen=%d likely_problem=\"%s\"",
+           has_ty ? 1 : 0, has_t2 ? 1 : 0, has_t3 ? 1 : 0, has_core ? 1 : 0, has_gate ? 1 : 0,
+           this->original_like_tf_seen_ ? 1 : 0, this->original_like_tv_seen_ ? 1 : 0, likely_problem);
 }
 
 void JuraComponent::log_startup_state_after_rx_(const std::string &line) {
@@ -7901,6 +8093,8 @@ void JuraComponent::fail_dongle_startup_(uint32_t now, const char *reason) {
   this->stats_inner_tx_required_ = false;
   this->post_gate_tx_ready_event_ = true;
   this->dongle_startup_next_retry_ms_ = now + this->xml_poll_interval_ms_;
+  this->log_original_like_session_summary_(reason != nullptr ? reason : "dongle_startup_failed");
+  this->log_original_like_core_session_diff_();
   XML_STATS_LOGD("dongle_startup_failed reason=%s events=0x%02X next_retry_ms=%u",
            reason != nullptr ? reason : "unknown", static_cast<unsigned>(this->dongle_events_),
            static_cast<unsigned>(this->xml_poll_interval_ms_));
@@ -7919,6 +8113,7 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
 
   uint32_t bit = 0;
   std::string lower = to_lower_copy(trimmed);
+  this->update_original_like_flags88_from_line_(trimmed);
   if (lower.rfind("ty:", 0) == 0) {
     bit = DONGLE_EVENT_TY;
   } else if (lower.rfind("@t0", 0) == 0) {
@@ -8092,6 +8287,15 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       this->stats_inner_tx_required_ = false;
       this->dongle_events_ &= ~DONGLE_STARTUP_CLEAR_MASK;
       this->reset_startup_tx_trace_();
+      this->original_like_flags88_ = 0;
+      this->original_like_last_rx_.clear();
+      this->original_like_last_tx_.clear();
+      this->original_like_t2_first_byte_ = 0;
+      this->original_like_t2_first_byte_known_ = false;
+      this->original_like_t3_code_.clear();
+      this->original_like_tr37_seen_ = false;
+      this->original_like_tf_seen_ = false;
+      this->original_like_tv_seen_ = false;
       this->dongle_startup_rx_buffer_.clear();
       this->dongle_startup_probe_attempt_ = 0;
       this->dongle_startup_t1_attempt_ = 0;
@@ -8393,6 +8597,8 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         XML_STATS_LOGD("post_gate_transport_enabled inner_tx=YES flags_equiv=0x90");
         this->log_normal_startup_sequence_();
         this->log_startup_sequence_diff_original_vs_esp_();
+        this->log_original_like_session_summary_("dongle_startup_ready");
+        this->log_original_like_core_session_diff_();
       }
       return true;
 
