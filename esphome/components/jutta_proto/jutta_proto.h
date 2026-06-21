@@ -498,6 +498,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void trace_machine_tx_startup_(const char *source, const std::string &line, bool encoded, const char *reason);
   void reset_startup_tx_trace_();
   void log_startup_tx_diff_();
+  void log_normal_startup_sequence_();
+  void log_startup_sequence_diff_original_vs_esp_();
   std::string startup_pending_followup_tx_() const;
   void log_startup_state_after_rx_(const std::string &line);
   void log_original_startup_state_diff_();
@@ -851,6 +853,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool startup_trace_sends_t3_{false};
   bool startup_trace_sends_t2_{false};
   bool startup_trace_sends_tp_{false};
+  bool startup_trace_sends_d1_{false};
+  std::vector<std::string> startup_trace_tx_sequence_;
+  std::vector<std::string> startup_trace_rx_sequence_;
   bool manual_handshake_prev_xml_dongle_startup_{false};
   bool manual_handshake_prev_xml_dongle_startup_debug_{false};
   std::string manual_handshake_prev_xml_dongle_startup_mode_{};

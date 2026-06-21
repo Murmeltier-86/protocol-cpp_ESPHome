@@ -1103,5 +1103,59 @@ Open point: the original statepump can also emit `@t2:` and `@t3`, but those are
 not part of the active-safe allowlist until their exact payload/state conditions
 are mirrored confidently.
 
+### ESP Normal Startup vs Original Startup
+
+The current ESP normal `dongle_startup` path sends:
+
+```text
+@D1 -> TY: -> @T1 -> @t2:<...> -> @t3 -> @TR:37
+```
+
+`@D1` is an ESP-side legacy startup probe:
+
+- ESP sender: `process_dongle_startup_`, state `PROBE_D1`, through
+  `send_dongle_startup_command_("@D1", now)` as plaintext.
+- It also appears in old XML/session probe arrays and the tablet start sequence.
+- No `@D1`, `@D%c`, `@D%d`, `@D:` or generic `@D` startup literal/path has been
+  found in the decompiled classic BLE/BlueFrog firmware so far.
+- It is therefore not confirmed as an original BLE dongle startup frame. Current
+  role classification: `legacy`.
+
+The trace reason for `@D1` is now `legacy_startup_probe` instead of `unknown`.
+This is only a logging correction; it does not add or remove any TX.
+
+Diagnostic logs added for normal startup:
+
+```text
+normal_startup_sequence
+  tx_sequence=[@D1,TY:,@T1,@t2:...,@t3,@TR:37]
+  rx_sequence=[...]
+  sends_T0=<YES|NO>
+  sends_H1=<YES|NO>
+  sends_TY=<YES|NO>
+  sends_T1=<YES|NO>
+  sends_t2=<YES|NO>
+  sends_t3=<YES|NO>
+  sends_TR37=<YES|NO>
+  sends_D1=<YES|NO>
+
+startup_sequence_diff_original_vs_esp
+  original_known_frames=[@T0,@H1,TY:,@T1,@t2:,@t3,@TR:37,@TP:]
+  esp_normal_frames=[...]
+  missing_in_esp_normal=[...]
+  extra_in_esp_normal=[...]
+  uncertain_frames=[@D1]
+```
+
+Encoding note:
+
+- ESP normal startup calls `send_dongle_startup_command_("@T1", now)` with
+  `inner_uart0=false`, so the trace `@T1 encoded=NO` is the actual ESP path.
+- Active-Safe calls the same core line through `write_inner_uart0_command_`, so
+  `@T1 encoded=YES` is also the actual ESP path.
+- The original BLE firmware always routes startup literals through
+  `machine_uart_send_line_encoded`; whether this becomes raw/plain or 0x26 encoded
+  depends on the original transport/session guard inside that sender.
+
 These logs do not send any new command. They only compare the observed ESP
 startup events/follow-up TX against the original firmware state consequences.

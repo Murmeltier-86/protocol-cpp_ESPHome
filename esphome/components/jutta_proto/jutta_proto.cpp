@@ -3832,6 +3832,9 @@ const char *JuraComponent::startup_tx_reason_(const std::string &line) const {
   if (normalized == "@H1") {
     return "startup_identity_probe";
   }
+  if (normalized == "@D1") {
+    return "legacy_startup_probe";
+  }
   if (normalized == "TY:") {
     return "machine_type_query";
   }
@@ -3860,6 +3863,9 @@ void JuraComponent::reset_startup_tx_trace_() {
   this->startup_trace_sends_t3_ = false;
   this->startup_trace_sends_t2_ = false;
   this->startup_trace_sends_tp_ = false;
+  this->startup_trace_sends_d1_ = false;
+  this->startup_trace_tx_sequence_.clear();
+  this->startup_trace_rx_sequence_.clear();
 }
 
 void JuraComponent::trace_machine_tx_startup_(const char *source, const std::string &line, bool encoded,
@@ -3871,6 +3877,8 @@ void JuraComponent::trace_machine_tx_startup_(const char *source, const std::str
   }
   if (normalized == "@T0") {
     this->startup_trace_sends_t0_ = true;
+  } else if (normalized == "@D1") {
+    this->startup_trace_sends_d1_ = true;
   } else if (normalized == "@T1") {
     this->startup_trace_sends_t1_ = true;
   } else if (normalized == "@H1") {
@@ -3885,6 +3893,9 @@ void JuraComponent::trace_machine_tx_startup_(const char *source, const std::str
     this->startup_trace_sends_t2_ = true;
   } else if (normalized.rfind("@TP:", 0) == 0) {
     this->startup_trace_sends_tp_ = true;
+  }
+  if (source != nullptr && std::strcmp(source, "dongle_startup") == 0 && this->startup_trace_tx_sequence_.size() < 64) {
+    this->startup_trace_tx_sequence_.push_back(normalized);
   }
   ESP_LOGI(TAG, "machine_tx_startup_trace source=%s line=\"%s\" encoded=%s reason=\"%s\"",
            source != nullptr ? source : "unknown", sanitize_text_for_api(normalized).c_str(), YESNO(encoded),
@@ -3931,6 +3942,72 @@ void JuraComponent::log_startup_tx_diff_() {
            YESNO(this->startup_trace_sends_h1_), YESNO(this->startup_trace_sends_ty_),
            YESNO(this->startup_trace_sends_tr37_), YESNO(this->startup_trace_sends_t3_),
            YESNO(this->startup_trace_sends_t2_), YESNO(this->startup_trace_sends_tp_), missing_text.c_str());
+}
+
+void JuraComponent::log_normal_startup_sequence_() {
+  ESP_LOGI(TAG,
+           "normal_startup_sequence tx_sequence=[%s] rx_sequence=[%s] sends_T0=%s sends_H1=%s sends_TY=%s "
+           "sends_T1=%s sends_t2=%s sends_t3=%s sends_TR37=%s sends_D1=%s",
+           join_values(this->startup_trace_tx_sequence_, ",").c_str(),
+           join_values(this->startup_trace_rx_sequence_, "|").c_str(), YESNO(this->startup_trace_sends_t0_),
+           YESNO(this->startup_trace_sends_h1_), YESNO(this->startup_trace_sends_ty_),
+           YESNO(this->startup_trace_sends_t1_), YESNO(this->startup_trace_sends_t2_),
+           YESNO(this->startup_trace_sends_t3_), YESNO(this->startup_trace_sends_tr37_),
+           YESNO(this->startup_trace_sends_d1_));
+}
+
+void JuraComponent::log_startup_sequence_diff_original_vs_esp_() {
+  const std::vector<std::string> original_frames = {"@T0", "@H1", "TY:", "@T1", "@t2:", "@t3", "@TR:37", "@TP:"};
+  std::vector<std::string> esp_frames;
+  if (this->startup_trace_sends_d1_) {
+    esp_frames.emplace_back("@D1");
+  }
+  if (this->startup_trace_sends_t0_) {
+    esp_frames.emplace_back("@T0");
+  }
+  if (this->startup_trace_sends_h1_) {
+    esp_frames.emplace_back("@H1");
+  }
+  if (this->startup_trace_sends_ty_) {
+    esp_frames.emplace_back("TY:");
+  }
+  if (this->startup_trace_sends_t1_) {
+    esp_frames.emplace_back("@T1");
+  }
+  if (this->startup_trace_sends_t2_) {
+    esp_frames.emplace_back("@t2:");
+  }
+  if (this->startup_trace_sends_t3_) {
+    esp_frames.emplace_back("@t3");
+  }
+  if (this->startup_trace_sends_tr37_) {
+    esp_frames.emplace_back("@TR:37");
+  }
+  if (this->startup_trace_sends_tp_) {
+    esp_frames.emplace_back("@TP:");
+  }
+
+  std::vector<std::string> missing;
+  if (!this->startup_trace_sends_t0_) {
+    missing.emplace_back("@T0");
+  }
+  if (!this->startup_trace_sends_h1_) {
+    missing.emplace_back("@H1");
+  }
+  if (!this->startup_trace_sends_tp_) {
+    missing.emplace_back("@TP:");
+  }
+
+  std::vector<std::string> extra;
+  if (this->startup_trace_sends_d1_) {
+    extra.emplace_back("@D1");
+  }
+
+  ESP_LOGI(TAG,
+           "startup_sequence_diff_original_vs_esp original_known_frames=[%s] esp_normal_frames=[%s] "
+           "missing_in_esp_normal=[%s] extra_in_esp_normal=[%s] uncertain_frames=[@D1]",
+           join_values(original_frames, ",").c_str(), join_values(esp_frames, ",").c_str(),
+           join_values(missing, ",").c_str(), join_values(extra, ",").c_str());
 }
 
 std::string JuraComponent::startup_pending_followup_tx_() const {
@@ -7906,6 +7983,12 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
 
   bool newly_set = (this->dongle_events_ & bit) == 0;
   this->dongle_events_ |= bit;
+  if (this->xml_dongle_startup_ && this->manual_handshake_probe_state_ == ManualHandshakeProbeState::IDLE &&
+      this->dongle_startup_state_ != DongleStartupState::IDLE &&
+      this->dongle_startup_state_ != DongleStartupState::START_CLEAR &&
+      this->startup_trace_rx_sequence_.size() < 64) {
+    this->startup_trace_rx_sequence_.push_back(trimmed);
+  }
   if (this->xml_dongle_startup_ && (newly_set || this->xml_dongle_startup_debug_)) {
     ESP_LOGD(TAG, "dongle_event line=\"%s\" set=0x%02X events=0x%02X",
              sanitize_text_for_api(trimmed).c_str(), static_cast<unsigned>(bit),
@@ -8008,6 +8091,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       this->stats_session_ready_ = false;
       this->stats_inner_tx_required_ = false;
       this->dongle_events_ &= ~DONGLE_STARTUP_CLEAR_MASK;
+      this->reset_startup_tx_trace_();
       this->dongle_startup_rx_buffer_.clear();
       this->dongle_startup_probe_attempt_ = 0;
       this->dongle_startup_t1_attempt_ = 0;
@@ -8307,6 +8391,8 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
                  static_cast<unsigned>(this->dongle_events_ & DONGLE_STARTUP_READY_MASK),
                  static_cast<unsigned>(this->dongle_events_));
         XML_STATS_LOGD("post_gate_transport_enabled inner_tx=YES flags_equiv=0x90");
+        this->log_normal_startup_sequence_();
+        this->log_startup_sequence_diff_original_vs_esp_();
       }
       return true;
 
