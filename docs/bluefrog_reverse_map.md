@@ -995,3 +995,55 @@ button:
           respond_identity: true
           active_probe: true
 ```
+
+### Startup State After @T2/@T3/@t0/ty/@t1/@tr37
+
+This section focuses on state consequences after the machine-originated startup
+responses, not on live/status cachewriter behavior.
+
+Confirmed original BLE firmware handlers:
+
+| RX frame | Handler | Original state/cache writes | Follow-up relevance | Confidence |
+|---|---|---|---|---|
+| `@T2...` | `machine_rx_t2_state_handler` (`0x0001ced8`) | parses 13 hex bytes from `line+4`; writes `bluefrog_state+0x2c`; writes `machine_cache_base+0x72`; sets `bluefrog_state_flags_88 |= 0x400`; conditionally sets `flags_88 |= 0x100` when the first parsed byte masked with `0x7f` is zero | Enables the state pump to proceed toward generated `@t2:` handling | confirmed_code |
+| `@T3...` | `machine_rx_t3_identity_handler` (`0x0001da24`) | parses 16-bit value at `line+4`; stores it in `machine_cache_base+0x68`; copies identity/version text from `line+8` to `machine_cache_base+0x88`; sets `flags_88 |= 0x800`; conditionally sets `flags_88 |= 0x100` when `bluefrog_state+0x2c & 0x7f` is nonzero | Enables the state pump to proceed toward generated `@t3` / quiet-before-gate handling | confirmed_code |
+| `ty:...` | `ty_response_handler` / startup branch | sets/clears startup/session-adjacent bits; confirmed effect includes `flags_88` bit `0x04` in the existing reverse map | Allows type query phase to advance toward `@T1`/`@T2` handling | confirmed_code/inferred for exact sub-bits |
+| `@t0` | startup/control handler path | ESP tracks as `DONGLE_EVENT_T0`; original firmware uses it as a startup-control event around `@T3` quiet/gate timing | Can satisfy wait-after-`@t3` timing branch when that branch is active | inferred |
+| `@t1` | startup/control handler path | ESP tracks as `DONGLE_EVENT_T1`; original firmware uses it as the response to `@T1` | Allows progression toward waiting for `@T2` | confirmed by ESP path, original exact handler still partly table-driven |
+| `@tr:37,...` | `machine_rx_tr37_gate_handler` (`0x0001d788`) plus subhandler table | parses byte at `line+4`, dispatches through `machine_rx_tr37_subhandler_table`; exact `0x37` subhandler remains table-driven | Establishes gate/session readiness when required `@T2`/`@T3` bits are also present | confirmed_code for dispatch, subhandler partially unresolved |
+
+Original statepump follow-up TX candidates after these flags:
+
+| Candidate TX | Required original state | Consumed/affected state | ESP equivalent | Safe in current tests |
+|---|---|---|---|---|
+| `TY:` | startup type phase | waits for `ty:` | `DONGLE_EVENT_TY` | yes, already used |
+| `@T1` | post-type startup phase | waits for `@t1` | `DONGLE_EVENT_T1` | yes, already used |
+| `@t2:<...>` | `@T2` parsed word/state available | advances toward `@T3` | partially represented by `startup_t2_word_`; not sent by Active-Safe | not in Active-Safe allowlist |
+| `@t3` | `@T3` identity/cache state available | starts quiet/gate preparation | represented only as `startup_trace_sends_t3_` when normal full startup sends it | not in Active-Safe allowlist |
+| `@TR:37` | quiet/gate prep after `@T3`/`@t3` path | waits for `@tr:37` | `DONGLE_EVENT_TR` / `manual_original_startup_got_tr37_` | yes, already used |
+| `@T0` | startup/identity TX block | machine may answer with `@T3`/`@t0` | `startup_trace_sends_t0_`, `DONGLE_EVENT_T0` | yes, Active-Safe |
+| `@H1` | startup/identity probe literal | no host dialog observed from this alone | `startup_trace_sends_h1_` | yes, Active-Safe |
+| `@TP:` | PMode/stayInBLE path from 0x1529 | separate heartbeat/control path | `startup_trace_sends_tp_` | not part of Active-Safe |
+
+ESP state mapping:
+
+| Original flag/state | ESP state | Status |
+|---|---|---|
+| `flags_88 |= 0x400` after `@T2` | `DONGLE_EVENT_T2` plus optional `startup_t2_word_` | mapped coarsely |
+| `flags_88 |= 0x800` after `@T3` | `DONGLE_EVENT_T3` plus `dongle_machine_identity_` | mapped coarsely |
+| `flags_88 |= 0x04` around `ty:` | `DONGLE_EVENT_TY` | mapped coarsely |
+| `@t0` startup event | `DONGLE_EVENT_T0` | mapped |
+| `@t1` startup event | `DONGLE_EVENT_T1` | mapped |
+| `@tr:37` gate event | `DONGLE_EVENT_TR`; in Active-Safe also `manual_original_startup_got_tr37_` | mapped |
+| conditional `flags_88 |= 0x100` | no exact ESP bit | missing in ESP state |
+| transport/peripheral startup `flags_88 |= 0x40000` | no exact ESP bit | missing in ESP state |
+
+New ESP diagnostics:
+
+```text
+startup_state_after_rx line="<rx_line>" ...
+original_startup_state_diff ...
+```
+
+These logs do not send any new command. They only compare the observed ESP
+startup events/follow-up TX against the original firmware state consequences.

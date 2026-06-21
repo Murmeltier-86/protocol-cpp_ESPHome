@@ -3498,6 +3498,9 @@ bool JuraComponent::start_manual_original_startup_observe_(uint32_t observe_ms, 
   this->manual_original_startup_got_ty_ = false;
   this->manual_original_startup_got_t1_ = false;
   this->manual_original_startup_got_tr37_ = false;
+  this->dongle_events_ &= ~DONGLE_STARTUP_CLEAR_MASK;
+  this->startup_t2_word_ = 0;
+  this->dongle_tr_payload_.clear();
   this->reset_startup_tx_trace_();
   this->manual_original_startup_host_identity_request_count_ = 0;
   this->manual_original_startup_safe_identity_response_count_ = 0;
@@ -3596,6 +3599,9 @@ bool JuraComponent::start_manual_original_startup_active_safe_(uint32_t observe_
   this->manual_original_startup_got_ty_ = false;
   this->manual_original_startup_got_t1_ = false;
   this->manual_original_startup_got_tr37_ = false;
+  this->dongle_events_ &= ~DONGLE_STARTUP_CLEAR_MASK;
+  this->startup_t2_word_ = 0;
+  this->dongle_tr_payload_.clear();
   this->reset_startup_tx_trace_();
   this->manual_original_startup_host_identity_request_count_ = 0;
   this->manual_original_startup_safe_identity_response_count_ = 0;
@@ -3876,6 +3882,206 @@ void JuraComponent::log_startup_tx_diff_() {
            YESNO(this->startup_trace_sends_h1_), YESNO(this->startup_trace_sends_ty_),
            YESNO(this->startup_trace_sends_tr37_), YESNO(this->startup_trace_sends_t3_),
            YESNO(this->startup_trace_sends_t2_), YESNO(this->startup_trace_sends_tp_), missing_text.c_str());
+}
+
+std::string JuraComponent::startup_pending_followup_tx_() const {
+  std::vector<std::string> pending;
+  if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE) {
+    switch (this->manual_original_startup_active_stage_) {
+      case OriginalStartupActiveStage::SEND_T0:
+        pending.emplace_back("@T0");
+        break;
+      case OriginalStartupActiveStage::SEND_H1:
+        pending.emplace_back("@H1");
+        break;
+      case OriginalStartupActiveStage::SEND_TY:
+        pending.emplace_back("TY:");
+        break;
+      case OriginalStartupActiveStage::SEND_T1:
+        pending.emplace_back("@T1");
+        break;
+      case OriginalStartupActiveStage::SEND_TR37:
+        pending.emplace_back("@TR:37");
+        break;
+      case OriginalStartupActiveStage::WAIT_TY:
+        pending.emplace_back("wait_ty");
+        break;
+      case OriginalStartupActiveStage::WAIT_T1:
+        pending.emplace_back("wait_@t1");
+        break;
+      case OriginalStartupActiveStage::WAIT_TR37:
+        pending.emplace_back("wait_@tr:37");
+        break;
+      case OriginalStartupActiveStage::WAIT_AFTER_T0:
+      case OriginalStartupActiveStage::WAIT_AFTER_H1:
+        pending.emplace_back("wait_gap");
+        break;
+      case OriginalStartupActiveStage::IDLE:
+      case OriginalStartupActiveStage::OBSERVE:
+      default:
+        break;
+    }
+    return join_values(pending, ",");
+  }
+
+  switch (this->dongle_startup_state_) {
+    case DongleStartupState::PROBE_D1:
+      pending.emplace_back("@D1");
+      break;
+    case DongleStartupState::PROBE_TY:
+      pending.emplace_back("TY:");
+      break;
+    case DongleStartupState::SEND_T1:
+      pending.emplace_back("@T1");
+      break;
+    case DongleStartupState::WAIT_T2:
+      pending.emplace_back("wait_@T2");
+      break;
+    case DongleStartupState::SEND_T2:
+      pending.emplace_back("@t2:");
+      break;
+    case DongleStartupState::WAIT_T3:
+      pending.emplace_back("wait_@T3");
+      break;
+    case DongleStartupState::SEND_T3:
+      pending.emplace_back("@t3");
+      break;
+    case DongleStartupState::WAIT_T0_AFTER_T3:
+      pending.emplace_back("wait_@t0");
+      break;
+    case DongleStartupState::WAIT_AFTER_T3:
+      pending.emplace_back("quiet_before_@TR:37");
+      break;
+    case DongleStartupState::PREP_TR37:
+    case DongleStartupState::SEND_TR37:
+      pending.emplace_back("@TR:37");
+      break;
+    case DongleStartupState::WAIT_TR37:
+      pending.emplace_back("wait_@tr:37");
+      break;
+    default:
+      break;
+  }
+  return join_values(pending, ",");
+}
+
+void JuraComponent::log_startup_state_after_rx_(const std::string &line) {
+  std::string trimmed = line;
+  trim_in_place(trimmed);
+  if (trimmed.empty()) {
+    return;
+  }
+  std::string lower = to_lower_copy(trimmed);
+  const bool startup_line = lower.rfind("@t0", 0) == 0 || lower.rfind("@t1", 0) == 0 ||
+                            trimmed.rfind("@T2", 0) == 0 || trimmed.rfind("@T3", 0) == 0 ||
+                            lower.rfind("ty:", 0) == 0 || lower.rfind("@tr", 0) == 0;
+  if (!startup_line) {
+    return;
+  }
+  const bool post_gate = (this->stats_session_ready_ && this->stats_inner_tx_required_) ||
+                         this->manual_original_startup_got_tr37_ ||
+                         ((this->dongle_events_ & DONGLE_EVENT_TR) != 0);
+  std::string pending = this->startup_pending_followup_tx_();
+  ESP_LOGI(TAG,
+           "startup_state_after_rx line=\"%s\" events=0x%02X post_gate=%s machine_type_seen=%s t0_seen=%s "
+           "t1_seen=%s t2_seen=%s t3_seen=%s tr37_seen=%s sent_T0=%s sent_H1=%s sent_TY=%s sent_T1=%s "
+           "sent_TR37=%s pending_followup_tx=[%s]",
+           sanitize_text_for_api(trimmed).c_str(), static_cast<unsigned>(this->dongle_events_), YESNO(post_gate),
+           YESNO((this->dongle_events_ & DONGLE_EVENT_TY) != 0),
+           YESNO((this->dongle_events_ & DONGLE_EVENT_T0) != 0),
+           YESNO((this->dongle_events_ & DONGLE_EVENT_T1) != 0),
+           YESNO((this->dongle_events_ & DONGLE_EVENT_T2) != 0),
+           YESNO((this->dongle_events_ & DONGLE_EVENT_T3) != 0),
+           YESNO((this->dongle_events_ & DONGLE_EVENT_TR) != 0 || this->manual_original_startup_got_tr37_),
+           YESNO(this->manual_original_startup_sent_t0_ || this->startup_trace_sends_t0_),
+           YESNO(this->manual_original_startup_sent_h1_ || this->startup_trace_sends_h1_),
+           YESNO(this->manual_original_startup_sent_ty_ || this->startup_trace_sends_ty_),
+           YESNO(this->manual_original_startup_sent_t1_ || this->startup_trace_sends_t1_),
+           YESNO(this->manual_original_startup_sent_tr37_ || this->startup_trace_sends_tr37_), pending.c_str());
+}
+
+void JuraComponent::log_original_startup_state_diff_() {
+  const std::vector<std::string> original_after_t2 = {"flags_88_0x400", "maybe_flags_88_0x100",
+                                                      "bluefrog_state+0x2c", "machine_cache+0x72"};
+  const std::vector<std::string> original_after_t3 = {"flags_88_0x800", "maybe_flags_88_0x100",
+                                                      "machine_cache+0x68", "machine_cache+0x88_identity"};
+  std::vector<std::string> esp_after_t2;
+  if ((this->dongle_events_ & DONGLE_EVENT_T2) != 0) {
+    esp_after_t2.emplace_back("DONGLE_EVENT_T2");
+  }
+  if (this->startup_t2_word_ != 0) {
+    esp_after_t2.emplace_back("startup_t2_word");
+  }
+  std::vector<std::string> esp_after_t3;
+  if ((this->dongle_events_ & DONGLE_EVENT_T3) != 0) {
+    esp_after_t3.emplace_back("DONGLE_EVENT_T3");
+  }
+  if (!this->dongle_machine_identity_.empty()) {
+    esp_after_t3.emplace_back("dongle_machine_identity");
+  }
+
+  const std::vector<std::string> original_followup = {"@t2:", "@t3", "@TR:37"};
+  std::vector<std::string> esp_followup;
+  if (this->startup_trace_sends_t2_) {
+    esp_followup.emplace_back("@t2:");
+  }
+  if (this->startup_trace_sends_t3_) {
+    esp_followup.emplace_back("@t3");
+  }
+  if (this->startup_trace_sends_tr37_) {
+    esp_followup.emplace_back("@TR:37");
+  }
+
+  std::vector<std::string> missing_bits;
+  if ((this->dongle_events_ & DONGLE_EVENT_T2) == 0) {
+    missing_bits.emplace_back("DONGLE_EVENT_T2");
+  }
+  if ((this->dongle_events_ & DONGLE_EVENT_T3) == 0) {
+    missing_bits.emplace_back("DONGLE_EVENT_T3");
+  }
+  if ((this->dongle_events_ & DONGLE_EVENT_TY) == 0) {
+    missing_bits.emplace_back("DONGLE_EVENT_TY");
+  }
+  if ((this->dongle_events_ & DONGLE_EVENT_TR) == 0 && !this->manual_original_startup_got_tr37_) {
+    missing_bits.emplace_back("DONGLE_EVENT_TR");
+  }
+  missing_bits.emplace_back("missing_in_esp_state:flags_88_0x100");
+  missing_bits.emplace_back("missing_in_esp_state:flags_88_0x40000");
+
+  std::vector<std::string> missing_followup;
+  if (!this->startup_trace_sends_t2_) {
+    missing_followup.emplace_back("@t2:");
+  }
+  if (!this->startup_trace_sends_t3_) {
+    missing_followup.emplace_back("@t3");
+  }
+  if (!this->startup_trace_sends_tr37_) {
+    missing_followup.emplace_back("@TR:37");
+  }
+
+  std::vector<std::string> extra_followup;
+  if (this->startup_trace_sends_t0_) {
+    extra_followup.emplace_back("@T0");
+  }
+  if (this->startup_trace_sends_h1_) {
+    extra_followup.emplace_back("@H1");
+  }
+  if (this->startup_trace_sends_ty_) {
+    extra_followup.emplace_back("TY:");
+  }
+  if (this->startup_trace_sends_t1_) {
+    extra_followup.emplace_back("@T1");
+  }
+
+  ESP_LOGI(TAG,
+           "original_startup_state_diff original_expected_flags_after_T2=[%s] esp_flags_after_T2=[%s] "
+           "original_expected_flags_after_T3=[%s] esp_flags_after_T3=[%s] original_expected_followup_tx=[%s] "
+           "esp_actual_followup_tx=[%s] missing_state_bits=[%s] missing_followup_tx=[%s] extra_followup_tx=[%s]",
+           join_values(original_after_t2, ",").c_str(), join_values(esp_after_t2, ",").c_str(),
+           join_values(original_after_t3, ",").c_str(), join_values(esp_after_t3, ",").c_str(),
+           join_values(original_followup, ",").c_str(), join_values(esp_followup, ",").c_str(),
+           join_values(missing_bits, ",").c_str(), join_values(missing_followup, ",").c_str(),
+           join_values(extra_followup, ",").c_str());
 }
 
 bool JuraComponent::send_manual_original_startup_identity_reply_(const std::string &rx_line,
@@ -4189,25 +4395,43 @@ bool JuraComponent::handle_manual_original_startup_observe_line_(const std::stri
     if (lower.rfind("@tr:37", 0) == 0 || lower.rfind("@tr37", 0) == 0) {
       this->manual_original_startup_got_tr37_ = true;
     }
+    this->dongle_events_ |= DONGLE_EVENT_TR;
+    this->dongle_tr_payload_ = trimmed;
     ++this->manual_original_startup_gate_count_;
     log_frame("gate");
+    this->log_startup_state_after_rx_(trimmed);
     return true;
   }
   if (trimmed.rfind("@T3", 0) == 0 || lower.rfind("ty:", 0) == 0) {
     if (lower.rfind("ty:", 0) == 0) {
       this->manual_original_startup_got_ty_ = true;
+      this->dongle_events_ |= DONGLE_EVENT_TY;
+    } else {
+      this->dongle_events_ |= DONGLE_EVENT_T3;
+      this->dongle_machine_identity_ = trimmed;
     }
     ++this->manual_handshake_control_count_;
     ++this->manual_original_startup_machine_identity_count_;
     log_frame("machine_identity");
+    this->log_startup_state_after_rx_(trimmed);
     return true;
   }
   if (lower.rfind("@t0", 0) == 0 || lower.rfind("@t1", 0) == 0 || trimmed.rfind("@T2", 0) == 0) {
     if (lower.rfind("@t1", 0) == 0) {
       this->manual_original_startup_got_t1_ = true;
+      this->dongle_events_ |= DONGLE_EVENT_T1;
+    } else if (lower.rfind("@t0", 0) == 0) {
+      this->dongle_events_ |= DONGLE_EVENT_T0;
+    } else if (trimmed.rfind("@T2", 0) == 0) {
+      this->dongle_events_ |= DONGLE_EVENT_T2;
+      uint16_t parsed_word = 0;
+      if (parse_t2_word_from_response(trimmed, parsed_word)) {
+        this->startup_t2_word_ = parsed_word;
+      }
     }
     ++this->manual_handshake_control_count_;
     log_frame("startup_control");
+    this->log_startup_state_after_rx_(trimmed);
     return true;
   }
   if (lower.rfind("@h", 0) == 0 || lower.rfind("@ok:", 0) == 0) {
@@ -4576,6 +4800,7 @@ void JuraComponent::finish_manual_handshake_probe_(uint32_t now, const char *res
       final_result = "no_identity_dialog";
     }
     this->log_startup_tx_diff_();
+    this->log_original_startup_state_diff_();
     ESP_LOGI(TAG,
              "manual_original_startup_active_safe_done result=%s sent_T0=%s sent_H1=%s sent_TY=%s sent_T1=%s "
              "sent_TR37=%s got_ty=%s got_t1=%s got_tr37=%s host_identity_request_count=%u "
@@ -7552,6 +7777,9 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
     ESP_LOGD(TAG, "dongle_event line=\"%s\" set=0x%02X events=0x%02X",
              sanitize_text_for_api(trimmed).c_str(), static_cast<unsigned>(bit),
              static_cast<unsigned>(this->dongle_events_));
+  }
+  if (this->manual_original_startup_mode_active_() || this->xml_stats_debug_) {
+    this->log_startup_state_after_rx_(trimmed);
   }
 }
 

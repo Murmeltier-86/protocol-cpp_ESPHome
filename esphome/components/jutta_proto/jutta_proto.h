@@ -495,6 +495,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void trace_machine_tx_startup_(const char *source, const std::string &line, bool encoded, const char *reason);
   void reset_startup_tx_trace_();
   void log_startup_tx_diff_();
+  std::string startup_pending_followup_tx_() const;
+  void log_startup_state_after_rx_(const std::string &line);
+  void log_original_startup_state_diff_();
   const char *startup_tx_reason_(const std::string &line) const;
   void process_manual_handshake_probe_(uint32_t now);
   void finish_manual_handshake_probe_(uint32_t now, const char *result);
