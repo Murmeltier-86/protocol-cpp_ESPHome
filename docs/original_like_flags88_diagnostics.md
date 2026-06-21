@@ -26,3 +26,9 @@ an existing ESP `@TR:37` TX logs whether original firmware would have expected
 path because it is not confirmed in the original BlueFrog firmware. Keeping it
 out of the normal sequence should make `startup_sequence_diff_original_vs_esp`
 stop reporting `extra_in_esp_normal=[@D1]`.
+
+The post-startup live idle observe window is also diagnostic only. When enabled
+internally, it delays only the first boot statistics cycle after the normal core
+startup and leaves RX processing active for a fixed observation period. It sends
+no new machine commands and only logs whether machine-originated `@TF` or `@TV`
+frames arrive before statistics begin.

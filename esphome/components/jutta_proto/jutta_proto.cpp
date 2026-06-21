@@ -61,6 +61,8 @@ constexpr size_t kDongleStartupMaxRxBytes = 512;
 constexpr uint8_t kDongleStartupMaxProbeAttempts = 6;
 constexpr uint8_t kDongleStartupMaxT1Attempts = 6;
 constexpr uint8_t kDongleStartupMaxTr37Attempts = 3;
+constexpr uint32_t kPostStartupLiveIdleObserveMs = 180000;
+constexpr bool kDelayBootStatsForLiveObserve = true;
 constexpr uint32_t DONGLE_EVENT_TY = 0x01;
 constexpr uint32_t DONGLE_EVENT_T0 = 0x02;
 constexpr uint32_t DONGLE_EVENT_T1 = 0x04;
@@ -4199,6 +4201,7 @@ void JuraComponent::update_original_like_flags88_from_line_(const std::string &l
     } else {
       this->original_like_tv_seen_ = true;
     }
+    this->note_live_idle_observe_cachewriter_(is_tf ? "rx_TF" : "rx_TV", esphome::millis());
     const bool has_0x100 = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_CORE_LATCH) != 0;
     const bool has_0x04 = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_TY_CONTEXT) != 0;
     const bool not_0x200 = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_GATE_ACTIVE) == 0;
@@ -4282,6 +4285,93 @@ void JuraComponent::log_original_like_core_session_diff_() {
            "tf_seen=%d tv_seen=%d likely_problem=\"%s\"",
            has_ty ? 1 : 0, has_t2 ? 1 : 0, has_t3 ? 1 : 0, has_core ? 1 : 0, has_gate ? 1 : 0,
            this->original_like_tf_seen_ ? 1 : 0, this->original_like_tv_seen_ ? 1 : 0, likely_problem);
+}
+
+void JuraComponent::start_live_idle_observe_after_startup_(uint32_t now) {
+  if (!kDelayBootStatsForLiveObserve) {
+    ESP_LOGI(TAG, "live_idle_observe_not_started reason=\"disabled\"");
+    return;
+  }
+  if (kPostStartupLiveIdleObserveMs == 0) {
+    ESP_LOGI(TAG, "live_idle_observe_not_started reason=\"duration_zero\"");
+    return;
+  }
+  if (this->live_idle_observe_active_) {
+    ESP_LOGI(TAG, "live_idle_observe_not_started reason=\"already_active\"");
+    return;
+  }
+  if (this->live_idle_observe_done_) {
+    ESP_LOGI(TAG, "live_idle_observe_not_started reason=\"already_done\"");
+    return;
+  }
+  if (!this->stats_session_ready_) {
+    ESP_LOGI(TAG, "live_idle_observe_not_started reason=\"startup_not_ready\"");
+    return;
+  }
+  if (this->xml_stats_cycle_id_ != 0) {
+    ESP_LOGI(TAG, "live_idle_observe_not_started reason=\"stats_already_started\"");
+    return;
+  }
+
+  this->live_idle_observe_active_ = true;
+  this->live_idle_observe_tf_seen_ = false;
+  this->live_idle_observe_tv_seen_ = false;
+  this->live_idle_observe_start_ms_ = now;
+  this->live_idle_observe_end_ms_ = now + kPostStartupLiveIdleObserveMs;
+  this->live_idle_observe_last_block_log_ms_ = 0;
+  if (this->xml_next_poll_ == 0 ||
+      static_cast<int32_t>(this->live_idle_observe_end_ms_ - this->xml_next_poll_) > 0) {
+    this->xml_next_poll_ = this->live_idle_observe_end_ms_;
+    this->xml_next_poll_is_retry_ = false;
+  }
+  ESP_LOGI(TAG, "live_idle_observe_start duration_ms=%u flags=0x%08X stats_delayed=YES",
+           static_cast<unsigned>(kPostStartupLiveIdleObserveMs),
+           static_cast<unsigned>(this->original_like_flags88_));
+}
+
+bool JuraComponent::process_live_idle_observe_(uint32_t now) {
+  if (!this->live_idle_observe_active_) {
+    return false;
+  }
+  if (!time_reached(now, this->live_idle_observe_end_ms_)) {
+    this->xml_next_poll_ = this->live_idle_observe_end_ms_;
+    this->xml_next_poll_is_retry_ = false;
+    return true;
+  }
+
+  const char *result = "no_tf_tv_during_idle";
+  if (this->live_idle_observe_tf_seen_ && this->live_idle_observe_tv_seen_) {
+    result = "tf_tv_seen_during_idle";
+  } else if (this->live_idle_observe_tf_seen_) {
+    result = "tf_only_seen_during_idle";
+  } else if (this->live_idle_observe_tv_seen_) {
+    result = "tv_only_seen_during_idle";
+  }
+  this->live_idle_observe_active_ = false;
+  this->live_idle_observe_done_ = true;
+  ESP_LOGI(TAG, "live_idle_observe_end duration_ms=%u tf_seen=%d tv_seen=%d flags=0x%08X result=\"%s\"",
+           static_cast<unsigned>(kPostStartupLiveIdleObserveMs), this->live_idle_observe_tf_seen_ ? 1 : 0,
+           this->live_idle_observe_tv_seen_ ? 1 : 0, static_cast<unsigned>(this->original_like_flags88_), result);
+  ESP_LOGI(TAG, "xml_stats_boot_delay_released_after_live_idle_observe");
+  return false;
+}
+
+void JuraComponent::note_live_idle_observe_cachewriter_(const char *event, uint32_t now) {
+  if (!this->live_idle_observe_active_) {
+    return;
+  }
+  const bool is_tf = event != nullptr && std::strcmp(event, "rx_TF") == 0;
+  const bool is_tv = event != nullptr && std::strcmp(event, "rx_TV") == 0;
+  if (is_tf) {
+    this->live_idle_observe_tf_seen_ = true;
+  } else if (is_tv) {
+    this->live_idle_observe_tv_seen_ = true;
+  } else {
+    return;
+  }
+  ESP_LOGI(TAG, "live_idle_observe_result event=%s elapsed_ms=%u flags=0x%08X", event,
+           static_cast<unsigned>(now - this->live_idle_observe_start_ms_),
+           static_cast<unsigned>(this->original_like_flags88_));
 }
 
 void JuraComponent::log_startup_state_after_rx_(const std::string &line) {
@@ -7169,6 +7259,13 @@ void JuraComponent::reset_xml_poll_state_() {
   this->xml_tgc0_ok_ = false;
   this->xml_rx_buffer_.clear();
   this->xml_stats_.clear();
+  this->live_idle_observe_active_ = false;
+  this->live_idle_observe_done_ = false;
+  this->live_idle_observe_tf_seen_ = false;
+  this->live_idle_observe_tv_seen_ = false;
+  this->live_idle_observe_start_ms_ = 0;
+  this->live_idle_observe_end_ms_ = 0;
+  this->live_idle_observe_last_block_log_ms_ = 0;
   this->xml_next_poll_ = esphome::millis() + this->xml_startup_delay_ms_;
   this->xml_next_poll_is_retry_ = false;
   XML_STATS_LOGD("stats_schedule_set result=startup cycle_id=%u next_poll_ms=%u due_at_ms=%u retry_ms=%u",
@@ -7249,6 +7346,13 @@ void JuraComponent::process_xml_polling() {
   if (this->xml_dongle_startup_ && !this->stats_session_ready_ && !this->stats_handshake_before_cycle_active_) {
     this->process_dongle_startup_(now);
     return;
+  }
+  if (this->xml_dongle_startup_ && this->stats_session_ready_ && this->xml_stats_cycle_id_ == 0 &&
+      !this->live_idle_observe_active_ && !this->live_idle_observe_done_) {
+    this->start_live_idle_observe_after_startup_(now);
+  }
+  if (this->live_idle_observe_active_ && time_reached(now, this->live_idle_observe_end_ms_)) {
+    this->process_live_idle_observe_(now);
   }
 
   this->handle_xml_state_machine_(now);
@@ -8598,6 +8702,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         this->log_startup_sequence_diff_original_vs_esp_();
         this->log_original_like_session_summary_("dongle_startup_ready");
         this->log_original_like_core_session_diff_();
+        this->start_live_idle_observe_after_startup_(now);
       }
       return true;
 
@@ -8683,6 +8788,21 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
   auto *connection = this->coffee_maker_->connection.get();
 
   if (this->xml_state_ == XmlPollState::IDLE) {
+    if (this->live_idle_observe_active_ && this->xml_stats_cycle_id_ == 0) {
+      if (!time_reached(now, this->live_idle_observe_end_ms_)) {
+        this->xml_next_poll_ = this->live_idle_observe_end_ms_;
+        this->xml_next_poll_is_retry_ = false;
+        if (this->live_idle_observe_last_block_log_ms_ == 0 ||
+            static_cast<uint32_t>(now - this->live_idle_observe_last_block_log_ms_) >= 10000) {
+          this->live_idle_observe_last_block_log_ms_ = now;
+          ESP_LOGI(TAG, "live_idle_observe_block_stats remaining_ms=%u flags=0x%08X",
+                   static_cast<unsigned>(this->live_idle_observe_end_ms_ - now),
+                   static_cast<unsigned>(this->original_like_flags88_));
+        }
+        return;
+      }
+      this->process_live_idle_observe_(now);
+    }
     if (this->xml_next_poll_ != 0 && !time_reached(now, this->xml_next_poll_)) {
       return;
     }

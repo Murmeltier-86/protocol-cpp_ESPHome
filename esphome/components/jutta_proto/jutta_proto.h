@@ -505,6 +505,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void log_original_like_tx_tr37_(const char *source, const char *reason);
   void log_original_like_session_summary_(const char *context);
   void log_original_like_core_session_diff_();
+  void start_live_idle_observe_after_startup_(uint32_t now);
+  bool process_live_idle_observe_(uint32_t now);
+  void note_live_idle_observe_cachewriter_(const char *event, uint32_t now);
   void log_startup_state_after_rx_(const std::string &line);
   void log_original_startup_state_diff_();
   void log_startup_sequence_result_(const char *mode);
@@ -871,6 +874,13 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool original_like_tr37_seen_{false};
   bool original_like_tf_seen_{false};
   bool original_like_tv_seen_{false};
+  bool live_idle_observe_active_{false};
+  bool live_idle_observe_done_{false};
+  bool live_idle_observe_tf_seen_{false};
+  bool live_idle_observe_tv_seen_{false};
+  uint32_t live_idle_observe_start_ms_{0};
+  uint32_t live_idle_observe_end_ms_{0};
+  uint32_t live_idle_observe_last_block_log_ms_{0};
   bool manual_handshake_prev_xml_dongle_startup_{false};
   bool manual_handshake_prev_xml_dongle_startup_debug_{false};
   std::string manual_handshake_prev_xml_dongle_startup_mode_{};
