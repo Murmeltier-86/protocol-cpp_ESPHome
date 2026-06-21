@@ -346,6 +346,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void run_manual_handshake_probe(uint32_t observe_ms, const std::string &mode);
   void manual_live_trigger_probe_stayinble(uint32_t observe_ms = 30000, uint32_t interval_ms = 6000);
   void manual_live_event_observe(uint32_t observe_ms = 120000, bool stayinble = true, uint32_t interval_ms = 6000);
+  void manual_original_startup_observe(uint32_t observe_ms = 180000, bool respond_identity = true,
+                                       bool active_probe = false, bool boot_attached_mode = true);
   void run_ble2_transport_probe(const std::string &probe);
   void run_debug_command(const std::string &command, const std::string &transport);
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
@@ -395,7 +397,13 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   enum class XmlSessionProbeState { IDLE, SEND, WAIT, DONE, FAILED };
   enum class StatusProbeState { IDLE, SEND, WAIT, DONE };
   enum class ManualHandshakeProbeState { IDLE, RUN_HANDSHAKE, OBSERVE };
-  enum class ManualHandshakeProbeMode { NORMAL, TEST_C_APP_INITIAL_READS, LIVE_TRIGGER_STAYINBLE, LIVE_EVENT_OBSERVE };
+  enum class ManualHandshakeProbeMode {
+    NORMAL,
+    TEST_C_APP_INITIAL_READS,
+    LIVE_TRIGGER_STAYINBLE,
+    LIVE_EVENT_OBSERVE,
+    ORIGINAL_STARTUP_OBSERVE
+  };
   enum class Ble2ProbeState { IDLE, WAIT };
   enum class DebugCommandState { IDLE, WAIT };
   enum class DongleStartupState {
@@ -453,6 +461,12 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool guard_manual_observe_tx_(const char *source, const std::string &frame);
   bool manual_live_trigger_stayinble_tx_allowed_(const std::string &frame) const;
   bool send_manual_live_trigger_stayinble_(uint32_t now);
+  bool manual_original_startup_tx_allowed_(const std::string &frame) const;
+  bool start_manual_original_startup_observe_(uint32_t observe_ms, bool respond_identity, bool active_probe,
+                                              bool boot_attached_mode, uint32_t now);
+  bool handle_manual_original_startup_observe_line_(const std::string &line, const char *table_name, uint32_t now);
+  bool send_manual_original_startup_identity_reply_(const std::string &rx_line, const std::string &tx_line,
+                                                    const char *confidence, const char *reason, uint32_t now);
   void process_manual_handshake_probe_(uint32_t now);
   void finish_manual_handshake_probe_(uint32_t now, const char *result);
   bool start_ble2_transport_probe_(const std::string &probe, uint32_t now);
@@ -755,6 +769,27 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint16_t manual_live_trigger_stayinble_tx_count_{0};
   bool manual_live_trigger_allow_stayinble_tx_{false};
   bool manual_live_event_observe_stayinble_{true};
+  bool manual_original_startup_respond_identity_{true};
+  bool manual_original_startup_active_probe_{false};
+  bool manual_original_startup_boot_attached_mode_{true};
+  uint16_t manual_original_startup_host_identity_request_count_{0};
+  uint16_t manual_original_startup_safe_identity_response_count_{0};
+  uint16_t manual_original_startup_unhandled_identity_request_count_{0};
+  uint16_t manual_original_startup_noop_identity_request_count_{0};
+  uint16_t manual_original_startup_gate_count_{0};
+  uint16_t manual_original_startup_machine_identity_count_{0};
+  bool manual_original_startup_seen_hb_{false};
+  bool manual_original_startup_seen_gb_{false};
+  bool manual_original_startup_seen_hy_{false};
+  bool manual_original_startup_seen_hl_{false};
+  bool manual_original_startup_seen_hc_{false};
+  bool manual_original_startup_seen_hi_{false};
+  bool manual_original_startup_seen_hr_{false};
+  bool manual_original_startup_seen_hf_{false};
+  bool manual_original_startup_seen_hp_{false};
+  bool manual_original_startup_seen_ht_{false};
+  bool manual_original_startup_seen_hw_{false};
+  bool manual_original_startup_identity_tx_allowed_{false};
   bool manual_handshake_prev_xml_dongle_startup_{false};
   bool manual_handshake_prev_xml_dongle_startup_debug_{false};
   std::string manual_handshake_prev_xml_dongle_startup_mode_{};
@@ -1048,6 +1083,25 @@ class ManualLiveEventObserveAction : public esphome::Action<> {
   uint32_t observe_ms_{120000};
   bool stayinble_{true};
   uint32_t interval_ms_{6000};
+};
+
+class ManualOriginalStartupObserveAction : public esphome::Action<> {
+ public:
+  explicit ManualOriginalStartupObserveAction(JuraComponent *parent) : parent_(parent) {}
+  void set_observe_ms(uint32_t observe_ms) { observe_ms_ = observe_ms; }
+  void set_respond_identity(bool respond_identity) { respond_identity_ = respond_identity; }
+  void set_active_probe(bool active_probe) { active_probe_ = active_probe; }
+  void set_boot_attached_mode(bool boot_attached_mode) { boot_attached_mode_ = boot_attached_mode; }
+  void play() override {
+    this->parent_->manual_original_startup_observe(observe_ms_, respond_identity_, active_probe_, boot_attached_mode_);
+  }
+
+ protected:
+  JuraComponent *parent_;
+  uint32_t observe_ms_{180000};
+  bool respond_identity_{true};
+  bool active_probe_{false};
+  bool boot_attached_mode_{true};
 };
 
 class Ble2TransportProbeAction : public esphome::Action<> {

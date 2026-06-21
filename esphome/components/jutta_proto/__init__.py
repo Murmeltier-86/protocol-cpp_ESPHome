@@ -98,6 +98,9 @@ CONF_LIVE_DB_STATUS_POLL_INTERVAL_MS = "live_db_status_poll_interval_ms"
 CONF_LIVE_DB_STATUS_RESPONSE_TIMEOUT_MS = "live_db_status_response_timeout_ms"
 CONF_ALLOW_UNSAFE_DEBUG_COMMANDS = "allow_unsafe_debug_commands"
 CONF_PMODE_KEY = "pmode_key"
+CONF_RESPOND_IDENTITY = "respond_identity"
+CONF_ACTIVE_PROBE = "active_probe"
+CONF_BOOT_ATTACHED_MODE = "boot_attached_mode"
 CONF_TRANSPORT = "transport"
 CONF_XML_SENSORS = "xml_sensors"
 CONF_DEBUG_UART_FRAMES = "debug_uart_frames"
@@ -131,6 +134,9 @@ ManualLiveTriggerProbeStayInBleAction = jutta_component_ns.class_(
 )
 ManualLiveEventObserveAction = jutta_component_ns.class_(
     "ManualLiveEventObserveAction", automation.Action
+)
+ManualOriginalStartupObserveAction = jutta_component_ns.class_(
+    "ManualOriginalStartupObserveAction", automation.Action
 )
 Ble2TransportProbeAction = jutta_component_ns.class_(
     "Ble2TransportProbeAction", automation.Action
@@ -499,6 +505,20 @@ def _normalize_manual_live_event_observe(value):
     )(value)
 
 
+def _normalize_manual_original_startup_observe(value):
+    if value is None:
+        value = {}
+    return cv.Schema(
+        {
+            cv.Optional(CONF_ID): cv.use_id(JuraComponent),
+            cv.Optional(CONF_OBSERVE_MS, default=180000): cv.int_range(min=1000, max=180000),
+            cv.Optional(CONF_RESPOND_IDENTITY, default=True): cv.boolean,
+            cv.Optional(CONF_ACTIVE_PROBE, default=False): cv.boolean,
+            cv.Optional(CONF_BOOT_ATTACHED_MODE, default=True): cv.boolean,
+        }
+    )(value)
+
+
 def _normalize_ble2_transport_probe(value):
     if isinstance(value, str):
         value = {CONF_PROBE: value}
@@ -847,6 +867,24 @@ async def manual_live_event_observe_action_to_code(config, action_id, template_a
     cg.add(var.set_observe_ms(config[CONF_OBSERVE_MS]))
     cg.add(var.set_stayinble(config[CONF_STAYINBLE]))
     cg.add(var.set_interval_ms(config[CONF_INTERVAL_MS]))
+    return var
+
+
+@automation.register_action(
+    "jutta_proto.manual_original_startup_observe",
+    ManualOriginalStartupObserveAction,
+    _normalize_manual_original_startup_observe,
+    synchronous=False,
+)
+async def manual_original_startup_observe_action_to_code(config, action_id, template_args, args):
+    _ = template_args
+    _ = args
+    parent = await _get_parent(config)
+    var = cg.new_Pvariable(action_id, parent)
+    cg.add(var.set_observe_ms(config[CONF_OBSERVE_MS]))
+    cg.add(var.set_respond_identity(config[CONF_RESPOND_IDENTITY]))
+    cg.add(var.set_active_probe(config[CONF_ACTIVE_PROBE]))
+    cg.add(var.set_boot_attached_mode(config[CONF_BOOT_ATTACHED_MODE]))
     return var
 
 
