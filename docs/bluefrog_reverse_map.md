@@ -563,6 +563,18 @@ does not treat `@TF` or `@TV` as queries.
   on bluefrog_state and machine_cache flags.
   Confidence: confirmed_code.
 
+  Startup-relevant branches reconstructed from decompilation:
+  - `state+0x70` bit0 with substate `3` sends `@T0`.
+  - `state+0x70` bit5 sends either `@H1` or, when bit6 is also set, `@T1`.
+  - `flags_88` prefix-hex branch sends `TY:`/`@t2:`-family frames through
+    `machine_uart_send_prefix_hex_line`.
+  - `flags_88` static-line branch sends the currently selected startup line
+    such as `@t3`/cached gate-adjacent line.
+  - retry branches send `@T0`, `@T1`, and `@TP:`/`@TD:`-prefix frames with
+    counters before clearing the corresponding bit.
+  Confidence: confirmed_code for branch structure; inferred for exact semantic
+  names where the same literal helper is reused by multiple branches.
+
 0x00016c18 machine_uart_send_line_encoded
   Central dongle->machine line sender. Copies short plain lines or encodes selected
   @T... lines as 0x26 inner frames depending on transport/session guard state.
@@ -1044,6 +1056,52 @@ New ESP diagnostics:
 startup_state_after_rx line="<rx_line>" ...
 original_startup_state_diff ...
 ```
+
+### Runtime Active-Safe Startup Tests
+
+`manual_original_startup_active_safe` originally used a fixed-delay sequence:
+
+```text
+@T0 -> @H1 -> TY: -> @T1 -> @TR:37
+```
+
+Runtime result:
+
+- Core gate succeeds: `ty:...`, `@t1`, and `@tr:37,...` are observed.
+- The machine also emits repeated `@T3:...`, `@T2:...`, and `@t0`.
+- No host identity dialog was observed: no `@HB/@HY/@HL/@GB/@HP/@HF/@HT/@HW`.
+- Therefore `@H1` alone is not sufficient to make the machine start a visible
+  `@H?`/`@GB` host identity request dialog in the tested window.
+
+The ESP test state now resets startup-local events and ignores stale
+stats-session gate flags while this test is active. `post_gate=YES` in
+`startup_state_after_rx` is only allowed after the current test has observed
+`@tr:37`.
+
+New comparison log:
+
+```text
+startup_sequence_result
+  mode=<fixed_delay|stateful>
+  sent_sequence=<list>
+  rx_sequence=<list>
+  host_identity_request_count=<n>
+  gate_ok=<YES|NO>
+  missing_original_conditions=<list>
+```
+
+`manual_original_startup_active_stateful` keeps the same safe TX allowlist
+(`@T0`, `@H1`, `TY:`, `@T1`, `@TR:37`) but advances based on observed startup RX
+instead of fixed 500 ms gaps:
+
+- after `@T0`, wait for `@t0` or `@T3` before `@H1`;
+- after `@H1`, wait for startup RX or timeout before `TY:`;
+- after `TY:`, wait for `ty:` before `@T1`;
+- after `@T1`, wait for `@t1` before `@TR:37`.
+
+Open point: the original statepump can also emit `@t2:` and `@t3`, but those are
+not part of the active-safe allowlist until their exact payload/state conditions
+are mirrored confidently.
 
 These logs do not send any new command. They only compare the observed ESP
 startup events/follow-up TX against the original firmware state consequences.

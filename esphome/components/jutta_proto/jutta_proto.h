@@ -350,6 +350,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
                                        bool active_probe = false, bool boot_attached_mode = true);
   void manual_original_startup_active_safe(uint32_t observe_ms = 180000, bool send_core_startup = true,
                                            bool respond_identity = true, bool active_probe = true);
+  void manual_original_startup_active_stateful(uint32_t observe_ms = 180000, bool send_core_startup = true,
+                                               bool respond_identity = true, bool active_probe = true);
   void run_ble2_transport_probe(const std::string &probe);
   void run_debug_command(const std::string &command, const std::string &transport);
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
@@ -405,7 +407,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     LIVE_TRIGGER_STAYINBLE,
     LIVE_EVENT_OBSERVE,
     ORIGINAL_STARTUP_OBSERVE,
-    ORIGINAL_STARTUP_ACTIVE_SAFE
+    ORIGINAL_STARTUP_ACTIVE_SAFE,
+    ORIGINAL_STARTUP_ACTIVE_STATEFUL
   };
   enum class OriginalStartupActiveStage {
     IDLE,
@@ -485,7 +488,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool start_manual_original_startup_observe_(uint32_t observe_ms, bool respond_identity, bool active_probe,
                                               bool boot_attached_mode, uint32_t now);
   bool start_manual_original_startup_active_safe_(uint32_t observe_ms, bool send_core_startup, bool respond_identity,
-                                                  bool active_probe, uint32_t now);
+                                                  bool active_probe, uint32_t now, bool stateful = false);
   bool handle_manual_original_startup_observe_line_(const std::string &line, const char *table_name, uint32_t now);
   bool send_manual_original_startup_identity_reply_(const std::string &rx_line, const std::string &tx_line,
                                                     const char *confidence, const char *reason, uint32_t now);
@@ -498,6 +501,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string startup_pending_followup_tx_() const;
   void log_startup_state_after_rx_(const std::string &line);
   void log_original_startup_state_diff_();
+  void log_startup_sequence_result_(const char *mode);
   const char *startup_tx_reason_(const std::string &line) const;
   void process_manual_handshake_probe_(uint32_t now);
   void finish_manual_handshake_probe_(uint32_t now, const char *result);
@@ -825,6 +829,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool manual_original_startup_active_tx_guard_open_{false};
   bool manual_original_startup_send_core_startup_{true};
   bool manual_original_startup_active_probe_requested_{true};
+  bool manual_original_startup_stateful_{false};
   OriginalStartupActiveStage manual_original_startup_active_stage_{OriginalStartupActiveStage::IDLE};
   uint32_t manual_original_startup_active_next_ms_{0};
   uint32_t manual_original_startup_active_deadline_ms_{0};
@@ -836,6 +841,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool manual_original_startup_got_ty_{false};
   bool manual_original_startup_got_t1_{false};
   bool manual_original_startup_got_tr37_{false};
+  std::vector<std::string> manual_original_startup_sent_sequence_;
+  std::vector<std::string> manual_original_startup_rx_sequence_;
   bool startup_trace_sends_t0_{false};
   bool startup_trace_sends_t1_{false};
   bool startup_trace_sends_h1_{false};
@@ -1168,6 +1175,26 @@ class ManualOriginalStartupActiveSafeAction : public esphome::Action<> {
   void play() override {
     this->parent_->manual_original_startup_active_safe(observe_ms_, send_core_startup_, respond_identity_,
                                                        active_probe_);
+  }
+
+ protected:
+  JuraComponent *parent_;
+  uint32_t observe_ms_{180000};
+  bool send_core_startup_{true};
+  bool respond_identity_{true};
+  bool active_probe_{true};
+};
+
+class ManualOriginalStartupActiveStatefulAction : public esphome::Action<> {
+ public:
+  explicit ManualOriginalStartupActiveStatefulAction(JuraComponent *parent) : parent_(parent) {}
+  void set_observe_ms(uint32_t observe_ms) { observe_ms_ = observe_ms; }
+  void set_send_core_startup(bool send_core_startup) { send_core_startup_ = send_core_startup; }
+  void set_respond_identity(bool respond_identity) { respond_identity_ = respond_identity; }
+  void set_active_probe(bool active_probe) { active_probe_ = active_probe; }
+  void play() override {
+    this->parent_->manual_original_startup_active_stateful(observe_ms_, send_core_startup_, respond_identity_,
+                                                           active_probe_);
   }
 
  protected:

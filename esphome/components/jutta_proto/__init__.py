@@ -142,6 +142,9 @@ ManualOriginalStartupObserveAction = jutta_component_ns.class_(
 ManualOriginalStartupActiveSafeAction = jutta_component_ns.class_(
     "ManualOriginalStartupActiveSafeAction", automation.Action
 )
+ManualOriginalStartupActiveStatefulAction = jutta_component_ns.class_(
+    "ManualOriginalStartupActiveStatefulAction", automation.Action
+)
 Ble2TransportProbeAction = jutta_component_ns.class_(
     "Ble2TransportProbeAction", automation.Action
 )
@@ -913,6 +916,24 @@ async def manual_original_startup_observe_action_to_code(config, action_id, temp
     synchronous=False,
 )
 async def manual_original_startup_active_safe_action_to_code(config, action_id, template_args, args):
+    _ = template_args
+    _ = args
+    parent = await _get_parent(config)
+    var = cg.new_Pvariable(action_id, parent)
+    cg.add(var.set_observe_ms(config[CONF_OBSERVE_MS]))
+    cg.add(var.set_send_core_startup(config[CONF_SEND_CORE_STARTUP]))
+    cg.add(var.set_respond_identity(config[CONF_RESPOND_IDENTITY]))
+    cg.add(var.set_active_probe(config[CONF_ACTIVE_PROBE]))
+    return var
+
+
+@automation.register_action(
+    "jutta_proto.manual_original_startup_active_stateful",
+    ManualOriginalStartupActiveStatefulAction,
+    _normalize_manual_original_startup_active_safe,
+    synchronous=False,
+)
+async def manual_original_startup_active_stateful_action_to_code(config, action_id, template_args, args):
     _ = template_args
     _ = args
     parent = await _get_parent(config)

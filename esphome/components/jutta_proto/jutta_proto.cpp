@@ -2947,6 +2947,34 @@ void JuraComponent::manual_original_startup_active_safe(uint32_t observe_ms, boo
   }
 }
 
+void JuraComponent::manual_original_startup_active_stateful(uint32_t observe_ms, bool send_core_startup,
+                                                            bool respond_identity, bool active_probe) {
+  if (this->manual_original_startup_mode_active_()) {
+    ESP_LOGW(TAG, "manual_test_rejected reason=original_startup_observe_active");
+    return;
+  }
+  if (this->manual_handshake_probe_state_ != ManualHandshakeProbeState::IDLE) {
+    ESP_LOGW(TAG, "manual_original_startup_active_stateful_start rejected reason=already_running");
+    return;
+  }
+  if (!active_probe) {
+    ESP_LOGW(TAG, "manual_original_startup_active_stateful_start rejected reason=active_probe_required");
+    return;
+  }
+  if (observe_ms == 0) {
+    observe_ms = kManualOriginalStartupObserveDefaultMs;
+  }
+  observe_ms = std::min<uint32_t>(observe_ms, kManualOriginalStartupObserveMaxMs);
+  ESP_LOGI(TAG,
+           "manual_original_startup_active_stateful_start observe_ms=%u send_core_startup=%s respond_identity=%s",
+           static_cast<unsigned>(observe_ms), YESNO(send_core_startup), YESNO(respond_identity));
+  if (!this->start_manual_original_startup_active_safe_(observe_ms, send_core_startup, respond_identity, active_probe,
+                                                        esphome::millis(), true) &&
+      this->manual_handshake_probe_state_ != ManualHandshakeProbeState::IDLE) {
+    ESP_LOGW(TAG, "manual_original_startup_active_stateful_start rejected reason=already_running");
+  }
+}
+
 void JuraComponent::run_ble2_transport_probe(const std::string &probe) {
   if (this->manual_original_startup_mode_active_()) {
     ESP_LOGW(TAG, "manual_test_rejected reason=original_startup_observe_active");
@@ -3502,6 +3530,12 @@ bool JuraComponent::start_manual_original_startup_observe_(uint32_t observe_ms, 
   this->startup_t2_word_ = 0;
   this->dongle_tr_payload_.clear();
   this->reset_startup_tx_trace_();
+  this->stats_session_ready_ = false;
+  this->stats_inner_tx_required_ = false;
+  this->manual_original_startup_stateful_ = false;
+  this->manual_original_startup_sent_sequence_.clear();
+  this->manual_original_startup_rx_sequence_.clear();
+  ESP_LOGI(TAG, "startup_state_reset test=manual_original_startup_observe events=0x00 post_gate=NO");
   this->manual_original_startup_host_identity_request_count_ = 0;
   this->manual_original_startup_safe_identity_response_count_ = 0;
   this->manual_original_startup_unhandled_identity_request_count_ = 0;
@@ -3529,28 +3563,30 @@ bool JuraComponent::start_manual_original_startup_observe_(uint32_t observe_ms, 
 
 bool JuraComponent::start_manual_original_startup_active_safe_(uint32_t observe_ms, bool send_core_startup,
                                                                bool respond_identity, bool active_probe,
-                                                               uint32_t now) {
+                                                               uint32_t now, bool stateful) {
+  const char *mode_name =
+      stateful ? "manual_original_startup_active_stateful" : "manual_original_startup_active_safe";
   if (!active_probe) {
-    ESP_LOGW(TAG, "manual_original_startup_active_safe_start rejected reason=active_probe_required");
-    this->publish_status_probe_last_response_("original_startup_active_safe -> active_probe_required");
+    ESP_LOGW(TAG, "%s_start rejected reason=active_probe_required", mode_name);
+    this->publish_status_probe_last_response_(std::string(mode_name) + " -> active_probe_required");
     return false;
   }
   if (this->manual_handshake_probe_state_ != ManualHandshakeProbeState::IDLE ||
       this->status_probe_state_ != StatusProbeState::IDLE || this->ble2_probe_state_ != Ble2ProbeState::IDLE ||
       this->debug_command_state_ != DebugCommandState::IDLE) {
-    ESP_LOGW(TAG, "manual_original_startup_active_safe_start rejected reason=already_running");
-    this->publish_status_probe_last_response_("original_startup_active_safe -> busy");
+    ESP_LOGW(TAG, "%s_start rejected reason=already_running", mode_name);
+    this->publish_status_probe_last_response_(std::string(mode_name) + " -> busy");
     return false;
   }
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
-    ESP_LOGW(TAG, "manual_original_startup_active_safe_start rejected reason=controller_not_ready");
-    this->publish_status_probe_last_response_("original_startup_active_safe -> controller_not_ready");
+    ESP_LOGW(TAG, "%s_start rejected reason=controller_not_ready", mode_name);
+    this->publish_status_probe_last_response_(std::string(mode_name) + " -> controller_not_ready");
     return false;
   }
   if (this->xml_inflight_ || this->db_transaction_owner_ != DbTransactionOwner::NONE || this->is_busy()) {
-    ESP_LOGW(TAG, "manual_original_startup_active_safe_start rejected reason=uart_busy owner=%s",
+    ESP_LOGW(TAG, "%s_start rejected reason=uart_busy owner=%s", mode_name,
              this->db_transaction_owner_name_(this->db_transaction_owner_));
-    this->publish_status_probe_last_response_("original_startup_active_safe -> busy");
+    this->publish_status_probe_last_response_(std::string(mode_name) + " -> busy");
     return false;
   }
 
@@ -3562,7 +3598,8 @@ bool JuraComponent::start_manual_original_startup_active_safe_(uint32_t observe_
   this->manual_handshake_prev_post_gate_tx_ready_event_ = this->post_gate_tx_ready_event_;
 
   this->db_transaction_owner_ = DbTransactionOwner::MANUAL_HANDSHAKE_PROBE;
-  this->manual_handshake_probe_mode_ = ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE;
+  this->manual_handshake_probe_mode_ = stateful ? ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_STATEFUL
+                                                : ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE;
   this->manual_handshake_probe_state_ = ManualHandshakeProbeState::OBSERVE;
   this->manual_handshake_observe_ms_ = observe_ms;
   this->manual_handshake_deadline_ms_ = now + observe_ms;
@@ -3572,6 +3609,7 @@ bool JuraComponent::start_manual_original_startup_active_safe_(uint32_t observe_
   this->manual_original_startup_boot_attached_mode_ = true;
   this->manual_original_startup_send_core_startup_ = send_core_startup;
   this->manual_original_startup_active_probe_requested_ = active_probe;
+  this->manual_original_startup_stateful_ = stateful;
 
   this->manual_handshake_frames_ = 0;
   this->manual_handshake_control_count_ = 0;
@@ -3603,6 +3641,11 @@ bool JuraComponent::start_manual_original_startup_active_safe_(uint32_t observe_
   this->startup_t2_word_ = 0;
   this->dongle_tr_payload_.clear();
   this->reset_startup_tx_trace_();
+  this->stats_session_ready_ = false;
+  this->stats_inner_tx_required_ = false;
+  this->manual_original_startup_sent_sequence_.clear();
+  this->manual_original_startup_rx_sequence_.clear();
+  ESP_LOGI(TAG, "startup_state_reset test=%s events=0x00 post_gate=NO", mode_name);
   this->manual_original_startup_host_identity_request_count_ = 0;
   this->manual_original_startup_safe_identity_response_count_ = 0;
   this->manual_original_startup_unhandled_identity_request_count_ = 0;
@@ -3624,7 +3667,7 @@ bool JuraComponent::start_manual_original_startup_active_safe_(uint32_t observe_
   this->post_gate_tx_ready_event_ = true;
   this->coffee_maker_->connection->reset_response_line_buffer();
   this->coffee_maker_->connection->reset_db_rx_buffer();
-  this->publish_status_probe_last_response_("original_startup_active_safe -> started");
+  this->publish_status_probe_last_response_(std::string(mode_name) + " -> started");
   return true;
 }
 
@@ -3642,6 +3685,8 @@ const char *JuraComponent::manual_handshake_mode_name_() const {
       return "manual_original_startup_observe";
     case ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE:
       return "manual_original_startup_active_safe";
+    case ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_STATEFUL:
+      return "manual_original_startup_active_stateful";
   }
   return "unknown";
 }
@@ -3720,7 +3765,8 @@ bool JuraComponent::guard_manual_observe_tx_(const char *source, const std::stri
   } else if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_OBSERVE) {
     ESP_LOGE(TAG, "original_startup_tx_violation tx=\"%s\" reason=\"blocked source=%s\"",
              escape_control_text_for_log(frame).c_str(), source != nullptr ? source : "unknown");
-  } else if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE) {
+  } else if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE ||
+             this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_STATEFUL) {
     ESP_LOGE(TAG, "original_startup_active_tx_violation tx=\"%s\" reason=\"blocked source=%s\"",
              escape_control_text_for_log(frame).c_str(), source != nullptr ? source : "unknown");
   } else {
@@ -3754,12 +3800,14 @@ bool JuraComponent::manual_original_startup_observe_active_() const {
 bool JuraComponent::manual_original_startup_mode_active_() const {
   return this->manual_handshake_probe_state_ != ManualHandshakeProbeState::IDLE &&
          (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_OBSERVE ||
-          this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE);
+          this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE ||
+          this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_STATEFUL);
 }
 
 bool JuraComponent::manual_original_startup_tx_allowed_(const std::string &frame) const {
   if (this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::ORIGINAL_STARTUP_OBSERVE &&
-      this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE) {
+      this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE &&
+      this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_STATEFUL) {
     return false;
   }
   std::string normalized = frame;
@@ -3768,7 +3816,8 @@ bool JuraComponent::manual_original_startup_tx_allowed_(const std::string &frame
 }
 
 bool JuraComponent::manual_original_startup_active_tx_allowed_(const std::string &frame) const {
-  if (this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE) {
+  if (this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE &&
+      this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_STATEFUL) {
     return false;
   }
   std::string normalized = frame;
@@ -3886,7 +3935,8 @@ void JuraComponent::log_startup_tx_diff_() {
 
 std::string JuraComponent::startup_pending_followup_tx_() const {
   std::vector<std::string> pending;
-  if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE) {
+  if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE ||
+      this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_STATEFUL) {
     switch (this->manual_original_startup_active_stage_) {
       case OriginalStartupActiveStage::SEND_T0:
         pending.emplace_back("@T0");
@@ -3978,9 +4028,13 @@ void JuraComponent::log_startup_state_after_rx_(const std::string &line) {
   if (!startup_line) {
     return;
   }
-  const bool post_gate = (this->stats_session_ready_ && this->stats_inner_tx_required_) ||
-                         this->manual_original_startup_got_tr37_ ||
-                         ((this->dongle_events_ & DONGLE_EVENT_TR) != 0);
+  const bool original_startup_mode = this->manual_original_startup_mode_active_();
+  const bool post_gate = original_startup_mode
+                             ? (this->manual_original_startup_got_tr37_ ||
+                                ((this->dongle_events_ & DONGLE_EVENT_TR) != 0))
+                             : ((this->stats_session_ready_ && this->stats_inner_tx_required_) ||
+                                this->manual_original_startup_got_tr37_ ||
+                                ((this->dongle_events_ & DONGLE_EVENT_TR) != 0));
   std::string pending = this->startup_pending_followup_tx_();
   ESP_LOGI(TAG,
            "startup_state_after_rx line=\"%s\" events=0x%02X post_gate=%s machine_type_seen=%s t0_seen=%s "
@@ -4084,6 +4138,46 @@ void JuraComponent::log_original_startup_state_diff_() {
            join_values(extra_followup, ",").c_str());
 }
 
+void JuraComponent::log_startup_sequence_result_(const char *mode) {
+  std::vector<std::string> missing_conditions;
+  if (!this->manual_original_startup_got_tr37_) {
+    missing_conditions.emplace_back("gate_not_reached");
+  }
+  if (!this->manual_original_startup_sent_t0_) {
+    missing_conditions.emplace_back("missing_@T0");
+  }
+  if (!this->manual_original_startup_sent_h1_) {
+    missing_conditions.emplace_back("missing_@H1");
+  }
+  if (!this->manual_original_startup_sent_ty_) {
+    missing_conditions.emplace_back("missing_TY:");
+  }
+  if (!this->manual_original_startup_sent_t1_) {
+    missing_conditions.emplace_back("missing_@T1");
+  }
+  if (!this->manual_original_startup_sent_tr37_) {
+    missing_conditions.emplace_back("missing_@TR:37");
+  }
+  if ((this->dongle_events_ & DONGLE_EVENT_T2) == 0) {
+    missing_conditions.emplace_back("no_@T2_observed");
+  }
+  if ((this->dongle_events_ & DONGLE_EVENT_T3) == 0) {
+    missing_conditions.emplace_back("no_@T3_observed");
+  }
+  if (this->manual_original_startup_host_identity_request_count_ == 0) {
+    missing_conditions.emplace_back("host_identity_dialog_not_seen");
+  }
+
+  ESP_LOGI(TAG,
+           "startup_sequence_result mode=%s sent_sequence=[%s] rx_sequence=[%s] "
+           "host_identity_request_count=%u gate_ok=%s missing_original_conditions=[%s]",
+           mode != nullptr ? mode : "unknown",
+           join_values(this->manual_original_startup_sent_sequence_, "|").c_str(),
+           join_values(this->manual_original_startup_rx_sequence_, "|").c_str(),
+           static_cast<unsigned>(this->manual_original_startup_host_identity_request_count_),
+           YESNO(this->manual_original_startup_got_tr37_), join_values(missing_conditions, ",").c_str());
+}
+
 bool JuraComponent::send_manual_original_startup_identity_reply_(const std::string &rx_line,
                                                                  const std::string &tx_line,
                                                                  const char *confidence,
@@ -4142,7 +4236,10 @@ bool JuraComponent::send_manual_original_startup_active_command_(const std::stri
   }
 
   this->manual_original_startup_active_tx_guard_open_ = true;
-  this->trace_machine_tx_startup_("manual_original_startup_active_safe", line, inner_uart0, reason);
+  const char *source = this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_STATEFUL
+                           ? "manual_original_startup_active_stateful"
+                           : "manual_original_startup_active_safe";
+  this->trace_machine_tx_startup_(source, line, inner_uart0, reason);
   bool ok = false;
   if (inner_uart0) {
     ok = this->write_inner_uart0_command_(line, now, true);
@@ -4174,11 +4271,15 @@ bool JuraComponent::send_manual_original_startup_active_command_(const std::stri
   } else if (line == "@TR:37") {
     this->manual_original_startup_sent_tr37_ = true;
   }
+  if (this->manual_original_startup_sent_sequence_.size() < 64) {
+    this->manual_original_startup_sent_sequence_.push_back(line);
+  }
   return true;
 }
 
 void JuraComponent::process_manual_original_startup_active_safe_(uint32_t now) {
-  if (this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE ||
+  const bool stateful = this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_STATEFUL;
+  if ((this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE && !stateful) ||
       this->manual_handshake_tx_violation_ ||
       this->manual_original_startup_active_stage_ == OriginalStartupActiveStage::IDLE ||
       this->manual_original_startup_active_stage_ == OriginalStartupActiveStage::OBSERVE) {
@@ -4191,29 +4292,47 @@ void JuraComponent::process_manual_original_startup_active_safe_(uint32_t now) {
 
   switch (this->manual_original_startup_active_stage_) {
     case OriginalStartupActiveStage::SEND_T0:
-      if (!this->send_manual_original_startup_active_command_("@T0", true, "startup_control", now)) {
+      if (!this->send_manual_original_startup_active_command_(
+              "@T0", true,
+              stateful ? "original_branch_state70_bit0_substate3_startup_t0" : "startup_control", now)) {
         return;
       }
       this->manual_original_startup_active_stage_ = OriginalStartupActiveStage::WAIT_AFTER_T0;
-      this->manual_original_startup_active_next_ms_ = now + 500;
+      this->manual_original_startup_active_next_ms_ = stateful ? 0 : now + 500;
+      this->manual_original_startup_active_deadline_ms_ = stateful ? now + 3000 : 0;
       return;
     case OriginalStartupActiveStage::WAIT_AFTER_T0:
+      if (stateful && (this->manual_original_startup_active_deadline_ms_ == 0 ||
+                       (!this->manual_original_startup_got_tr37_ &&
+                        (this->dongle_events_ & (DONGLE_EVENT_T0 | DONGLE_EVENT_T3)) == 0 &&
+                        !time_reached(now, this->manual_original_startup_active_deadline_ms_)))) {
+        return;
+      }
       this->manual_original_startup_active_stage_ = OriginalStartupActiveStage::SEND_H1;
       this->manual_original_startup_active_next_ms_ = now;
       return;
     case OriginalStartupActiveStage::SEND_H1:
-      if (!this->send_manual_original_startup_active_command_("@H1", true, "startup_identity_probe", now)) {
+      if (!this->send_manual_original_startup_active_command_(
+              "@H1", true,
+              stateful ? "original_branch_state70_bit5_h1_after_t0_or_t3" : "startup_identity_probe", now)) {
         return;
       }
       this->manual_original_startup_active_stage_ = OriginalStartupActiveStage::WAIT_AFTER_H1;
-      this->manual_original_startup_active_next_ms_ = now + 500;
+      this->manual_original_startup_active_next_ms_ = stateful ? 0 : now + 500;
+      this->manual_original_startup_active_deadline_ms_ = stateful ? now + 1500 : 0;
       return;
     case OriginalStartupActiveStage::WAIT_AFTER_H1:
+      if (stateful && (this->manual_original_startup_active_deadline_ms_ == 0 ||
+                       ((this->dongle_events_ & (DONGLE_EVENT_T0 | DONGLE_EVENT_T3)) == 0 &&
+                        !time_reached(now, this->manual_original_startup_active_deadline_ms_)))) {
+        return;
+      }
       this->manual_original_startup_active_stage_ = OriginalStartupActiveStage::SEND_TY;
       this->manual_original_startup_active_next_ms_ = now;
       return;
     case OriginalStartupActiveStage::SEND_TY:
-      if (!this->send_manual_original_startup_active_command_("TY:", false, "machine_type_query", now)) {
+      if (!this->send_manual_original_startup_active_command_(
+              "TY:", false, stateful ? "original_type_query_after_identity_seen" : "machine_type_query", now)) {
         return;
       }
       this->manual_original_startup_active_stage_ = OriginalStartupActiveStage::WAIT_TY;
@@ -4226,7 +4345,9 @@ void JuraComponent::process_manual_original_startup_active_safe_(uint32_t now) {
       }
       return;
     case OriginalStartupActiveStage::SEND_T1:
-      if (!this->send_manual_original_startup_active_command_("@T1", true, "startup_control", now)) {
+      if (!this->send_manual_original_startup_active_command_(
+              "@T1", true, stateful ? "original_branch_state70_bit5_bit6_startup_t1_after_ty" : "startup_control",
+              now)) {
         return;
       }
       this->manual_original_startup_active_stage_ = OriginalStartupActiveStage::WAIT_T1;
@@ -4239,7 +4360,8 @@ void JuraComponent::process_manual_original_startup_active_safe_(uint32_t now) {
       }
       return;
     case OriginalStartupActiveStage::SEND_TR37:
-      if (!this->send_manual_original_startup_active_command_("@TR:37", true, "gate_command", now)) {
+      if (!this->send_manual_original_startup_active_command_(
+              "@TR:37", true, stateful ? "original_gate_after_t1_type_identity" : "gate_command", now)) {
         return;
       }
       this->manual_original_startup_active_stage_ = OriginalStartupActiveStage::WAIT_TR37;
@@ -4295,6 +4417,9 @@ bool JuraComponent::handle_manual_original_startup_observe_line_(const std::stri
   trim_in_place(trimmed);
   if (trimmed.empty()) {
     return false;
+  }
+  if (this->manual_original_startup_mode_active_() && this->manual_original_startup_rx_sequence_.size() < 64) {
+    this->manual_original_startup_rx_sequence_.push_back(trimmed);
   }
   std::string lower = to_lower_copy(trimmed);
   ESP_LOGI(TAG, "original_startup_rx_decoded table=%s line=\"%s\"", table_name != nullptr ? table_name : "unknown",
@@ -4593,9 +4718,11 @@ void JuraComponent::process_manual_handshake_probe_(uint32_t now) {
   const bool live_trigger_mode = this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_TRIGGER_STAYINBLE;
   const bool live_event_mode = this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE;
   const bool original_startup_mode = this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_OBSERVE ||
-                                     this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE;
+                                     this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE ||
+                                     this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_STATEFUL;
   const bool original_active_safe_mode =
-      this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE;
+      this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE ||
+      this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_STATEFUL;
 
   if (original_active_safe_mode) {
     this->process_manual_original_startup_active_safe_(now);
@@ -4785,7 +4912,9 @@ void JuraComponent::finish_manual_handshake_probe_(uint32_t now, const char *res
              YESNO(this->manual_original_startup_seen_hf_), YESNO(this->manual_original_startup_seen_hp_),
              YESNO(this->manual_original_startup_seen_ht_), YESNO(this->manual_original_startup_seen_hw_),
              YESNO(this->manual_handshake_tx_violation_));
-  } else if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE) {
+  } else if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE ||
+             this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_STATEFUL) {
+    const bool stateful = this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_STATEFUL;
     if (this->manual_handshake_tx_violation_) {
       final_result = "tx_violation";
     } else if (std::strcmp(safe_result, "gate_ok") == 0 || this->manual_original_startup_got_tr37_) {
@@ -4801,11 +4930,13 @@ void JuraComponent::finish_manual_handshake_probe_(uint32_t now, const char *res
     }
     this->log_startup_tx_diff_();
     this->log_original_startup_state_diff_();
+    this->log_startup_sequence_result_(stateful ? "stateful" : "fixed_delay");
     ESP_LOGI(TAG,
-             "manual_original_startup_active_safe_done result=%s sent_T0=%s sent_H1=%s sent_TY=%s sent_T1=%s "
+             "%s_done result=%s sent_T0=%s sent_H1=%s sent_TY=%s sent_T1=%s "
              "sent_TR37=%s got_ty=%s got_t1=%s got_tr37=%s host_identity_request_count=%u "
              "safe_identity_response_count=%u startup_control_count=%u machine_identity_count=%u unknown_count=%u "
              "tx_violation=%s",
+             stateful ? "manual_original_startup_active_stateful" : "manual_original_startup_active_safe",
              final_result.c_str(), YESNO(this->manual_original_startup_sent_t0_),
              YESNO(this->manual_original_startup_sent_h1_), YESNO(this->manual_original_startup_sent_ty_),
              YESNO(this->manual_original_startup_sent_t1_), YESNO(this->manual_original_startup_sent_tr37_),
@@ -4890,7 +5021,8 @@ void JuraComponent::finish_manual_handshake_probe_(uint32_t now, const char *res
     }
   }
   if (this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::ORIGINAL_STARTUP_OBSERVE &&
-      this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE) {
+      this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_SAFE &&
+      this->manual_handshake_probe_mode_ != ManualHandshakeProbeMode::ORIGINAL_STARTUP_ACTIVE_STATEFUL) {
     this->log_startup_tx_diff_();
   }
   ESP_LOGI(TAG, "manual_handshake_done result=%s frames=%u tf=%s tv=%s",
@@ -4909,6 +5041,7 @@ void JuraComponent::finish_manual_handshake_probe_(uint32_t now, const char *res
   this->manual_live_trigger_allow_stayinble_tx_ = false;
   this->manual_original_startup_identity_tx_allowed_ = false;
   this->manual_original_startup_active_tx_guard_open_ = false;
+  this->manual_original_startup_stateful_ = false;
   this->manual_original_startup_active_stage_ = OriginalStartupActiveStage::IDLE;
   this->manual_live_trigger_next_tx_ms_ = 0;
   if (this->db_transaction_owner_ == DbTransactionOwner::MANUAL_HANDSHAKE_PROBE) {
