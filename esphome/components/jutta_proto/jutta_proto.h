@@ -461,6 +461,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool guard_manual_observe_tx_(const char *source, const std::string &frame);
   bool manual_live_trigger_stayinble_tx_allowed_(const std::string &frame) const;
   bool send_manual_live_trigger_stayinble_(uint32_t now);
+  bool manual_original_startup_observe_active_() const;
   bool manual_original_startup_tx_allowed_(const std::string &frame) const;
   bool start_manual_original_startup_observe_(uint32_t observe_ms, bool respond_identity, bool active_probe,
                                               bool boot_attached_mode, uint32_t now);

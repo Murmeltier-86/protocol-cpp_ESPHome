@@ -2827,15 +2827,27 @@ void JuraComponent::publish_status_probe_last_response_(const std::string &text)
 }
 
 void JuraComponent::run_status_probe_command(const std::string &command) {
+  if (this->manual_original_startup_observe_active_()) {
+    ESP_LOGW(TAG, "manual_test_rejected reason=original_startup_observe_active");
+    return;
+  }
   (void) command;
   ESP_LOGW(TAG, "status_probe_disabled reason=stability_rollback");
 }
 
 void JuraComponent::run_manual_handshake_probe(uint32_t observe_ms, const std::string &mode) {
+  if (this->manual_original_startup_observe_active_()) {
+    ESP_LOGW(TAG, "manual_test_rejected reason=original_startup_observe_active");
+    return;
+  }
   this->start_manual_handshake_probe_(observe_ms, mode, esphome::millis());
 }
 
 void JuraComponent::manual_live_trigger_probe_stayinble(uint32_t observe_ms, uint32_t interval_ms) {
+  if (this->manual_original_startup_observe_active_()) {
+    ESP_LOGW(TAG, "manual_test_rejected reason=original_startup_observe_active");
+    return;
+  }
   if (this->manual_handshake_probe_state_ != ManualHandshakeProbeState::IDLE) {
     ESP_LOGW(TAG, "manual_live_trigger_probe_stayinble_start rejected reason=already_running");
     return;
@@ -2857,6 +2869,10 @@ void JuraComponent::manual_live_trigger_probe_stayinble(uint32_t observe_ms, uin
 }
 
 void JuraComponent::manual_live_event_observe(uint32_t observe_ms, bool stayinble, uint32_t interval_ms) {
+  if (this->manual_original_startup_observe_active_()) {
+    ESP_LOGW(TAG, "manual_test_rejected reason=original_startup_observe_active");
+    return;
+  }
   if (this->manual_handshake_probe_state_ != ManualHandshakeProbeState::IDLE) {
     ESP_LOGW(TAG, "manual_live_event_observe_start rejected reason=already_running");
     return;
@@ -2895,6 +2911,7 @@ void JuraComponent::manual_original_startup_observe(uint32_t observe_ms, bool re
   ESP_LOGI(TAG,
            "manual_original_startup_observe_note=\"Start test before powering/booting the machine for best "
            "boot-attached coverage\"");
+  ESP_LOGI(TAG, "original_startup_observe_armed_waiting_for_machine_boot=YES");
   if (!this->start_manual_original_startup_observe_(observe_ms, respond_identity, active_probe, boot_attached_mode,
                                                     esphome::millis()) &&
       this->manual_handshake_probe_state_ != ManualHandshakeProbeState::IDLE) {
@@ -2903,11 +2920,19 @@ void JuraComponent::manual_original_startup_observe(uint32_t observe_ms, bool re
 }
 
 void JuraComponent::run_ble2_transport_probe(const std::string &probe) {
+  if (this->manual_original_startup_observe_active_()) {
+    ESP_LOGW(TAG, "manual_test_rejected reason=original_startup_observe_active");
+    return;
+  }
   (void) probe;
   ESP_LOGW(TAG, "ble2_probe_disabled reason=stability_rollback");
 }
 
 void JuraComponent::run_debug_command(const std::string &command, const std::string &transport) {
+  if (this->manual_original_startup_observe_active_()) {
+    ESP_LOGW(TAG, "manual_test_rejected reason=original_startup_observe_active");
+    return;
+  }
   (void) command;
   (void) transport;
   ESP_LOGW(TAG, "debug_command_disabled reason=stability_rollback");
@@ -3264,6 +3289,10 @@ void JuraComponent::finish_status_probe_cycle_(uint32_t now, const char *result)
 }
 
 bool JuraComponent::start_manual_handshake_probe_(uint32_t observe_ms, const std::string &mode, uint32_t now) {
+  if (this->manual_original_startup_observe_active_()) {
+    ESP_LOGW(TAG, "manual_test_rejected reason=original_startup_observe_active");
+    return false;
+  }
   if (observe_ms == 0) {
     observe_ms = kManualHandshakeObserveDefaultMs;
   }
@@ -3559,6 +3588,11 @@ bool JuraComponent::manual_live_trigger_stayinble_tx_allowed_(const std::string 
   char expected[16];
   std::snprintf(expected, sizeof(expected), "@TP:%02X7F", static_cast<unsigned>(this->pmode_key_));
   return normalized == expected;
+}
+
+bool JuraComponent::manual_original_startup_observe_active_() const {
+  return this->manual_handshake_probe_state_ != ManualHandshakeProbeState::IDLE &&
+         this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::ORIGINAL_STARTUP_OBSERVE;
 }
 
 bool JuraComponent::manual_original_startup_tx_allowed_(const std::string &frame) const {
@@ -4070,14 +4104,14 @@ void JuraComponent::finish_manual_handshake_probe_(uint32_t now, const char *res
                                                                                            : "no_identity_dialog");
     }
     ESP_LOGI(TAG,
-             "manual_original_startup_observe_done result=%s observe_ms=%u respond_identity=%s active_probe=%s "
+             "manual_original_startup_observe_done result=%s observe_ms=%u respond_identity=%s "
              "rx_total=%u host_identity_request_count=%u safe_identity_response_count=%u "
              "unhandled_identity_request_count=%u noop_identity_request_count=%u startup_control_count=%u "
              "gate_count=%u machine_identity_count=%u unknown_count=%u seen_hb=%s seen_gb=%s seen_hy=%s "
              "seen_hl=%s seen_hc=%s seen_hi=%s seen_hr=%s seen_hf=%s seen_hp=%s seen_ht=%s seen_hw=%s "
              "tx_violation=%s",
              final_result.c_str(), static_cast<unsigned>(this->manual_handshake_observe_ms_),
-             YESNO(this->manual_original_startup_respond_identity_), YESNO(this->manual_original_startup_active_probe_),
+             YESNO(this->manual_original_startup_respond_identity_),
              static_cast<unsigned>(this->manual_handshake_frames_),
              static_cast<unsigned>(this->manual_original_startup_host_identity_request_count_),
              static_cast<unsigned>(this->manual_original_startup_safe_identity_response_count_),
@@ -4649,6 +4683,9 @@ void JuraComponent::finish_debug_command_(uint32_t now, const char *result) {
 }
 
 void JuraComponent::process_machine_data_query() {
+  if (this->manual_original_startup_observe_active_()) {
+    return;
+  }
   uint32_t now = esphome::millis();
   if (!this->enable_machine_xml_poll_) {
     return;
@@ -4707,6 +4744,9 @@ void JuraComponent::schedule_live_db_status_retry_(uint32_t now, const char *rea
 }
 
 void JuraComponent::process_live_db_status_poll_(uint32_t now) {
+  if (this->manual_original_startup_observe_active_()) {
+    return;
+  }
   if (!this->live_db_status_enabled_ || !this->live_db_status_poll_enabled_) {
     return;
   }
@@ -6073,6 +6113,9 @@ void JuraComponent::reset_xml_poll_state_() {
 
 void JuraComponent::process_xml_polling() {
   uint32_t now = esphome::millis();
+  if (this->manual_original_startup_observe_active_()) {
+    return;
+  }
   if (this->xml_command_probe_) {
     this->process_xml_command_probe_scheduler_(now);
     return;
@@ -9772,6 +9815,9 @@ void JuraComponent::poll_settings_refresh_() {
 }
 
 void JuraComponent::poll_settings_once_() {
+  if (this->manual_original_startup_observe_active_()) {
+    return;
+  }
   if (!this->is_ready()) {
     return;
   }
@@ -9822,6 +9868,9 @@ void JuraComponent::publish_error_state_(uint32_t code) {
 }
 
 void JuraComponent::poll_error_cycle_() {
+  if (this->manual_original_startup_observe_active_()) {
+    return;
+  }
   if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
     return;
   }
