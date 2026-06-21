@@ -21,3 +21,8 @@ same rough core-session milestones as the original BlueFrog firmware:
 The mirror intentionally does not synthesize missing original state. For example,
 an existing ESP `@TR:37` TX logs whether original firmware would have expected
 `0x40`, but it does not set `0x40` or send any extra command.
+
+`@D1` is a legacy ESP probe and is disabled in the normal startup/stats-handshake
+path because it is not confirmed in the original BlueFrog firmware. Keeping it
+out of the normal sequence should make `startup_sequence_diff_original_vs_esp`
+stop reporting `extra_in_esp_normal=[@D1]`.

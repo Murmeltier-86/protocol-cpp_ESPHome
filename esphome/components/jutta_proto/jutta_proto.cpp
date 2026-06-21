@@ -8321,7 +8321,8 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
                  static_cast<unsigned>(kDongleStartupGateOnlyQuietMs));
         return false;
       }
-      this->transition_dongle_startup_(DongleStartupState::PROBE_D1, now);
+      XML_STATS_LOGD("dongle_startup_legacy_d1_probe_disabled action=start_with_ty");
+      this->transition_dongle_startup_(DongleStartupState::PROBE_TY, now);
       return false;
     }
 
@@ -8329,10 +8330,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       if (!time_reached(now, this->dongle_startup_next_action_ms_)) {
         return false;
       }
-      if (!this->send_dongle_startup_command_("@D1", now)) {
-        this->fail_dongle_startup_(now, "send_d1_failed");
-        return false;
-      }
+      XML_STATS_LOGD("dongle_startup_legacy_d1_probe_disabled action=skip_probe_d1");
       this->transition_dongle_startup_(DongleStartupState::PROBE_TY, now);
       this->dongle_startup_next_action_ms_ = now + kDongleStartupProbeDelayMs;
       return false;
@@ -8363,7 +8361,8 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       if (time_reached(now, this->dongle_startup_deadline_ms_)) {
         XML_STATS_LOGD("dongle_startup_retry state=PROBE_TY attempt=%u",
                  static_cast<unsigned>(this->dongle_startup_probe_attempt_));
-        this->transition_dongle_startup_(DongleStartupState::PROBE_D1, now);
+        this->transition_dongle_startup_(DongleStartupState::PROBE_TY, now);
+        this->dongle_startup_next_action_ms_ = now + kDongleStartupProbeDelayMs;
       }
       return false;
 
