@@ -348,6 +348,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void manual_live_event_observe(uint32_t observe_ms = 120000, bool stayinble = true, uint32_t interval_ms = 6000);
   void manual_original_startup_observe(uint32_t observe_ms = 180000, bool respond_identity = true,
                                        bool active_probe = false, bool boot_attached_mode = true);
+  void manual_original_startup_active_safe(uint32_t observe_ms = 180000, bool send_core_startup = true,
+                                           bool respond_identity = true, bool active_probe = true);
   void run_ble2_transport_probe(const std::string &probe);
   void run_debug_command(const std::string &command, const std::string &transport);
   void set_xml_mapping_path(const std::string &path) { this->xml_mapping_path_ = path; }
@@ -402,7 +404,22 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     TEST_C_APP_INITIAL_READS,
     LIVE_TRIGGER_STAYINBLE,
     LIVE_EVENT_OBSERVE,
-    ORIGINAL_STARTUP_OBSERVE
+    ORIGINAL_STARTUP_OBSERVE,
+    ORIGINAL_STARTUP_ACTIVE_SAFE
+  };
+  enum class OriginalStartupActiveStage {
+    IDLE,
+    SEND_T0,
+    WAIT_AFTER_T0,
+    SEND_H1,
+    WAIT_AFTER_H1,
+    SEND_TY,
+    WAIT_TY,
+    SEND_T1,
+    WAIT_T1,
+    SEND_TR37,
+    WAIT_TR37,
+    OBSERVE
   };
   enum class Ble2ProbeState { IDLE, WAIT };
   enum class DebugCommandState { IDLE, WAIT };
@@ -462,12 +479,23 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool manual_live_trigger_stayinble_tx_allowed_(const std::string &frame) const;
   bool send_manual_live_trigger_stayinble_(uint32_t now);
   bool manual_original_startup_observe_active_() const;
+  bool manual_original_startup_mode_active_() const;
   bool manual_original_startup_tx_allowed_(const std::string &frame) const;
+  bool manual_original_startup_active_tx_allowed_(const std::string &frame) const;
   bool start_manual_original_startup_observe_(uint32_t observe_ms, bool respond_identity, bool active_probe,
                                               bool boot_attached_mode, uint32_t now);
+  bool start_manual_original_startup_active_safe_(uint32_t observe_ms, bool send_core_startup, bool respond_identity,
+                                                  bool active_probe, uint32_t now);
   bool handle_manual_original_startup_observe_line_(const std::string &line, const char *table_name, uint32_t now);
   bool send_manual_original_startup_identity_reply_(const std::string &rx_line, const std::string &tx_line,
                                                     const char *confidence, const char *reason, uint32_t now);
+  bool send_manual_original_startup_active_command_(const std::string &line, bool inner_uart0, const char *reason,
+                                                    uint32_t now);
+  void process_manual_original_startup_active_safe_(uint32_t now);
+  void trace_machine_tx_startup_(const char *source, const std::string &line, bool encoded, const char *reason);
+  void reset_startup_tx_trace_();
+  void log_startup_tx_diff_();
+  const char *startup_tx_reason_(const std::string &line) const;
   void process_manual_handshake_probe_(uint32_t now);
   void finish_manual_handshake_probe_(uint32_t now, const char *result);
   bool start_ble2_transport_probe_(const std::string &probe, uint32_t now);
@@ -791,6 +819,28 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool manual_original_startup_seen_ht_{false};
   bool manual_original_startup_seen_hw_{false};
   bool manual_original_startup_identity_tx_allowed_{false};
+  bool manual_original_startup_active_tx_guard_open_{false};
+  bool manual_original_startup_send_core_startup_{true};
+  bool manual_original_startup_active_probe_requested_{true};
+  OriginalStartupActiveStage manual_original_startup_active_stage_{OriginalStartupActiveStage::IDLE};
+  uint32_t manual_original_startup_active_next_ms_{0};
+  uint32_t manual_original_startup_active_deadline_ms_{0};
+  bool manual_original_startup_sent_t0_{false};
+  bool manual_original_startup_sent_h1_{false};
+  bool manual_original_startup_sent_ty_{false};
+  bool manual_original_startup_sent_t1_{false};
+  bool manual_original_startup_sent_tr37_{false};
+  bool manual_original_startup_got_ty_{false};
+  bool manual_original_startup_got_t1_{false};
+  bool manual_original_startup_got_tr37_{false};
+  bool startup_trace_sends_t0_{false};
+  bool startup_trace_sends_t1_{false};
+  bool startup_trace_sends_h1_{false};
+  bool startup_trace_sends_ty_{false};
+  bool startup_trace_sends_tr37_{false};
+  bool startup_trace_sends_t3_{false};
+  bool startup_trace_sends_t2_{false};
+  bool startup_trace_sends_tp_{false};
   bool manual_handshake_prev_xml_dongle_startup_{false};
   bool manual_handshake_prev_xml_dongle_startup_debug_{false};
   std::string manual_handshake_prev_xml_dongle_startup_mode_{};
@@ -1103,6 +1153,26 @@ class ManualOriginalStartupObserveAction : public esphome::Action<> {
   bool respond_identity_{true};
   bool active_probe_{false};
   bool boot_attached_mode_{true};
+};
+
+class ManualOriginalStartupActiveSafeAction : public esphome::Action<> {
+ public:
+  explicit ManualOriginalStartupActiveSafeAction(JuraComponent *parent) : parent_(parent) {}
+  void set_observe_ms(uint32_t observe_ms) { observe_ms_ = observe_ms; }
+  void set_send_core_startup(bool send_core_startup) { send_core_startup_ = send_core_startup; }
+  void set_respond_identity(bool respond_identity) { respond_identity_ = respond_identity; }
+  void set_active_probe(bool active_probe) { active_probe_ = active_probe; }
+  void play() override {
+    this->parent_->manual_original_startup_active_safe(observe_ms_, send_core_startup_, respond_identity_,
+                                                       active_probe_);
+  }
+
+ protected:
+  JuraComponent *parent_;
+  uint32_t observe_ms_{180000};
+  bool send_core_startup_{true};
+  bool respond_identity_{true};
+  bool active_probe_{true};
 };
 
 class Ble2TransportProbeAction : public esphome::Action<> {

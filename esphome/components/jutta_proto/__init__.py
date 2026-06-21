@@ -101,6 +101,7 @@ CONF_PMODE_KEY = "pmode_key"
 CONF_RESPOND_IDENTITY = "respond_identity"
 CONF_ACTIVE_PROBE = "active_probe"
 CONF_BOOT_ATTACHED_MODE = "boot_attached_mode"
+CONF_SEND_CORE_STARTUP = "send_core_startup"
 CONF_TRANSPORT = "transport"
 CONF_XML_SENSORS = "xml_sensors"
 CONF_DEBUG_UART_FRAMES = "debug_uart_frames"
@@ -137,6 +138,9 @@ ManualLiveEventObserveAction = jutta_component_ns.class_(
 )
 ManualOriginalStartupObserveAction = jutta_component_ns.class_(
     "ManualOriginalStartupObserveAction", automation.Action
+)
+ManualOriginalStartupActiveSafeAction = jutta_component_ns.class_(
+    "ManualOriginalStartupActiveSafeAction", automation.Action
 )
 Ble2TransportProbeAction = jutta_component_ns.class_(
     "Ble2TransportProbeAction", automation.Action
@@ -519,6 +523,20 @@ def _normalize_manual_original_startup_observe(value):
     )(value)
 
 
+def _normalize_manual_original_startup_active_safe(value):
+    if value is None:
+        value = {}
+    return cv.Schema(
+        {
+            cv.Optional(CONF_ID): cv.use_id(JuraComponent),
+            cv.Optional(CONF_OBSERVE_MS, default=180000): cv.int_range(min=1000, max=180000),
+            cv.Optional(CONF_SEND_CORE_STARTUP, default=True): cv.boolean,
+            cv.Optional(CONF_RESPOND_IDENTITY, default=True): cv.boolean,
+            cv.Optional(CONF_ACTIVE_PROBE, default=True): cv.boolean,
+        }
+    )(value)
+
+
 def _normalize_ble2_transport_probe(value):
     if isinstance(value, str):
         value = {CONF_PROBE: value}
@@ -885,6 +903,24 @@ async def manual_original_startup_observe_action_to_code(config, action_id, temp
     cg.add(var.set_respond_identity(config[CONF_RESPOND_IDENTITY]))
     cg.add(var.set_active_probe(config[CONF_ACTIVE_PROBE]))
     cg.add(var.set_boot_attached_mode(config[CONF_BOOT_ATTACHED_MODE]))
+    return var
+
+
+@automation.register_action(
+    "jutta_proto.manual_original_startup_active_safe",
+    ManualOriginalStartupActiveSafeAction,
+    _normalize_manual_original_startup_active_safe,
+    synchronous=False,
+)
+async def manual_original_startup_active_safe_action_to_code(config, action_id, template_args, args):
+    _ = template_args
+    _ = args
+    parent = await _get_parent(config)
+    var = cg.new_Pvariable(action_id, parent)
+    cg.add(var.set_observe_ms(config[CONF_OBSERVE_MS]))
+    cg.add(var.set_send_core_startup(config[CONF_SEND_CORE_STARTUP]))
+    cg.add(var.set_respond_identity(config[CONF_RESPOND_IDENTITY]))
+    cg.add(var.set_active_probe(config[CONF_ACTIVE_PROBE]))
     return var
 
 

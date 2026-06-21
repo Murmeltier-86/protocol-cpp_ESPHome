@@ -900,3 +900,98 @@ button:
 - Highest-confidence missing startup piece is host/adapter identity response handling
   for @HY/@HL/@HP/@HF/@HT/@HO-style requests, not a status query.
 ```
+
+### Runtime Test Plan: Original Startup Active Safe
+
+The passive `manual_original_startup_observe` test showed only startup/control
+traffic such as `@T3` and `@t0` in the observed window. No `@H?` host identity
+request and no `@GB` request was seen passively. This suggests the machine may
+not start the full host/adapter identity dialog by itself in the tested
+late-attach/observe window.
+
+Next hypothesis: the original BLE dongle may actively send a small core startup
+sequence before the machine asks for, or accepts, adapter identity details. The
+new ESPHome/jutta_proto action `jutta_proto.manual_original_startup_active_safe`
+is limited to confirmed startup/session frames and does not send product,
+PMode-setting, transfer, DFU, `@TF`, or `@TV` commands.
+
+Active-safe defaults:
+
+```text
+observe_ms=180000
+send_core_startup=YES
+respond_identity=YES
+active_probe=YES
+```
+
+Active TX allowlist:
+
+| TX frame | Encoding | Reason |
+|---|---|---|
+| `@T0` | inner uart0 | startup control literal present in original firmware |
+| `@H1` | inner uart0 | startup identity probe literal present in original firmware |
+| `TY:` | plaintext | machine type query used by existing safe startup path |
+| `@T1` | inner uart0 | startup control used by existing safe startup path |
+| `@TR:37` | inner uart0 | gate command used by existing safe startup path |
+
+Sequence used by the active-safe action:
+
+```text
+TX @T0
+wait 500 ms
+TX @H1
+wait 500 ms
+TX TY:
+wait for ty: or timeout
+TX @T1
+wait for @t1 or timeout
+TX @TR:37
+wait for @tr:37 or timeout
+observe until observe_ms
+```
+
+Safe identity auto-replies remain identical to the passive observe test:
+
+```text
+@HB -> @ok:
+@GB -> @ok:
+@HY -> @hy:TT214H V05.08F
+```
+
+Explicitly not sent by this test:
+
+```text
+@t2:
+@t3
+@TP:
+@TD:
+@TV:81
+@TV:82
+@TS:9x
+0x1527 0x9x
+@mn / @mo / @me / @me1
+DFU / bootloader / product actions
+```
+
+The ESPHome implementation logs every allowed TX as cleartext via
+`machine_tx_startup_trace`, and emits `startup_tx_diff` at the end so the
+observed ESP sequence can be compared against the original startup literals:
+
+```text
+@T0 @T1 @H1 TY: @TR:37 @t3 @t2: @TP:
+```
+
+Example Home Assistant button:
+
+```yaml
+button:
+  - platform: template
+    name: "JURA Original Startup Active Safe"
+    on_press:
+      - jutta_proto.manual_original_startup_active_safe:
+          id: jura
+          observe_ms: 180000
+          send_core_startup: true
+          respond_identity: true
+          active_probe: true
+```
