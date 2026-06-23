@@ -54,6 +54,7 @@ constexpr uint32_t kDongleStartupProbeDelayMs = 250;
 constexpr uint32_t kDongleStartupTimeoutMs = 1500;
 constexpr uint32_t kDongleStartupT0AfterT3TimeoutMs = 5000;
 constexpr uint32_t kDongleStartupT3QuietMs = 1000;
+constexpr uint32_t kPostT3RuntimeObserveMs = 5000;
 constexpr uint32_t kDongleStartupGateOnlyQuietMs = 2000;
 constexpr uint32_t kDongleStartupMaxWaitAfterT3Ms = 5000;
 constexpr uint32_t kDongleStartupTr37TimeoutMs = 3000;
@@ -2214,6 +2215,11 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
     return false;
   }
   ++this->bluefrog_26_rx_machine_to_esp_count_;
+  if (this->post_t3_runtime_observe_active_) {
+    ++this->post_t3_runtime_observe_rx_26_count_;
+    ESP_LOGI(TAG, "post_t3_runtime_observe_rx_26 count=%u",
+             static_cast<unsigned>(this->post_t3_runtime_observe_rx_26_count_));
+  }
   this->last_26_rx_time_ms_ = now;
   this->last_26_frame_hex_ = compact_hex_string(frame, 96);
   if (this->bluefrog_26_replay_active_ && !this->bluefrog_26_replay_response_seen_ &&
@@ -2267,6 +2273,9 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
     ++this->bluefrog_26_unknown_count_;
     if (has_binary_candidate) {
       ++this->bluefrog_26_binary_candidate_count_;
+      if (this->post_t3_runtime_observe_active_) {
+        ++this->post_t3_runtime_observe_binary_candidates_;
+      }
     }
     this->publish_text_if_changed_(this->live_db_status_source_sensor_, this->current_live_db_status_source_,
                                    has_binary_candidate ? "bluefrog_26_binary_cache_candidate" : "unknown_26_frame");
@@ -2318,9 +2327,20 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
   ESP_LOGI(TAG, "bluefrog_26_decoded_class class=%s table=%s cluster=\"%s\"", klass, selected->table_name,
            cluster.c_str());
   this->publish_text_if_changed_(this->live_db_status_source_sensor_, this->current_live_db_status_source_, klass);
+  if (this->post_t3_runtime_observe_active_) {
+    ESP_LOGI(TAG, "post_t3_runtime_observe_decoded line=\"%s\"",
+             transport_payload_log_text(decoded).c_str());
+    if (std::strcmp(route, "session_core") == 0) {
+      ++this->post_t3_runtime_observe_session_core_;
+    }
+  }
 
   if (lower.rfind("@tf", 0) == 0) {
     ++this->bluefrog_26_tf_seen_count_;
+    if (this->post_t3_runtime_observe_active_) {
+      ++this->post_t3_runtime_observe_tf_seen_;
+      this->dongle_startup_next_action_ms_ = now;
+    }
     this->last_bluefrog_26_cachewriter_source_ = "bluefrog_26_tf_cachewriter";
     ESP_LOGI(TAG, "bluefrog_26_dispatch decoded_line=\"%s\" route=%s tf_seen_total=%u ascii_decoded_total=%u",
              transport_payload_log_text(decoded).c_str(), route, static_cast<unsigned>(this->bluefrog_26_tf_seen_count_),
@@ -2330,6 +2350,10 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
   }
   if (lower.rfind("@tv", 0) == 0) {
     ++this->bluefrog_26_tv_seen_count_;
+    if (this->post_t3_runtime_observe_active_) {
+      ++this->post_t3_runtime_observe_tv_seen_;
+      this->dongle_startup_next_action_ms_ = now;
+    }
     this->last_bluefrog_26_cachewriter_source_ = "bluefrog_26_tv_cachewriter";
     ESP_LOGI(TAG, "bluefrog_26_dispatch decoded_line=\"%s\" route=%s tv_seen_total=%u ascii_decoded_total=%u",
              transport_payload_log_text(decoded).c_str(), route, static_cast<unsigned>(this->bluefrog_26_tv_seen_count_),
@@ -8703,6 +8727,13 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       this->original_like_tr37_seen_ = false;
       this->original_like_tf_seen_ = false;
       this->original_like_tv_seen_ = false;
+      this->post_t3_runtime_observe_active_ = false;
+      this->post_t3_runtime_observe_start_ms_ = 0;
+      this->post_t3_runtime_observe_rx_26_count_ = 0;
+      this->post_t3_runtime_observe_tf_seen_ = 0;
+      this->post_t3_runtime_observe_tv_seen_ = 0;
+      this->post_t3_runtime_observe_binary_candidates_ = 0;
+      this->post_t3_runtime_observe_session_core_ = 0;
       this->bluefrog_26_replay_active_ = false;
       this->bluefrog_26_replay_response_seen_ = false;
       this->bluefrog_26_replay_result_logged_ = false;
@@ -8918,10 +8949,19 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       if (!this->xml_dongle_wait_t0_after_t3_) {
         this->transition_dongle_startup_(DongleStartupState::WAIT_AFTER_T3, now);
         this->dongle_startup_quiet_start_ms_ = now;
-        this->dongle_startup_next_action_ms_ = now + kDongleStartupT3QuietMs;
-        this->dongle_startup_deadline_ms_ = now + kDongleStartupMaxWaitAfterT3Ms;
-        XML_STATS_LOGD("dongle_startup_wait_t3_quiet start events=0x%02X",
-                 static_cast<unsigned>(this->dongle_events_));
+        this->dongle_startup_next_action_ms_ = now + kPostT3RuntimeObserveMs;
+        this->dongle_startup_deadline_ms_ = now + kPostT3RuntimeObserveMs + 1000U;
+        this->post_t3_runtime_observe_active_ = true;
+        this->post_t3_runtime_observe_start_ms_ = now;
+        this->post_t3_runtime_observe_rx_26_count_ = 0;
+        this->post_t3_runtime_observe_tf_seen_ = 0;
+        this->post_t3_runtime_observe_tv_seen_ = 0;
+        this->post_t3_runtime_observe_binary_candidates_ = 0;
+        this->post_t3_runtime_observe_session_core_ = 0;
+        ESP_LOGI(TAG, "post_t3_runtime_observe_start duration_ms=%u",
+                 static_cast<unsigned>(kPostT3RuntimeObserveMs));
+        XML_STATS_LOGD("dongle_startup_wait_t3_quiet start events=0x%02X duration_ms=%u",
+                 static_cast<unsigned>(this->dongle_events_), static_cast<unsigned>(kPostT3RuntimeObserveMs));
         return false;
       }
       this->transition_dongle_startup_(DongleStartupState::WAIT_T0_AFTER_T3, now);
@@ -8938,10 +8978,19 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         this->dongle_startup_quiet_then_prep_tr37_ = true;
         this->transition_dongle_startup_(DongleStartupState::WAIT_AFTER_T3, now);
         this->dongle_startup_quiet_start_ms_ = now;
-        this->dongle_startup_next_action_ms_ = now + kDongleStartupT3QuietMs;
-        this->dongle_startup_deadline_ms_ = now + kDongleStartupMaxWaitAfterT3Ms;
-        XML_STATS_LOGD("dongle_startup_wait_t3_quiet start events=0x%02X",
-                 static_cast<unsigned>(this->dongle_events_));
+        this->dongle_startup_next_action_ms_ = now + kPostT3RuntimeObserveMs;
+        this->dongle_startup_deadline_ms_ = now + kPostT3RuntimeObserveMs + 1000U;
+        this->post_t3_runtime_observe_active_ = true;
+        this->post_t3_runtime_observe_start_ms_ = now;
+        this->post_t3_runtime_observe_rx_26_count_ = 0;
+        this->post_t3_runtime_observe_tf_seen_ = 0;
+        this->post_t3_runtime_observe_tv_seen_ = 0;
+        this->post_t3_runtime_observe_binary_candidates_ = 0;
+        this->post_t3_runtime_observe_session_core_ = 0;
+        ESP_LOGI(TAG, "post_t3_runtime_observe_start duration_ms=%u",
+                 static_cast<unsigned>(kPostT3RuntimeObserveMs));
+        XML_STATS_LOGD("dongle_startup_wait_t3_quiet start events=0x%02X duration_ms=%u",
+                 static_cast<unsigned>(this->dongle_events_), static_cast<unsigned>(kPostT3RuntimeObserveMs));
         return false;
       }
       if (this->dongle_startup_deadline_ms_ != 0 && time_reached(now, this->dongle_startup_deadline_ms_)) {
@@ -8952,8 +9001,12 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
     case DongleStartupState::WAIT_AFTER_T3:
       if (this->dongle_startup_t3_seen_during_quiet_) {
         this->dongle_startup_t3_seen_during_quiet_ = false;
-        this->dongle_startup_next_action_ms_ = now + kDongleStartupT3QuietMs;
-        XML_STATS_LOGD("dongle_startup_t3_seen_during_quiet restart_quiet_timer");
+        this->dongle_startup_next_action_ms_ = now + kPostT3RuntimeObserveMs;
+        this->dongle_startup_deadline_ms_ = now + kPostT3RuntimeObserveMs + 1000U;
+        ESP_LOGI(TAG, "post_t3_runtime_observe_start duration_ms=%u reason=t3_seen_during_observe",
+                 static_cast<unsigned>(kPostT3RuntimeObserveMs));
+        XML_STATS_LOGD("dongle_startup_t3_seen_during_quiet restart_quiet_timer duration_ms=%u",
+                 static_cast<unsigned>(kPostT3RuntimeObserveMs));
       }
       if (time_reached(now, this->dongle_startup_next_action_ms_)) {
         if (this->coffee_maker_ != nullptr && this->coffee_maker_->connection != nullptr) {
@@ -8962,6 +9015,16 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
           this->coffee_maker_->connection->drain_serial_input_nonblocking();
         }
         this->dongle_startup_rx_buffer_.clear();
+        ESP_LOGI(TAG,
+                 "post_t3_runtime_observe_result tf_seen=%u tv_seen=%u binary_candidates=%u session_core=%u "
+                 "rx_26=%u elapsed_ms=%u",
+                 static_cast<unsigned>(this->post_t3_runtime_observe_tf_seen_),
+                 static_cast<unsigned>(this->post_t3_runtime_observe_tv_seen_),
+                 static_cast<unsigned>(this->post_t3_runtime_observe_binary_candidates_),
+                 static_cast<unsigned>(this->post_t3_runtime_observe_session_core_),
+                 static_cast<unsigned>(this->post_t3_runtime_observe_rx_26_count_),
+                 static_cast<unsigned>(now - this->dongle_startup_quiet_start_ms_));
+        this->post_t3_runtime_observe_active_ = false;
         XML_STATS_LOGD("dongle_startup_t3_quiet_ok elapsed_ms=%u",
                  static_cast<unsigned>(now - this->dongle_startup_quiet_start_ms_));
         if (this->dongle_startup_quiet_then_prep_tr37_) {
