@@ -57,6 +57,7 @@ constexpr uint32_t kDongleStartupT3QuietMs = 1000;
 constexpr uint32_t kDongleStartupGateOnlyQuietMs = 2000;
 constexpr uint32_t kDongleStartupMaxWaitAfterT3Ms = 5000;
 constexpr uint32_t kDongleStartupTr37TimeoutMs = 3000;
+constexpr uint32_t kBluefrog26ReplayObserveMs = 10000;
 constexpr size_t kDongleStartupMaxRxBytes = 512;
 constexpr uint8_t kDongleStartupMaxProbeAttempts = 6;
 constexpr uint8_t kDongleStartupMaxT1Attempts = 6;
@@ -1924,8 +1925,8 @@ void JuraComponent::process_handshake() {
       break;
     }
     case HandshakeStage::SEND_T2: {
-      ESP_LOGD(TAG, "SEND_T2: sending '@t2:8100000000\\r\\n'.");
-      if (this->connection_->write_decoded("@t2:8100000000\r\n")) {
+      ESP_LOGD(TAG, "SEND_T2: sending '@t2:8120000000\\r\\n'.");
+      if (this->connection_->write_decoded("@t2:8120000000\r\n")) {
         ESP_LOGD(TAG, "Sent @t2 response.");
         this->handshake_stage_ = HandshakeStage::WAIT_T3;
         this->handshake_buffer_.clear();
@@ -2123,6 +2124,9 @@ void JuraComponent::process_passive_bluefrog_rx_(uint32_t now) {
     return;
   }
   if (this->coffee_maker_->is_locked() || this->xml_inflight_ || this->db_transaction_owner_ != DbTransactionOwner::NONE ||
+      (this->dongle_startup_state_ != DongleStartupState::IDLE &&
+       this->dongle_startup_state_ != DongleStartupState::READY &&
+       this->dongle_startup_state_ != DongleStartupState::FAILED) ||
       this->manual_handshake_probe_state_ != ManualHandshakeProbeState::IDLE ||
       this->status_probe_state_ != StatusProbeState::IDLE ||
       this->debug_command_state_ != DebugCommandState::IDLE ||
@@ -2188,6 +2192,14 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
   ++this->bluefrog_26_rx_machine_to_esp_count_;
   this->last_26_rx_time_ms_ = now;
   this->last_26_frame_hex_ = compact_hex_string(frame, 96);
+  if (this->bluefrog_26_replay_active_ && !this->bluefrog_26_replay_response_seen_ &&
+      this->bluefrog_26_rx_machine_to_esp_count_ > this->bluefrog_26_replay_rx_baseline_) {
+    this->bluefrog_26_replay_response_seen_ = true;
+    this->bluefrog_26_replay_result_logged_ = true;
+    ESP_LOGI(TAG, "bluefrog_26_replay_result=machine_26_response elapsed_ms=%u rx_counter=%u hex=\"%s\"",
+             static_cast<unsigned>(now - this->bluefrog_26_replay_start_ms_),
+             static_cast<unsigned>(this->bluefrog_26_rx_machine_to_esp_count_), this->last_26_frame_hex_.c_str());
+  }
   this->publish_text_if_changed_(this->live_db_status_raw_hex_sensor_, this->current_live_db_status_raw_hex_,
                                  this->last_26_frame_hex_);
   this->publish_text_if_changed_(this->live_db_status_last_update_sensor_, this->current_live_db_status_last_update_,
@@ -2200,10 +2212,11 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
       break;
     }
   }
-  ESP_LOGI(TAG, "bluefrog_26_frame direction=%s source=%s time_ms=%u len=%u hex=\"%s\" ascii_preview=\"%s\"",
+  ESP_LOGI(TAG, "bluefrog_26_frame direction=%s source=%s time_ms=%u len=%u hex=\"%s\" ascii_preview=\"%s\" rx_counter=%u",
            direction != nullptr ? direction : "unknown", source != nullptr ? source : "unknown",
            static_cast<unsigned>(now), static_cast<unsigned>(frame.size()), this->last_26_frame_hex_.c_str(),
-           sanitize_text_for_api(ascii_preview).c_str());
+           sanitize_text_for_api(ascii_preview).c_str(),
+           static_cast<unsigned>(this->bluefrog_26_rx_machine_to_esp_count_));
 
   const std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(frame);
   const InnerTransportDecodeResult *selected = nullptr;
@@ -4251,6 +4264,9 @@ std::string JuraComponent::startup_pending_followup_tx_() const {
       break;
     case DongleStartupState::SEND_T2:
       pending.emplace_back("@t2:");
+      break;
+    case DongleStartupState::WAIT_26_REPLAY:
+      pending.emplace_back("wait_0x26_replay_response");
       break;
     case DongleStartupState::WAIT_T3:
       pending.emplace_back("wait_@T3");
@@ -7990,7 +8006,7 @@ size_t JuraComponent::xml_session_probe_command_count_() const {
 
 const char *JuraComponent::xml_session_probe_command_(size_t index) const {
   static constexpr const char *MINIMAL_COMMANDS[] = {"@D1", "@TR:37", "@TR:32,00", "@TG:C0"};
-  static constexpr const char *DONGLE_FULL_COMMANDS[] = {"@D1", "TY:", "@T1", "@t2:8100000000",
+  static constexpr const char *DONGLE_FULL_COMMANDS[] = {"@D1", "TY:", "@T1", "@t2:818811%04X0000",
                                                          "@t3", "@TR:37", "@TR:32,00", "@TG:C0"};
   static constexpr const char *NO_D1_COMMANDS[] = {"@TR:37", "@TR:32,00", "@TG:C0"};
 
@@ -8237,6 +8253,8 @@ const char *JuraComponent::dongle_startup_state_name_(DongleStartupState state) 
       return "wait_t2";
     case DongleStartupState::SEND_T2:
       return "send_t2";
+    case DongleStartupState::WAIT_26_REPLAY:
+      return "wait_26_replay";
     case DongleStartupState::WAIT_T3:
       return "wait_t3";
     case DongleStartupState::SEND_T3:
@@ -8313,6 +8331,21 @@ bool JuraComponent::send_dongle_startup_command_(const std::string &command, uin
 
   XML_STATS_LOGD("dongle_startup_tx cmd=%s mode=plaintext", command.c_str());
   return this->coffee_maker_->connection->write_decoded(framed);
+}
+
+bool JuraComponent::send_decoded_binary_line_(const uint8_t *data, size_t len, const char *source,
+                                              const char *reason) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr || data == nullptr || len == 0) {
+    return false;
+  }
+  std::vector<uint8_t> bytes(data, data + len);
+  std::string frame(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+  this->log_bluefrog_26_tx_(frame, source != nullptr ? source : "decoded_binary_line", esphome::millis());
+  ESP_LOGI(TAG, "send_decoded_binary_line source=%s reason=%s len=%u hex=\"%s\"",
+           source != nullptr ? source : "unknown", reason != nullptr ? reason : "unknown",
+           static_cast<unsigned>(bytes.size()), compact_hex_string(frame, frame.size()).c_str());
+  this->coffee_maker_->connection->set_next_tx_label(reason != nullptr ? reason : "decoded_binary_line");
+  return this->coffee_maker_->connection->write_decoded_no_flush(bytes);
 }
 
 bool JuraComponent::write_inner_uart0_command_(const std::string &command, uint32_t now, bool no_rx_flush) {
@@ -8501,6 +8534,10 @@ void JuraComponent::process_dongle_startup_rx_(uint32_t now) {
     XML_STATS_LOGD("dongle_startup_rx class=%s len=%u hex=\"%s\"",
              classify_xml_probe_response_(rx_line.data, true), static_cast<unsigned>(rx_line.data.size()),
              compact_hex_string(rx_line.data, rx_line.data.size()).c_str());
+    if (static_cast<uint8_t>(rx_line.data.front()) == 0x26) {
+      this->handle_bluefrog_26_frame_(rx_line.data, "machine_to_esp", "dongle_startup", now);
+      continue;
+    }
     if (is_inner_transport_start(static_cast<uint8_t>(rx_line.data.front())) && this->xml_decode_inner_transport_) {
       std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(rx_line.data);
       if (!candidates.empty() && !candidates.front().payload.empty()) {
@@ -8567,6 +8604,12 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       this->original_like_tr37_seen_ = false;
       this->original_like_tf_seen_ = false;
       this->original_like_tv_seen_ = false;
+      this->bluefrog_26_replay_active_ = false;
+      this->bluefrog_26_replay_response_seen_ = false;
+      this->bluefrog_26_replay_result_logged_ = false;
+      this->bluefrog_26_replay_rx_baseline_ = this->bluefrog_26_rx_machine_to_esp_count_;
+      this->bluefrog_26_replay_start_ms_ = 0;
+      this->bluefrog_26_replay_deadline_ms_ = 0;
       this->dongle_startup_rx_buffer_.clear();
       this->dongle_startup_probe_attempt_ = 0;
       this->dongle_startup_t1_attempt_ = 0;
@@ -8689,14 +8732,49 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         this->fail_dongle_startup_(now, "missing_t2_word");
         return false;
       }
-      const char *command = "@t2:8100000000";
+      char command[24];
+      std::snprintf(command, sizeof(command), "@t2:818811%04X0000", static_cast<unsigned>(this->startup_t2_word_));
       if (!this->send_dongle_startup_command_(command, now)) {
         this->fail_dongle_startup_(now, "send_t2_failed");
         return false;
       }
-      this->transition_dongle_startup_(DongleStartupState::WAIT_T3, now);
+      static constexpr uint8_t REPLAY_FRAME_1[] = {0x26, 0x85, 0x74, 0xBD, 0x75, 0xE5, 0x54, 0x0D, 0x0A};
+      static constexpr uint8_t REPLAY_FRAME_2[] = {
+          0x26, 0x1C, 0x0B, 0x6A, 0x29, 0xB0, 0xAA, 0x7C, 0x11, 0xDE, 0x0D, 0x0A};
+      this->bluefrog_26_replay_active_ = true;
+      this->bluefrog_26_replay_response_seen_ = false;
+      this->bluefrog_26_replay_result_logged_ = false;
+      this->bluefrog_26_replay_rx_baseline_ = this->bluefrog_26_rx_machine_to_esp_count_;
+      this->bluefrog_26_replay_start_ms_ = now;
+      this->bluefrog_26_replay_deadline_ms_ = now + kBluefrog26ReplayObserveMs;
+      ESP_LOGI(TAG, "bluefrog_26_tx_replay index=1 hex=26 85 74 BD 75 E5 54 0D 0A");
+      if (!this->send_decoded_binary_line_(REPLAY_FRAME_1, sizeof(REPLAY_FRAME_1), "dongle_startup_replay",
+                                           "bluefrog_26_replay_1")) {
+        this->fail_dongle_startup_(now, "send_26_replay_1_failed");
+        return false;
+      }
+      ESP_LOGI(TAG, "bluefrog_26_tx_replay index=2 hex=26 1C 0B 6A 29 B0 AA 7C 11 DE 0D 0A");
+      if (!this->send_decoded_binary_line_(REPLAY_FRAME_2, sizeof(REPLAY_FRAME_2), "dongle_startup_replay",
+                                           "bluefrog_26_replay_2")) {
+        this->fail_dongle_startup_(now, "send_26_replay_2_failed");
+        return false;
+      }
+      this->transition_dongle_startup_(DongleStartupState::WAIT_26_REPLAY, now);
       return false;
     }
+
+    case DongleStartupState::WAIT_26_REPLAY:
+      if (time_reached(now, this->bluefrog_26_replay_deadline_ms_)) {
+        if (!this->bluefrog_26_replay_response_seen_) {
+          this->bluefrog_26_replay_result_logged_ = true;
+          ESP_LOGI(TAG, "bluefrog_26_replay_result=no_machine_26_response rx_counter=%u observe_ms=%u",
+                   static_cast<unsigned>(this->bluefrog_26_rx_machine_to_esp_count_),
+                   static_cast<unsigned>(kBluefrog26ReplayObserveMs));
+        }
+        this->bluefrog_26_replay_active_ = false;
+        this->transition_dongle_startup_(DongleStartupState::WAIT_T3, now);
+      }
+      return false;
 
     case DongleStartupState::WAIT_T3:
       if ((this->dongle_events_ & DONGLE_EVENT_T3) != 0) {

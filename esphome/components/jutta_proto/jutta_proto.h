@@ -434,6 +434,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     SEND_T1,
     WAIT_T2,
     SEND_T2,
+    WAIT_26_REPLAY,
     WAIT_T3,
     SEND_T3,
     WAIT_T0_AFTER_T3,
@@ -574,6 +575,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void transition_dongle_startup_(DongleStartupState state, uint32_t now);
   bool process_dongle_startup_(uint32_t now);
   bool send_dongle_startup_command_(const std::string &command, uint32_t now, bool inner_uart0 = false);
+  bool send_decoded_binary_line_(const uint8_t *data, size_t len, const char *source, const char *reason);
   bool write_inner_uart0_command_(const std::string &command, uint32_t now, bool no_rx_flush = false);
   void fail_dongle_startup_(uint32_t now, const char *reason);
   void update_dongle_events_from_line_(const std::string &line);
@@ -764,6 +766,12 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string last_26_frame_hex_{};
   std::string passive_bluefrog_rx_buffer_{};
   uint32_t passive_bluefrog_rx_last_activity_ms_{0};
+  bool bluefrog_26_replay_active_{false};
+  bool bluefrog_26_replay_response_seen_{false};
+  bool bluefrog_26_replay_result_logged_{false};
+  uint32_t bluefrog_26_replay_rx_baseline_{0};
+  uint32_t bluefrog_26_replay_start_ms_{0};
+  uint32_t bluefrog_26_replay_deadline_ms_{0};
   bool machine_online_state_{false};
   bool machine_ready_state_{false};
   bool has_valid_tf_status_{false};
