@@ -40,10 +40,10 @@ jutta_proto:
   enable_bluefrog_26_replay: true
 ```
 
-Default is `false`. With replay disabled, the component keeps the existing classic startup path after
-`@t2:818811...0000`. With replay enabled, the component sends only the two captured decoded 0x26 frames, observes for
-machine 0x26 responses, and does not immediately fall through to the old `@t3` / `@TR:37` path after a successful 0x26
-response.
+Default is `false`. The replay code is intentionally isolated from the normal startup/statistics path. Normal startup
+keeps the existing classic path after `@t2:818811...0000`, and XML statistics must not depend on or be interrupted by
+the replay experiment. If the config flag is set while no explicit replay/debug path exists, startup logs that replay
+was not started because it is isolated from the startup/stats path.
 
 Reverse-map status:
 
