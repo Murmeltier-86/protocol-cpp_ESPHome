@@ -27,3 +27,27 @@ This produces:
 
 The sequence grouping is heuristic: Dongle-to-Machine `0x26` frames are marked as request/write candidates, and
 nearby Machine-to-Dongle frames are grouped as possible replies or status updates.
+
+## Current ESP runtime mode
+
+The post-startup live idle observe delay is disabled by default, so XML statistics are no longer held for 180 seconds
+after core startup. This keeps normal stats behavior available while the 0x26 runtime path is being investigated.
+
+The captured two-frame 0x26 replay is available only as an explicit diagnostic mode:
+
+```yaml
+jutta_proto:
+  enable_bluefrog_26_replay: true
+```
+
+Default is `false`. With replay disabled, the component keeps the existing classic startup path after
+`@t2:818811...0000`. With replay enabled, the component sends only the two captured decoded 0x26 frames, observes for
+machine 0x26 responses, and does not immediately fall through to the old `@t3` / `@TR:37` path after a successful 0x26
+response.
+
+Reverse-map status:
+
+- The replay responses seen so far decode as core/session lines such as `@tr:37`, `@T3`, and `@t0`.
+- `@TF` and `@TV` remain documented as machine-originated cachewriter frames, not as confirmed dongle queries.
+- The classic `00 7F 80` BLE follow-up path does not prove a UART `@TP` live trigger.
+- Non-printable 0x26 decode candidates are logged as possible binary/cache frames for later clustering.

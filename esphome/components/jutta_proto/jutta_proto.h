@@ -338,6 +338,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void set_live_db_status_response_timeout(uint32_t timeout_ms) {
     this->live_db_status_response_timeout_ms_ = timeout_ms;
   }
+  void set_enable_bluefrog_26_replay(bool enabled) { this->enable_bluefrog_26_replay_ = enabled; }
   void set_allow_unsafe_debug_commands(bool allow) {
     (void) allow;
     this->allow_unsafe_debug_commands_ = false;
@@ -796,6 +797,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t live_db_status_response_timeout_ms_{1200};
   uint32_t live_db_status_next_poll_ms_{0};
   uint32_t live_db_status_after_stats_hold_until_ms_{0};
+  bool enable_bluefrog_26_replay_{false};
   uint32_t status_probe_interval_ms_{300000};
   bool allow_unsafe_debug_commands_{false};
   uint32_t status_probe_next_ms_{0};

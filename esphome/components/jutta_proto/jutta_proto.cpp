@@ -62,8 +62,8 @@ constexpr size_t kDongleStartupMaxRxBytes = 512;
 constexpr uint8_t kDongleStartupMaxProbeAttempts = 6;
 constexpr uint8_t kDongleStartupMaxT1Attempts = 6;
 constexpr uint8_t kDongleStartupMaxTr37Attempts = 3;
-constexpr uint32_t kPostStartupLiveIdleObserveMs = 180000;
-constexpr bool kDelayBootStatsForLiveObserve = true;
+constexpr uint32_t kPostStartupLiveIdleObserveMs = 0;
+constexpr bool kDelayBootStatsForLiveObserve = false;
 constexpr uint32_t DONGLE_EVENT_TY = 0x01;
 constexpr uint32_t DONGLE_EVENT_T0 = 0x02;
 constexpr uint32_t DONGLE_EVENT_T1 = 0x04;
@@ -223,6 +223,12 @@ std::string compact_hex_string(const std::string &value, size_t max_bytes = 64) 
   if (value.size() > max_bytes) {
     stream << " ...";
   }
+  return stream.str();
+}
+
+std::string bluefrog_26_cluster_key(const std::string &value) {
+  std::ostringstream stream;
+  stream << "len=" << value.size() << " prefix=" << compact_hex_string(value, 10);
   return stream.str();
 }
 
@@ -2204,6 +2210,7 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
                                  this->last_26_frame_hex_);
   this->publish_text_if_changed_(this->live_db_status_last_update_sensor_, this->current_live_db_status_last_update_,
                                  "millis=" + std::to_string(now));
+  const std::string cluster = bluefrog_26_cluster_key(frame);
 
   std::string ascii_preview;
   for (unsigned char c : frame) {
@@ -2217,6 +2224,8 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
            static_cast<unsigned>(now), static_cast<unsigned>(frame.size()), this->last_26_frame_hex_.c_str(),
            sanitize_text_for_api(ascii_preview).c_str(),
            static_cast<unsigned>(this->bluefrog_26_rx_machine_to_esp_count_));
+  ESP_LOGI(TAG, "bluefrog_26_response_cluster direction=%s source=%s cluster=\"%s\"",
+           direction != nullptr ? direction : "unknown", source != nullptr ? source : "unknown", cluster.c_str());
 
   const std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(frame);
   const InnerTransportDecodeResult *selected = nullptr;
@@ -2237,8 +2246,20 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
     ++this->bluefrog_26_unknown_count_;
     this->publish_text_if_changed_(this->live_db_status_source_sensor_, this->current_live_db_status_source_,
                                    "unknown_26_frame");
-    ESP_LOGI(TAG, "bluefrog_26_class direction=%s class=unknown decoded=NO unknown_count=%u",
-             direction != nullptr ? direction : "unknown", static_cast<unsigned>(this->bluefrog_26_unknown_count_));
+    bool has_binary_candidate = false;
+    for (const auto &candidate : candidates) {
+      if (!candidate.payload.empty()) {
+        has_binary_candidate = true;
+        break;
+      }
+    }
+    ESP_LOGI(TAG,
+             "bluefrog_26_class direction=%s class=%s decoded=NO unknown_count=%u maybe_binary_cacheframe=%s",
+             direction != nullptr ? direction : "unknown",
+             has_binary_candidate ? "binary_or_nonprintable" : "unknown", static_cast<unsigned>(this->bluefrog_26_unknown_count_),
+             YESNO(has_binary_candidate));
+    ESP_LOGI(TAG, "bluefrog_26_decoded_class class=%s decoded=NO cluster=\"%s\"",
+             has_binary_candidate ? "binary_or_nonprintable" : "unknown", cluster.c_str());
     return false;
   }
 
@@ -2258,6 +2279,10 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
   ESP_LOGI(TAG, "bluefrog_26_decoded direction=%s table=%s class=%s line=\"%s\"",
            direction != nullptr ? direction : "unknown", selected->table_name, klass,
            transport_payload_log_text(decoded).c_str());
+  ESP_LOGI(TAG, "bluefrog_26_decoded_line table=%s line=\"%s\" known_ascii=%s",
+           selected->table_name, transport_payload_log_text(decoded).c_str(), YESNO(!decoded.empty() && decoded[0] == '@'));
+  ESP_LOGI(TAG, "bluefrog_26_decoded_class class=%s table=%s cluster=\"%s\"", klass, selected->table_name,
+           cluster.c_str());
   this->publish_text_if_changed_(this->live_db_status_source_sensor_, this->current_live_db_status_source_, klass);
 
   this->update_dongle_events_from_line_(decoded);
@@ -2279,9 +2304,13 @@ void JuraComponent::log_bluefrog_26_tx_(const std::string &frame, const char *so
     return;
   }
   ++this->bluefrog_26_tx_esp_to_machine_count_;
+  const std::string cluster = bluefrog_26_cluster_key(frame);
   ESP_LOGI(TAG, "bluefrog_26_frame direction=esp_to_machine source=%s time_ms=%u len=%u hex=\"%s\" tx_count=%u",
            source != nullptr ? source : "unknown", static_cast<unsigned>(now), static_cast<unsigned>(frame.size()),
            compact_hex_string(frame, 96).c_str(), static_cast<unsigned>(this->bluefrog_26_tx_esp_to_machine_count_));
+  ESP_LOGI(TAG, "bluefrog_26_request_cluster source=%s cluster=\"%s\" tx_count=%u",
+           source != nullptr ? source : "unknown", cluster.c_str(),
+           static_cast<unsigned>(this->bluefrog_26_tx_esp_to_machine_count_));
 }
 
 void JuraComponent::publish_text_if_changed_(text_sensor::TextSensor *sensor, std::string &last_value,
@@ -7529,7 +7558,7 @@ void JuraComponent::process_xml_polling() {
     this->process_dongle_startup_(now);
     return;
   }
-  if (this->xml_dongle_startup_ && this->stats_session_ready_ && this->xml_stats_cycle_id_ == 0 &&
+  if (kDelayBootStatsForLiveObserve && this->xml_dongle_startup_ && this->stats_session_ready_ && this->xml_stats_cycle_id_ == 0 &&
       !this->live_idle_observe_active_ && !this->live_idle_observe_done_) {
     this->start_live_idle_observe_after_startup_(now);
   }
@@ -8738,6 +8767,10 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         this->fail_dongle_startup_(now, "send_t2_failed");
         return false;
       }
+      if (!this->enable_bluefrog_26_replay_) {
+        this->transition_dongle_startup_(DongleStartupState::WAIT_T3, now);
+        return false;
+      }
       static constexpr uint8_t REPLAY_FRAME_1[] = {0x26, 0x85, 0x74, 0xBD, 0x75, 0xE5, 0x54, 0x0D, 0x0A};
       static constexpr uint8_t REPLAY_FRAME_2[] = {
           0x26, 0x1C, 0x0B, 0x6A, 0x29, 0xB0, 0xAA, 0x7C, 0x11, 0xDE, 0x0D, 0x0A};
@@ -8772,7 +8805,18 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
                    static_cast<unsigned>(kBluefrog26ReplayObserveMs));
         }
         this->bluefrog_26_replay_active_ = false;
-        this->transition_dongle_startup_(DongleStartupState::WAIT_T3, now);
+        if (this->bluefrog_26_replay_response_seen_) {
+          this->stats_session_ready_ = true;
+          this->stats_inner_tx_required_ = true;
+          this->post_gate_tx_ready_event_ = true;
+          this->transition_dongle_startup_(DongleStartupState::READY, now);
+        } else {
+          this->stats_session_ready_ = false;
+          this->stats_inner_tx_required_ = false;
+          this->post_gate_tx_ready_event_ = true;
+          this->dongle_startup_next_retry_ms_ = 0;
+          this->transition_dongle_startup_(DongleStartupState::FAILED, now);
+        }
       }
       return false;
 
