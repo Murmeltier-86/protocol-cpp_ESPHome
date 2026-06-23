@@ -528,6 +528,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void finish_debug_command_(uint32_t now, const char *result);
   void log_status_forensics_frame_(const std::string &raw, const char *source);
   void log_status_forensics_decoded_(const std::string &line, const char *source, const char *table_name);
+  void process_passive_bluefrog_rx_(uint32_t now);
+  bool handle_bluefrog_26_frame_(const std::string &frame, const char *direction, const char *source, uint32_t now);
+  void log_bluefrog_26_tx_(const std::string &frame, const char *source, uint32_t now);
   bool handle_live_db_transport_frame_(const std::string &response);
   void publish_live_db_status_raw_(const std::string &response, const char *parser_branch);
   void publish_live_db_status_decoded_(const std::string &summary, const std::string &table_trace);
@@ -754,6 +757,13 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   std::string current_live_db_status_decoded_{};
   std::string current_live_db_status_source_{};
   std::string current_live_db_status_last_update_{};
+  uint32_t last_26_rx_time_ms_{0};
+  uint32_t bluefrog_26_rx_machine_to_esp_count_{0};
+  uint32_t bluefrog_26_tx_esp_to_machine_count_{0};
+  uint32_t bluefrog_26_unknown_count_{0};
+  std::string last_26_frame_hex_{};
+  std::string passive_bluefrog_rx_buffer_{};
+  uint32_t passive_bluefrog_rx_last_activity_ms_{0};
   bool machine_online_state_{false};
   bool machine_ready_state_{false};
   bool has_valid_tf_status_{false};

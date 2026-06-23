@@ -1682,6 +1682,7 @@ void JuraComponent::loop() {
       this->coffee_maker_->connection->process_tx_queue();
     }
     this->coffee_maker_->loop();
+    this->process_passive_bluefrog_rx_(esphome::millis());
     if (!this->coffee_maker_->is_locked()) {
       this->custom_cancel_flag_ = false;
     }
@@ -1923,8 +1924,8 @@ void JuraComponent::process_handshake() {
       break;
     }
     case HandshakeStage::SEND_T2: {
-      ESP_LOGD(TAG, "SEND_T2: sending '@t2:8120000000\\r\\n'.");
-      if (this->connection_->write_decoded("@t2:8120000000\r\n")) {
+      ESP_LOGD(TAG, "SEND_T2: sending '@t2:8100000000\\r\\n'.");
+      if (this->connection_->write_decoded("@t2:8100000000\r\n")) {
         ESP_LOGD(TAG, "Sent @t2 response.");
         this->handshake_stage_ = HandshakeStage::WAIT_T3;
         this->handshake_buffer_.clear();
@@ -2056,6 +2057,10 @@ bool JuraComponent::time_reached(uint32_t now, uint32_t target) {
 void JuraComponent::handle_decoded_response_(const std::string &response, const char *parser_branch) {
   this->publish_raw_rx_(response, parser_branch);
   this->publish_machine_online_(true);
+  if (!response.empty() && static_cast<uint8_t>(response.front()) == 0x26) {
+    this->handle_bluefrog_26_frame_(response, "machine_to_esp", parser_branch, esphome::millis());
+    return;
+  }
   this->update_dongle_events_from_line_(response);
 
   std::string lowered = response;
@@ -2111,6 +2116,159 @@ void JuraComponent::handle_decoded_response_(const std::string &response, const 
     this->handle_live_db_transport_frame_(response);
     return;
   }
+}
+
+void JuraComponent::process_passive_bluefrog_rx_(uint32_t now) {
+  if (this->coffee_maker_ == nullptr || this->coffee_maker_->connection == nullptr) {
+    return;
+  }
+  if (this->coffee_maker_->is_locked() || this->xml_inflight_ || this->db_transaction_owner_ != DbTransactionOwner::NONE ||
+      this->manual_handshake_probe_state_ != ManualHandshakeProbeState::IDLE ||
+      this->status_probe_state_ != StatusProbeState::IDLE ||
+      this->debug_command_state_ != DebugCommandState::IDLE ||
+      this->xml_session_probe_state_ != XmlSessionProbeState::IDLE ||
+      this->xml_command_probe_state_ != XmlCommandProbeState::IDLE) {
+    return;
+  }
+
+  std::vector<uint8_t> chunk;
+  while (this->coffee_maker_->connection->read_decoded(chunk) && !chunk.empty()) {
+    this->passive_bluefrog_rx_buffer_.append(reinterpret_cast<const char *>(chunk.data()), chunk.size());
+    this->passive_bluefrog_rx_last_activity_ms_ = now;
+    chunk.clear();
+  }
+
+  if (this->passive_bluefrog_rx_buffer_.empty()) {
+    return;
+  }
+
+  std::string line;
+  while (true) {
+    auto terminator = this->passive_bluefrog_rx_buffer_.find("\r\n");
+    if (terminator == std::string::npos) {
+      break;
+    }
+    line = this->passive_bluefrog_rx_buffer_.substr(0, terminator);
+    this->passive_bluefrog_rx_buffer_.erase(0, terminator + 2);
+    if (line.empty()) {
+      continue;
+    }
+    if (static_cast<uint8_t>(line.front()) == 0x26) {
+      this->handle_bluefrog_26_frame_(line, "machine_to_esp", "passive_crlf", now);
+    } else if (this->is_printable_status_text_(line)) {
+      this->handle_decoded_response_(line, "passive_line");
+    } else {
+      ESP_LOGD(TAG, "passive_rx_unknown len=%u hex=\"%s\"", static_cast<unsigned>(line.size()),
+               compact_hex_string(line, 96).c_str());
+    }
+  }
+
+  if (this->passive_bluefrog_rx_buffer_.empty()) {
+    return;
+  }
+  if (static_cast<uint8_t>(this->passive_bluefrog_rx_buffer_.front()) == 0x26 &&
+      this->passive_bluefrog_rx_last_activity_ms_ != 0 &&
+      time_reached(now, this->passive_bluefrog_rx_last_activity_ms_ + 15U)) {
+    std::string frame = this->passive_bluefrog_rx_buffer_;
+    this->passive_bluefrog_rx_buffer_.clear();
+    this->handle_bluefrog_26_frame_(frame, "machine_to_esp", "passive_gap", now);
+  } else if (this->passive_bluefrog_rx_buffer_.size() > 512U) {
+    ESP_LOGW(TAG, "passive_rx_drop reason=buffer_overflow len=%u hex=\"%s\"",
+             static_cast<unsigned>(this->passive_bluefrog_rx_buffer_.size()),
+             compact_hex_string(this->passive_bluefrog_rx_buffer_, 96).c_str());
+    this->passive_bluefrog_rx_buffer_.clear();
+  }
+}
+
+bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const char *direction, const char *source,
+                                              uint32_t now) {
+  if (frame.empty() || static_cast<uint8_t>(frame.front()) != 0x26) {
+    return false;
+  }
+  ++this->bluefrog_26_rx_machine_to_esp_count_;
+  this->last_26_rx_time_ms_ = now;
+  this->last_26_frame_hex_ = compact_hex_string(frame, 96);
+  this->publish_text_if_changed_(this->live_db_status_raw_hex_sensor_, this->current_live_db_status_raw_hex_,
+                                 this->last_26_frame_hex_);
+  this->publish_text_if_changed_(this->live_db_status_last_update_sensor_, this->current_live_db_status_last_update_,
+                                 "millis=" + std::to_string(now));
+
+  std::string ascii_preview;
+  for (unsigned char c : frame) {
+    ascii_preview.push_back((c >= 0x20 && c <= 0x7E) ? static_cast<char>(c) : '.');
+    if (ascii_preview.size() >= 64U) {
+      break;
+    }
+  }
+  ESP_LOGI(TAG, "bluefrog_26_frame direction=%s source=%s time_ms=%u len=%u hex=\"%s\" ascii_preview=\"%s\"",
+           direction != nullptr ? direction : "unknown", source != nullptr ? source : "unknown",
+           static_cast<unsigned>(now), static_cast<unsigned>(frame.size()), this->last_26_frame_hex_.c_str(),
+           sanitize_text_for_api(ascii_preview).c_str());
+
+  const std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(frame);
+  const InnerTransportDecodeResult *selected = nullptr;
+  for (const auto &candidate : candidates) {
+    if (candidate.payload.empty() || !is_printable_transport_payload(candidate.payload)) {
+      continue;
+    }
+    if (std::strcmp(candidate.table_name, "uart_mode0") == 0) {
+      selected = &candidate;
+      break;
+    }
+    if (selected == nullptr) {
+      selected = &candidate;
+    }
+  }
+
+  if (selected == nullptr) {
+    ++this->bluefrog_26_unknown_count_;
+    this->publish_text_if_changed_(this->live_db_status_source_sensor_, this->current_live_db_status_source_,
+                                   "unknown_26_frame");
+    ESP_LOGI(TAG, "bluefrog_26_class direction=%s class=unknown decoded=NO unknown_count=%u",
+             direction != nullptr ? direction : "unknown", static_cast<unsigned>(this->bluefrog_26_unknown_count_));
+    return false;
+  }
+
+  const std::string decoded = selected->payload;
+  const std::string lower = lower_trimmed_transport_payload(decoded);
+  const char *klass = "decoded_other";
+  if (lower.rfind("@tf", 0) == 0) {
+    klass = "cachewriter_tf";
+  } else if (lower.rfind("@tv", 0) == 0) {
+    klass = "cachewriter_tv";
+  } else if (is_live_poll_control_or_handshake_frame(decoded)) {
+    klass = "control_or_handshake";
+  } else if (lower.rfind("@t", 0) == 0 || lower.rfind("@h", 0) == 0 || lower.rfind("@g", 0) == 0) {
+    klass = "machine_protocol";
+  }
+
+  ESP_LOGI(TAG, "bluefrog_26_decoded direction=%s table=%s class=%s line=\"%s\"",
+           direction != nullptr ? direction : "unknown", selected->table_name, klass,
+           transport_payload_log_text(decoded).c_str());
+  this->publish_text_if_changed_(this->live_db_status_source_sensor_, this->current_live_db_status_source_, klass);
+
+  this->update_dongle_events_from_line_(decoded);
+  if (lower.rfind("@tf", 0) == 0) {
+    this->publish_tf_status_(decoded);
+    this->note_live_idle_observe_cachewriter_("rx_TF", now);
+    return true;
+  }
+  if (lower.rfind("@tv", 0) == 0) {
+    this->handle_tv_progress_(decoded);
+    this->note_live_idle_observe_cachewriter_("rx_TV", now);
+    return true;
+  }
+  return true;
+}
+
+void JuraComponent::log_bluefrog_26_tx_(const std::string &frame, const char *source, uint32_t now) {
+  if (frame.empty() || static_cast<uint8_t>(frame.front()) != 0x26) {
+    return;
+  }
+  ++this->bluefrog_26_tx_esp_to_machine_count_;
+  ESP_LOGI(TAG, "bluefrog_26_frame direction=esp_to_machine source=%s time_ms=%u len=%u hex=\"%s\" tx_count=%u",
+           source != nullptr ? source : "unknown", static_cast<unsigned>(now), static_cast<unsigned>(frame.size()),
+           compact_hex_string(frame, 96).c_str(), static_cast<unsigned>(this->bluefrog_26_tx_esp_to_machine_count_));
 }
 
 void JuraComponent::publish_text_if_changed_(text_sensor::TextSensor *sensor, std::string &last_value,
@@ -4258,6 +4416,14 @@ void JuraComponent::log_original_like_session_summary_(const char *context) {
            (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_CORE_LATCH) != 0 ? 1 : 0,
            this->original_like_tr37_seen_ ? 1 : 0, this->original_like_tf_seen_ ? 1 : 0,
            this->original_like_tv_seen_ ? 1 : 0, join_values(missing, ",").c_str());
+  ESP_LOGI(TAG,
+           "bluefrog_26_session_summary context=%s rx_machine_to_esp=%u tx_esp_to_machine=%u unknown=%u "
+           "last_rx_ms=%u last_hex=\"%s\"",
+           context != nullptr ? context : "unknown",
+           static_cast<unsigned>(this->bluefrog_26_rx_machine_to_esp_count_),
+           static_cast<unsigned>(this->bluefrog_26_tx_esp_to_machine_count_),
+           static_cast<unsigned>(this->bluefrog_26_unknown_count_), static_cast<unsigned>(this->last_26_rx_time_ms_),
+           this->last_26_frame_hex_.c_str());
 }
 
 void JuraComponent::log_original_like_core_session_diff_() {
@@ -7824,7 +7990,7 @@ size_t JuraComponent::xml_session_probe_command_count_() const {
 
 const char *JuraComponent::xml_session_probe_command_(size_t index) const {
   static constexpr const char *MINIMAL_COMMANDS[] = {"@D1", "@TR:37", "@TR:32,00", "@TG:C0"};
-  static constexpr const char *DONGLE_FULL_COMMANDS[] = {"@D1", "TY:", "@T1", "@t2:818811%04X0000",
+  static constexpr const char *DONGLE_FULL_COMMANDS[] = {"@D1", "TY:", "@T1", "@t2:8100000000",
                                                          "@t3", "@TR:37", "@TR:32,00", "@TG:C0"};
   static constexpr const char *NO_D1_COMMANDS[] = {"@TR:37", "@TR:32,00", "@TG:C0"};
 
@@ -8171,6 +8337,7 @@ bool JuraComponent::write_inner_uart0_command_(const std::string &command, uint3
   }
 
   std::string encoded_text(encoded.begin(), encoded.end());
+  this->log_bluefrog_26_tx_(encoded_text, "inner_uart0_tx", now);
   if (this->xml_dongle_inner_tx_debug_) {
     XML_STATS_LOGD("inner_tx_plain cmd=\"%s\" plain_hex=\"%s\"", command.c_str(),
              compact_hex_string(framed, framed.size()).c_str());
@@ -8522,8 +8689,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         this->fail_dongle_startup_(now, "missing_t2_word");
         return false;
       }
-      char command[24];
-      std::snprintf(command, sizeof(command), "@t2:818811%04X0000", static_cast<unsigned>(this->startup_t2_word_));
+      const char *command = "@t2:8100000000";
       if (!this->send_dongle_startup_command_(command, now)) {
         this->fail_dongle_startup_(now, "send_t2_failed");
         return false;

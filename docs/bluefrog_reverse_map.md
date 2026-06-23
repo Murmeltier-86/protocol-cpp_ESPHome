@@ -2037,6 +2037,467 @@ unresolved_sequence_blockers:
   do_not_use_as_original_bluefrog_evidence: YES
 ```
 
+### 17.x `@TP` / stayInBLE Path Analysis
+
+Scope of this pass:
+
+```text
+only_static_analysis: YES
+esp_code_changes: NO
+runtime_tests: NO
+new_tx_logic: NO
+focus: BLE 0x1529 payload 00 7F 80 -> @TP:...
+```
+
+#### `@TP:` TX path
+
+```text
+tp_path_analysis:
+  tp_literal_addr: 0x00024a20
+  tx_callsite_addresses:
+    - 0x0001c358
+  sender_helper: machine_uart_send_prefix_hex_line
+  source_ble_characteristic: 0x1529 PMode / Control Write
+  source_ble_payloads:
+    - 00 7F 80: stayInBLE / heartbeat path
+    - 00 7F A5: DFU / bootloader path, dangerous
+    - 00 4D ...: PMode/settings path, state-changing
+    - 00 47 01: process next/OK style path, state-changing
+    - 00 47 FF: process cancel/back style path, state-changing
+    - 00 7F 82 ...: PIN/auth path
+  path_for_payload_00_7F_80:
+    callback: ble_char_1529_pmode_write_callback @ 0x00018900
+    copied_to:
+      - machine_cache_base+0x26, based on previous decompilation notes
+      - exact field name remains inferred because the descriptor/state struct is not fully typed
+    length_handling:
+      - payload is staged as a short 0x1529 control payload
+      - previous notes indicate the last byte is separated as followup byte 0x80
+    followup_call:
+      - pmode_write_followup_or_cache_notify @ 0x00017ef4, called with the final byte such as 0x80
+    flags_or_state_set:
+      - statepump dynamic/control branch later becomes eligible
+      - exact bit/field producer is not fully isolated in this pass
+    statepump_branch:
+      - bluefrog_machine_state_pump emits the dynamic @TP: prefix branch
+      - callsite 0x0001c358 uses literal @TP: at 0x00024a20
+    tx_format:
+      - machine_uart_send_prefix_hex_line("@TP:", payload, length)
+      - observed/reconstructed family: @TP:<key>7F
+    produced_machine_line_example:
+      - @TP:<key>7F
+      - ESP-side diagnostics currently format this as @TP:%02X7F using pmode_key_
+    confidence: PARTIAL
+```
+
+Important distinction:
+
+```text
+@TP: is confirmed as a machine-TX frame family in the original BLE firmware.
+The path from BLE 0x1529 payload 00 7F 80 to a one-byte/short @TP payload is
+strongly indicated by the callback/followup/statepump notes, but the exact
+state field that arms the statepump branch remains partially unresolved.
+```
+
+#### Concrete `00 7F 80` to machine line
+
+```text
+tp_007f80_to_machine_line:
+  resolved: PARTIAL
+  cleartext_line_template: @TP:<key>7F
+  key_source:
+    - unresolved in original firmware
+    - likely a session/PMode key byte from the BLE/control state or machine/session cache
+    - ESP diagnostics use pmode_key_ when manually formatting @TP:%02X7F
+  payload_bytes_consumed:
+    - 00: BLE/control-family selector, not emitted as visible @TP payload
+    - 7F: retained in the visible machine payload as trailing 7F
+    - 80: followup/stayInBLE marker consumed by pmode_write_followup_or_cache_notify
+  payload_bytes_not_sent:
+    - 00 is not visible in @TP:<key>7F
+    - 80 is not visible in @TP:<key>7F in the current reconstruction
+  encoded:
+    - sent through machine_uart_send_prefix_hex_line
+    - that helper ultimately uses machine_uart_send_line_encoded, so transport encoding depends on active gate/session state
+  required_prior_state:
+    - BLE 0x1529 write received
+    - post-gate/session state likely required for encoded machine UART transport
+    - exact statepump arm bit/field for @TP branch is not fully isolated
+  confidence: PARTIAL
+```
+
+Current unresolved key question:
+
+```text
+tp_key_source_resolved: PARTIAL
+known:
+  - ESP-side implementation derives the line from pmode_key_.
+  - Original firmware sends @TP: through a prefix+hex helper, so the key is a byte payload source rather than part of the literal.
+unknown:
+  - whether <key> is copied from BLE payload state, machine_cache_base, a session byte, or another control-state field.
+```
+
+#### Safety classification
+
+```text
+tp_payload_safety_table:
+  - payload: 00 7F 80
+    meaning: stayInBLE / heartbeat / keep BLE-app mode alive
+    resulting_machine_tx: @TP:<key>7F
+    state_changing: NO_OR_LOW, based on app heartbeat semantics
+    dangerous: NO
+    safe_to_consider_for_emulation: YES_FOR_FUTURE_RUNTIME_TEST_ONLY
+    confidence: PARTIAL
+
+  - payload: 00 7F A5
+    meaning: DFU / bootloader
+    resulting_machine_tx: not required for this pass; app path reaches bootloader mode
+    state_changing: YES
+    dangerous: YES
+    safe_to_consider_for_emulation: NO
+    confidence: confirmed_app_and_reverse_map
+
+  - payload: 00 4D ...
+    meaning: PMode/settings/product/limit style control
+    resulting_machine_tx: PMode/control dependent, not a status heartbeat
+    state_changing: YES
+    dangerous: UNKNOWN_BY_PAYLOAD, treat as unsafe unless fully decoded
+    safe_to_consider_for_emulation: NO
+    confidence: confirmed_family
+
+  - payload: 00 47 01
+    meaning: process next/OK/navigation
+    resulting_machine_tx: process/control dependent
+    state_changing: YES
+    dangerous: POSSIBLE_PROCESS_ACTION
+    safe_to_consider_for_emulation: NO
+    confidence: confirmed_family
+
+  - payload: 00 47 FF
+    meaning: process cancel/back/navigation
+    resulting_machine_tx: process/control dependent
+    state_changing: YES
+    dangerous: POSSIBLE_PROCESS_ACTION
+    safe_to_consider_for_emulation: NO
+    confidence: confirmed_family
+
+  - payload: 00 7F 82 ...
+    meaning: PIN/auth
+    resulting_machine_tx: auth/control dependent
+    state_changing: YES_OR_AUTH_STATE
+    dangerous: UNKNOWN
+    safe_to_consider_for_emulation: NO
+    confidence: confirmed_family
+```
+
+#### Relation to `@TF/@TV`
+
+```text
+tp_to_live_status_relation:
+  direct_tf_tv_trigger_found: NO
+  indirect_gate_or_mode_relation_found: PARTIAL
+  affects_flags_88:
+    - no confirmed direct write to flags_88 0x04/0x100/0x200/0x40 from @TP:<key>7F in the documented path
+    - @TP belongs to the post-gate BLE app/control keepalive family, not the core TY/T2/T3/TR37 gate chain
+  affects_machine_cache:
+    - 0x1529 callback stages control payload near machine_cache_base+0x26 per previous decompilation notes
+    - no confirmed direct write to the 0x1524/0x1527 cache value buffers from stayInBLE
+  affects_ble_cache:
+    - no confirmed direct call to copy_machine_cache_to_ble_value_buffer(0/1)
+    - no confirmed direct ble_characteristic_event_dispatch(0x1524/0x1527)
+  likely_role:
+    - BLE app heartbeat / stay-in-BLE mode keepalive
+    - plausible missing app-presence signal after successful core gate
+    - not statically proven as the cause of machine-originated @TF/@TV emission
+  confidence: PARTIAL
+```
+
+Working conclusion:
+
+```text
+@TP:<key>7F remains the most plausible missing app-presence/heartbeat frame
+because it is an original-known frame family and the classic app writes
+00 7F 80 periodically. However, static analysis does not show it directly
+triggering @TF/@TV or updating BLE status/progress caches. If tested later,
+it should be a narrow runtime test of only 00 7F 80 / @TP:<key>7F, explicitly
+excluding 00 7F A5, 00 4D..., 00 47..., PIN/auth, DFU, product, process, and
+settings payloads.
+```
+
+ESP comparison:
+
+```text
+esp_current_normal_startup_missing_tp: YES
+startup_sequence_diff_original_vs_esp:
+  missing_in_esp_normal includes @TP:
+runtime_changes_added_in_this_analysis: NO
+esp_code_changes_added_in_this_analysis: NO
+```
+
+#### `@TP` blocker refinement: key source and statepump arm field
+
+This pass narrows the two remaining static blockers without changing ESP code or
+adding runtime tests.
+
+```text
+tp_key_source_trace:
+  resolved: PARTIAL
+  source_buffer: machine_cache_base+0x26
+  source_length_field: machine_cache_base+0x39
+  payload_007f80_after_callback:
+    - ble_char_1529_pmode_write_callback @ 0x00018900 caps len to 0x13
+    - copies payload bytes to machine_cache_base+0x26
+    - writes original/capped length to machine_cache_base+0x39
+    - because payload[0] == 0, decrements length from 3 to 2
+    - calls pmode_write_followup_or_cache_notify @ 0x00017ef4 with payload[2] = 0x80
+  bytes_used_for_machine_tx:
+    - statepump @TP branch uses machine_cache_base+0x26 and length machine_cache_base+0x39
+    - for staged 00 7F 80 the would-be prefix+hex payload is 00 7F if the @TP branch were armed
+  bytes_not_sent:
+    - 0x80 is consumed by pmode_write_followup_or_cache_notify, not included in the prefix+hex length
+  key_byte_source:
+    - first emitted byte would be machine_cache_base+0x26[0], copied from BLE payload[0]
+    - for exact payload 00 7F 80 this byte is 0x00, not a separately proven session/random key
+  value_byte_source:
+    - second emitted byte would be machine_cache_base+0x26[1], copied from BLE payload[1] = 0x7F
+  cleartext_line_template:
+    - @TP:<hex(machine_cache_base+0x26, machine_cache_base+0x39)>
+    - exact staged 00 7F 80 would format as @TP:007F only if the statepump arm bit is set
+  example_if_payload_00_7F_80:
+    - staged_buffer: 00 7F 80
+    - stored_length_after_callback: 2
+    - followup_byte: 80
+    - would_be_machine_line_if_armed: @TP:007F
+  confidence: confirmed_code_for_buffer_and_length, partial_for_actual_007f80_tx
+```
+
+Important correction to the earlier reconstruction:
+
+```text
+The exact BLE payload 00 7F 80 is confirmed to stage 00 7F and consume 80 as
+the followup byte. However, the visible 0x1529 callback path does not set the
+@TP statepump arm bit when payload[0] == 0. Therefore the earlier shorthand
+"00 7F 80 -> @TP:<key>7F" is not fully proven and is likely too broad.
+```
+
+```text
+tp_statepump_arm_trace:
+  resolved: YES
+  statepump_branch_addr:
+    - test: 0x0001c2a2..0x0001c2a6
+    - tx: 0x0001c346..0x0001c358
+  branch_condition:
+    - bluefrog_state_flags_88 bit 0x00010000 set
+    - instruction pattern: ldr flags_88; lsls r2, flags_88, #0xf; bmi @TP_tx
+  arm_field: bluefrog_state_flags_88 mask 0x00010000
+  arm_writer_from_0x1529:
+    - 0x00018942 branch when staged payload[0] != 0
+    - calls 0x0001a67c
+    - 0x0001a67c ORs bluefrog_state_flags_88 with (0x80 << 9) = 0x00010000
+  clear_after_tx:
+    - 0x0001c346..0x0001c34e clears bit with mask 0xfffeffff
+  retry_or_counter:
+    - none visible in the @TP branch itself
+  tx_callsite: 0x0001c358
+  sender_helper: machine_uart_send_prefix_hex_line @ 0x00016da4
+  confidence: confirmed_code
+```
+
+```text
+tp_origin_classification:
+  self_started_without_ble_write: NO
+  requires_ble_1529_write: YES
+  app_stayinble_write_required: NO_OR_UNPROVEN_FOR_MACHINE_TX
+  evidence:
+    - @TP branch is armed by 0x1529 callback path via 0x0001a67c when payload[0] != 0
+    - no startup/self-timer writer to flags_88 0x00010000 was found in this focused pass
+    - exact 00 7F 80 path takes the payload[0] == 0 branch and calls 0x00017ef4 instead of 0x0001a67c
+  confidence: confirmed_code_for_ble_write_origin, partial_for_app_stayinble_semantics
+```
+
+```text
+tp_single_test_safety:
+  safe_to_consider: PARTIAL
+  dangerous_payloads_excluded:
+    - 00 7F A5 / DFU bootloader
+    - 00 4D... / PMode settings
+    - 00 47... / process navigation
+    - 00 7F 82... / PIN/auth
+  could_enter_dfu: NO for exact 00 7F 80 path; YES for 00 7F A5, which remains excluded
+  could_change_settings: UNKNOWN for the broad 0x1529 family, NO evidence for exact 00 7F 80
+  expected_machine_response:
+    - no direct response proven for exact 00 7F 80
+    - no direct @TF/@TV trigger proven
+  rollback_needed: NO for analysis only; no runtime action taken
+  confidence: PARTIAL
+```
+
+```text
+tp_indirect_live_relation:
+  direct_tf_tv_trigger_found: NO
+  indirect_mode_relation_found: PARTIAL
+  affected_flags_88:
+    - @TP machine TX branch: flags_88 0x00010000, but exact 00 7F 80 does not visibly arm it
+    - no confirmed effect on core flags_88 0x04/0x100/0x200/0x40
+  affected_machine_cache_fields:
+    - machine_cache_base+0x26: staged 0x1529 payload buffer
+    - machine_cache_base+0x39: staged payload length, shortened by one for payload[0] == 0
+  affected_ble_fields:
+    - pmode_write_followup_or_cache_notify @ 0x00017ef4 stores followup byte via 0x00019e8c
+    - then dispatches BLE characteristic events 0x1524, 0x1527, 0x1534, 0x1533, 0x1538, 0x1532, 0x1535
+    - this is an app/cache notification side effect, not a proven machine live-status request
+  likely_role:
+    - 0x1529 control/PMode/app-presence family
+    - exact 00 7F 80 looks more like a local BLE/app-mode followup + characteristic event path than a confirmed @TP machine TX
+  confidence: PARTIAL
+```
+
+Remaining focused blockers after this refinement:
+
+```text
+remaining_static_blockers_after_this_run:
+  - exact_classic_app_semantics_of_00_7F_80_after_followup_notify
+  - whether_any_other_0x1529_payload_used_by_app_arms_flags88_0x00010000_as_@TP
+  - no_direct_tf_tv_trigger_from_tp_found
+```
+
+#### `pmode_write_followup_or_cache_notify(0x80)`
+
+This pass follows only the `0x80` follow-up path reached by exact payload
+`00 7F 80`. It does not add runtime tests or ESP TX logic.
+
+```text
+pmode_followup_0x80_analysis:
+  function_addr: 0x00017ef4
+  arg_0x80_branch_found: NO
+  branch_condition:
+    - no argument-specific branch found inside 0x00017ef4
+    - r0 is saved in r5 and later stored generically through 0x00019e8c
+  state_fields_written:
+    - 0x00019e8c stores arg byte to *DAT_0x200025e4
+    - DAT_0x200025e4 is initialized at 0x00018772 by 0x00019e7c
+    - init pointer value is 0x20002ae4
+    - 0x00019e7c initially writes 0x2A to 0x20002ae4
+    - 0x00017ef4(0x80) therefore writes 0x80 to 0x20002ae4
+  flags88_written:
+    - none found
+    - no writes to flags_88 0x04/0x40/0x100/0x200/0x40000 in this function
+  machine_cache_fields_written:
+    - transform/copy helper 0x00019f2c called twice before storing the new followup byte:
+      - dest=0x20002d07, src=0x20002d07, len=0x28
+      - dest=0x20002c3e, src=0x20002b48, len=0xc8
+    - followup byte store: 0x20002ae4 = 0x80
+    - no direct writes to 0x20002c11 / 0x20002c25 cache value buffers observed here
+  ble_events_dispatched:
+    - ble_characteristic_event_dispatch(0x1524)
+    - ble_characteristic_event_dispatch(0x1527)
+    - ble_characteristic_event_dispatch(0x1534)
+    - ble_characteristic_event_dispatch(0x1533)
+    - ble_characteristic_event_dispatch(0x1538)
+    - ble_characteristic_event_dispatch(0x1532)
+    - ble_characteristic_event_dispatch(0x1535)
+  scheduler_events_armed:
+    - none directly found
+  machine_uart_tx_called:
+    - NO
+    - no calls to machine_uart_send_line_encoded, machine_uart_sendf_line_encoded, or machine_uart_send_prefix_hex_line
+  return_effect:
+    - returns after cache/key transform, followup-byte store, and BLE event dispatch
+  confidence: confirmed_code
+```
+
+Callers found by Thumb BL target scan:
+
+```text
+pmode_followup_callers:
+  - caller_addr: 0x00018938
+    source_context: ble_char_1529_pmode_write_callback @ 0x00018900, classic BlueFrog control/PMode write path
+    argument_value_or_source:
+      - if staged payload[0] == 0 and len > 1:
+      - length is decremented by one
+      - argument is original payload[new_len]
+      - for payload 00 7F 80, new_len=2 and argument=payload[2]=0x80
+    payload_family:
+      - exact 00 7F 80 stayInBLE/followup path
+      - also same shape for any payload whose first byte is 0 and len > 1
+    likely_meaning:
+      - separates final control byte from staged visible payload and updates BLE/cache notification state
+    confidence: confirmed_code
+
+  - caller_addr: 0x0001971a
+    source_context: BLE2 descriptor/callback path around descriptor 0x1625 callback 0x19701
+    argument_value_or_source:
+      - if len > 1, argument is last byte of the caller payload
+      - then shortened payload is passed to 0x0001c78c
+    payload_family:
+      - BLE2 / 0x162x path, not classic 0x1529 BlueFrog startup path
+    likely_meaning:
+      - same followup-byte separation helper reused by BLE2 transport/control path
+    confidence: confirmed_code_for_call, inferred_for_semantics
+```
+
+```text
+followup_0x80_role:
+  ble_app_presence_state: PARTIAL
+  stayinble_heartbeat_state: PARTIAL
+  machine_tx_state: NO
+  live_cache_relation: PARTIAL
+  affected_ble_characteristics:
+    - 0x1524
+    - 0x1527
+    - 0x1534
+    - 0x1533
+    - 0x1538
+    - 0x1532
+    - 0x1535
+  affected_flags88:
+    - none found
+  affected_app_mode_state:
+    - no write to app_mode_state 0x20002db0 found in 0x00017ef4
+  affected_machine_cache:
+    - 0x20002ae4 receives 0x80 through global pointer DAT_0x200025e4
+    - 0x20002ae4 is also the known 0x1531/About Machine value buffer base from the descriptor table
+    - 0x20002d07 and 0x20002c3e regions are transformed/refreshed through 0x00019f2c before the new byte is stored
+  likely_role:
+    - local BLE/app control followup byte
+    - cache/key or mode marker used by BLE-side value transformation/validation
+    - notify/update trigger for several BLE cache characteristics
+    - not a machine-UART command path
+  confidence: PARTIAL
+```
+
+Relationship to machine-originated live status:
+
+```text
+followup_0x80_to_live_status_relation:
+  direct_tf_tv_trigger_found: NO
+  indirect_mode_or_presence_relation_found: PARTIAL
+  cachewriter_acceptance_changed: NO
+  evidence:
+    - 0x00017ef4 does not call any machine UART TX helper
+    - 0x00017ef4 does not set flags_88 0x04/0x40/0x100/0x200
+    - 0x00017ef4 dispatches BLE events for 0x1524 and 0x1527, so the App may observe refreshed cache characteristics
+    - no call to copy_machine_cache_to_ble_value_buffer(0/1) was found inside 0x00017ef4
+    - no direct @TF/@TV emission trigger or cachewriter acceptance gate change was found
+  confidence: PARTIAL
+```
+
+Consequence for the earlier `@TP` hypothesis:
+
+```text
+The exact 00 7F 80 classic path is better described as:
+  BLE 0x1529 write 00 7F 80
+  -> stage visible bytes 00 7F with length 2
+  -> consume followup byte 80
+  -> transform/update local BLE cache/key regions
+  -> store 80 at 0x20002ae4
+  -> dispatch BLE events for 0x1524/0x1527/0x153x
+
+It is not statically proven to send @TP:007F, because the visible @TP branch
+requires flags_88 0x00010000, and the exact payload[0] == 0 path does not call
+the helper that sets that bit.
+```
+
 ### Final Remaining Blocker: `session_tick_counter_state+4` seed for `@H1/@T1`
 
 Scope for this pass:
