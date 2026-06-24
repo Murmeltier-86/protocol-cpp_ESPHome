@@ -347,7 +347,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     this->live_db_status_debug_ = enabled;
   }
   void set_enable_bluefrog_26_replay(bool enabled) { this->enable_bluefrog_26_replay_ = enabled; }
-  void set_enable_bluefrog_original_core_round(bool enabled) { this->enable_bluefrog_original_core_round_ = enabled; }
+  void set_enable_bluefrog_original_core_round(bool enabled) { (void) enabled; }
   void note_deprecated_live_option(const std::string &option) { this->deprecated_live_options_.push_back(option); }
   void set_allow_unsafe_debug_commands(bool allow) {
     (void) allow;
@@ -480,14 +480,10 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   void publish_machine_status_(const std::string &status);
   void publish_machine_online_(bool online);
   void publish_machine_ready_(bool ready);
-  void update_machine_available_(bool available, const char *reason);
-  void note_machine_comm_(uint32_t now, const char *reason);
   bool publish_tf_status_(const std::string &response, const char *source = nullptr);
   bool handle_tv_progress_(const std::string &response, const char *source = nullptr);
   bool handle_t2_status_debug_(const std::string &response);
   void update_machine_status_from_state_(const char *source);
-  void clear_tv_state_(const char *reason);
-  uint32_t xml_alert_bit_(const char *name, uint32_t fallback) const;
   void publish_status_probe_last_response_(const std::string &text);
   void process_status_probe_(uint32_t now);
   void start_status_probe_(uint32_t now);
@@ -808,19 +804,12 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t bluefrog_26_replay_deadline_ms_{0};
   bool machine_online_state_{false};
   bool machine_ready_state_{false};
-  bool machine_available_{false};
-  uint32_t last_machine_comm_ms_{0};
   bool has_valid_tf_status_{false};
   bool has_valid_tv_status_{false};
   bool fill_water_required_{false};
   bool tf_coffee_ready_active_{false};
-  bool current_tf_enjoy_product_active_{false};
-  bool current_tf_program_mode_active_{false};
   bool current_blocking_alert_active_{false};
   bool current_tv_progress_active_{false};
-  bool current_tv_pmode_active_{false};
-  std::string last_tv_progress_state_{};
-  std::string last_tv_product_{};
   uint32_t last_tv_progress_ms_{0};
   bool status_debug_{false};
   bool status_forensics_{false};
@@ -853,6 +842,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool bluefrog_original_core_round_success_{false};
   bool bluefrog_original_core_round_tf_seen_{false};
   bool bluefrog_original_core_round_tv_seen_{false};
+  uint8_t bluefrog_original_core_round_retry_count_{0};
+  bool bluefrog_original_core_round_retry_blocked_logged_{false};
   uint32_t bluefrog_original_core_round_last_attempt_ms_{0};
   uint32_t bluefrog_original_core_round_deadline_ms_{0};
   uint32_t bluefrog_original_core_round_observe_start_ms_{0};

@@ -45,7 +45,6 @@ CONF_STATUS_PROBE_LAST_RESPONSE = "status_probe_last_response"
 CONF_DEBUG_COMMAND_LAST_RESPONSE = "debug_command_last_response"
 CONF_LAST_T2_STATUS_RAW = "last_t2_status_raw"
 CONF_LAST_T2_STATUS_DECODED = "last_t2_status_decoded"
-CONF_MACHINE_AVAILABLE = "machine_available"
 CONF_MACHINE_ONLINE = "machine_online"
 CONF_MACHINE_READY = "machine_ready"
 CONF_FILL_WATER_REQUIRED = "fill_water_required"
@@ -248,7 +247,6 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_DEBUG_COMMAND_LAST_RESPONSE): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_LAST_T2_STATUS_RAW): text_sensor.text_sensor_schema(),
             cv.Optional(CONF_LAST_T2_STATUS_DECODED): text_sensor.text_sensor_schema(),
-            cv.Optional(CONF_MACHINE_AVAILABLE): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_MACHINE_ONLINE): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_MACHINE_READY): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_FILL_WATER_REQUIRED): binary_sensor.binary_sensor_schema(),
@@ -632,12 +630,11 @@ async def to_code(config):
         CONF_LIVE_DB_STATUS_POLL_ENABLED,
         CONF_LIVE_DB_STATUS_POLL_INTERVAL_MS,
         CONF_LIVE_DB_STATUS_RESPONSE_TIMEOUT_MS,
+        CONF_ENABLE_BLUEFROG_ORIGINAL_CORE_ROUND,
     ):
         if deprecated_option in config:
             cg.add(var.note_deprecated_live_option(deprecated_option))
     cg.add(var.set_enable_bluefrog_26_replay(config[CONF_ENABLE_BLUEFROG_26_REPLAY]))
-    if CONF_ENABLE_BLUEFROG_ORIGINAL_CORE_ROUND in config:
-        cg.add(var.set_enable_bluefrog_original_core_round(config[CONF_ENABLE_BLUEFROG_ORIGINAL_CORE_ROUND]))
     cg.add(var.set_pmode_key(config[CONF_PMODE_KEY]))
     mapping_path = config[CONF_XML_MAPPING_PATH]
     if mapping_path == "embedded":
@@ -740,10 +737,7 @@ async def to_code(config):
         live_db_status_last_update_sensor = await text_sensor.new_text_sensor(config[CONF_LIVE_DB_STATUS_LAST_UPDATE])
         cg.add(var.set_live_db_status_last_update_sensor(live_db_status_last_update_sensor))
 
-    if CONF_MACHINE_AVAILABLE in config:
-        machine_online_sensor = await binary_sensor.new_binary_sensor(config[CONF_MACHINE_AVAILABLE])
-        cg.add(var.set_machine_online_sensor(machine_online_sensor))
-    elif CONF_MACHINE_ONLINE in config:
+    if CONF_MACHINE_ONLINE in config:
         machine_online_sensor = await binary_sensor.new_binary_sensor(config[CONF_MACHINE_ONLINE])
         cg.add(var.set_machine_online_sensor(machine_online_sensor))
 

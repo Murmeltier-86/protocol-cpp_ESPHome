@@ -57,6 +57,8 @@ constexpr uint32_t kDongleStartupT3QuietMs = 1000;
 constexpr uint32_t kPostT3RuntimeObserveMs = 5000;
 constexpr uint32_t kBluefrogOriginalCoreRoundObserveMs = 5000;
 constexpr uint32_t kBluefrogOriginalCoreRoundStepTimeoutMs = 3000;
+constexpr uint32_t kBluefrogOriginalCoreRoundRetryDelayMs = 45000;
+constexpr uint8_t kBluefrogOriginalCoreRoundMaxRetries = 1;
 constexpr uint32_t kBluefrogLiveTfTimeoutMs = 90000;
 constexpr uint32_t kDongleStartupGateOnlyQuietMs = 2000;
 constexpr uint32_t kDongleStartupMaxWaitAfterT3Ms = 5000;
@@ -117,13 +119,6 @@ constexpr bool TGC0_TRY_LITTLE_ENDIAN_FIRST = true;
 constexpr std::size_t kTR32MinFrameLength = 21;
 constexpr std::size_t kTG43MinFrameLength = 13;
 constexpr std::size_t kTGC0MinFrameLength = 13;
-constexpr uint32_t kMachineAvailabilityTimeoutMs = 120000;
-// XML ALERT bits on current EF532M firmware. Looked up dynamically by name
-// where possible; these values are only fallbacks for missing XML metadata.
-constexpr uint32_t kXmlAlertBitFillWater = 1;
-constexpr uint32_t kXmlAlertBitCoffeeReady = 13;
-constexpr uint32_t kXmlAlertBitProgramMode = 29;
-constexpr uint32_t kXmlAlertBitEnjoyProduct = 31;
 
 #define XML_STATS_LOGD(fmt, ...) \
   do { \
@@ -163,7 +158,7 @@ std::string sanitize_text_for_api(const std::string &input) {
   out.reserve(input.size());
   constexpr char kHex[] = "0123456789ABCDEF";
   for (unsigned char c : input) {
-    if (c >= 0x20 && c != 0x7F) {
+    if (c >= 0x20 && c <= 0x7E) {
       out.push_back(static_cast<char>(c));
       continue;
     }
@@ -1771,7 +1766,6 @@ void JuraComponent::setup() {
 }
 
 void JuraComponent::loop() {
-  const uint32_t now = esphome::millis();
   if (this->handshake_stage_ != this->last_logged_stage_) {
     ESP_LOGI(TAG, "Handshake stage changed: %s -> %s (buffer size=%zu, preview='%s', hex %s)",
              JuraComponent::handshake_stage_name(this->last_logged_stage_),
@@ -1792,22 +1786,16 @@ void JuraComponent::loop() {
       this->coffee_maker_->connection->process_tx_queue();
     }
     this->coffee_maker_->loop();
-    this->process_passive_bluefrog_rx_(now);
+    this->process_passive_bluefrog_rx_(esphome::millis());
     if (!this->coffee_maker_->is_locked()) {
       this->custom_cancel_flag_ = false;
     }
   }
 
   this->process_machine_data_query();
-  if (this->machine_available_ && this->last_machine_comm_ms_ != 0 &&
-      time_reached(now, this->last_machine_comm_ms_ + kMachineAvailabilityTimeoutMs)) {
-    this->update_machine_available_(false, "comm_timeout");
-    this->update_machine_status_from_state_("comm_timeout");
-  }
-
-  this->process_manual_handshake_probe_(now);
+  this->process_manual_handshake_probe_(esphome::millis());
   this->process_xml_polling();
-  this->process_live_db_status_poll_(now);
+  this->process_live_db_status_poll_(esphome::millis());
   this->poll_settings_once_();
   this->poll_error_cycle_();
 }
@@ -2088,7 +2076,7 @@ void JuraComponent::process_handshake() {
           this->ensure_xml_mapping_loaded_();
         }
         this->publish_last_command_result_("handshake_done");
-        this->note_machine_comm_(esphome::millis(), "handshake_done");
+        this->publish_machine_online_(true);
         this->update_machine_status_from_state_("handshake");
       } else {
         this->restart_handshake("failed to send @t3");
@@ -2172,7 +2160,7 @@ bool JuraComponent::time_reached(uint32_t now, uint32_t target) {
 
 void JuraComponent::handle_decoded_response_(const std::string &response, const char *parser_branch) {
   this->publish_raw_rx_(response, parser_branch);
-  this->note_machine_comm_(esphome::millis(), "valid_uart");
+  this->publish_machine_online_(true);
   if (!response.empty() && static_cast<uint8_t>(response.front()) == 0x26) {
     this->handle_bluefrog_26_frame_(response, "machine_to_esp", parser_branch, esphome::millis());
     return;
@@ -2891,25 +2879,11 @@ void JuraComponent::publish_machine_status_(const std::string &status) {
 }
 
 void JuraComponent::publish_machine_online_(bool online) {
-  this->update_machine_available_(online, online ? "manual_online" : "manual_offline");
-}
-
-void JuraComponent::update_machine_available_(bool available, const char *reason) {
-  const char *safe_reason = reason != nullptr ? reason : "unknown";
-  const bool changed = this->machine_available_ != available || this->machine_online_state_ != available;
-  this->machine_available_ = available;
-  this->machine_online_state_ = available;
-  if (changed) {
-    ESP_LOGI(TAG, "machine_available_update available=%s reason=%s", YESNO(available), safe_reason);
-  }
+  this->machine_online_state_ = online;
+  ESP_LOGD(TAG, "Machine online: %s", YESNO(online));
   if (this->machine_online_sensor_ != nullptr) {
-    this->machine_online_sensor_->publish_state(available);
+    this->machine_online_sensor_->publish_state(online);
   }
-}
-
-void JuraComponent::note_machine_comm_(uint32_t now, const char *reason) {
-  this->last_machine_comm_ms_ = now;
-  this->update_machine_available_(true, reason != nullptr ? reason : "valid_comm");
 }
 
 void JuraComponent::publish_machine_ready_(bool ready) {
@@ -2920,42 +2894,13 @@ void JuraComponent::publish_machine_ready_(bool ready) {
   }
 }
 
-uint32_t JuraComponent::xml_alert_bit_(const char *name, uint32_t fallback) const {
-  const std::string wanted = to_lower_copy(collapse_whitespace(name != nullptr ? std::string{name} : std::string{}));
-  if (wanted.empty() || !this->xml_mapping_.valid) {
-    return fallback;
-  }
-  for (const auto &alert : this->xml_mapping_.alerts) {
-    if (to_lower_copy(collapse_whitespace(alert.name)) == wanted) {
-      return alert.bit;
-    }
-  }
-  return fallback;
-}
-
-void JuraComponent::clear_tv_state_(const char *reason) {
-  const bool had_state = this->has_valid_tv_status_ || this->current_tv_progress_active_ || this->current_tv_pmode_active_ ||
-                         !this->last_tv_progress_frame_.empty() || !this->last_tv_progress_state_.empty() ||
-                         !this->last_tv_product_.empty();
-  if (had_state && this->bluefrog_live_debug_) {
-    ESP_LOGD(TAG, "tv_state_clear reason=%s", reason != nullptr ? reason : "unknown");
-  }
-  this->has_valid_tv_status_ = false;
-  this->current_tv_progress_active_ = false;
-  this->current_tv_pmode_active_ = false;
-  this->last_tv_progress_frame_.clear();
-  this->last_tv_progress_state_.clear();
-  this->last_tv_product_.clear();
-  this->last_tv_progress_ms_ = 0;
-}
-
 void JuraComponent::update_machine_status_from_state_(const char *source) {
   const char *safe_source = source != nullptr ? source : "unknown";
-  const bool online = this->machine_available_;
+  const bool online = this->machine_online_state_ || this->is_ready();
   const bool live_status_seen = this->has_valid_tf_status_ || this->has_valid_tv_status_;
   const bool blocking_alert = this->current_blocking_alert_active_;
   std::string status;
-  bool ready = false;
+  bool ready = this->machine_ready_state_ || this->is_ready();
 
   if (this->live_status_source_sensor_ != nullptr) {
     this->live_status_source_sensor_->publish_state(
@@ -3005,21 +2950,18 @@ void JuraComponent::update_machine_status_from_state_(const char *source) {
     ready = false;
     ESP_LOGD(TAG, "machine_status_update source=%s priority=tv_progress status=\"%s\"", safe_source,
              sanitize_text_for_api(status).c_str());
-  } else if (this->current_tv_pmode_active_ && !this->current_display_status_.empty()) {
-    status = this->current_display_status_;
-    ready = false;
-    ESP_LOGD(TAG, "machine_status_update source=%s priority=tv_pmode status=\"%s\"", safe_source,
-             sanitize_text_for_api(status).c_str());
   } else if (!this->current_display_status_.empty()) {
     status = this->current_display_status_;
-    ready = (status == "Bereit") && this->tf_coffee_ready_active_ && !this->current_tv_progress_active_ &&
-            !this->current_tv_pmode_active_;
+    ready = (status == "Bereit");
     ESP_LOGD(TAG, "machine_status_update source=%s priority=display status=\"%s\"", safe_source,
              sanitize_text_for_api(status).c_str());
   } else if (this->tf_coffee_ready_active_) {
     status = "Bereit";
     ready = true;
     ESP_LOGD(TAG, "machine_status_update source=%s priority=tf_ready status=\"Bereit\"", safe_source);
+  } else if (ready) {
+    status = "Bereit";
+    ESP_LOGD(TAG, "machine_status_update source=%s priority=protocol_ready status=\"Bereit\"", safe_source);
   } else {
     status = "Online";
     ESP_LOGD(TAG, "machine_status_update source=%s priority=online status=\"Online\"", safe_source);
@@ -3031,10 +2973,9 @@ void JuraComponent::update_machine_status_from_state_(const char *source) {
   const std::string machine_status_log = sanitize_text_for_api(status);
   ESP_LOGD(TAG,
            "machine_status_decision online=%s ready=%s has_valid_tf=%s has_valid_tv=%s blocking_alert=%s "
-           "tv_progress=%s tv_pmode=%s live_status_source=\"%s\" display_state=\"%s\" result=\"%s\"",
+           "live_status_source=\"%s\" display_state=\"%s\" result=\"%s\"",
            YESNO(online), YESNO(ready), YESNO(this->has_valid_tf_status_), YESNO(this->has_valid_tv_status_),
-           YESNO(blocking_alert), YESNO(this->current_tv_progress_active_), YESNO(this->current_tv_pmode_active_),
-           live_source_log.c_str(), display_status_log.c_str(), machine_status_log.c_str());
+           YESNO(blocking_alert), live_source_log.c_str(), display_status_log.c_str(), machine_status_log.c_str());
 
   this->publish_machine_status_(status);
   this->publish_machine_ready_(ready);
@@ -3094,14 +3035,8 @@ bool JuraComponent::publish_tf_status_(const std::string &response, const char *
 
   this->ensure_xml_mapping_loaded_();
 
-  const uint32_t coffee_ready_bit = this->xml_alert_bit_("coffee ready", kXmlAlertBitCoffeeReady);
-  const uint32_t fill_water_bit = this->xml_alert_bit_("fill water", kXmlAlertBitFillWater);
-  const uint32_t program_mode_bit = this->xml_alert_bit_("program-mode status", kXmlAlertBitProgramMode);
-  const uint32_t enjoy_product_bit = this->xml_alert_bit_("enjoy product", kXmlAlertBitEnjoyProduct);
-  bool coffee_ready = has_bit(coffee_ready_bit);
-  bool fill_water = has_bit(fill_water_bit);
-  const bool program_mode_active = has_bit(program_mode_bit);
-  const bool enjoy_product_active = has_bit(enjoy_product_bit);
+  bool coffee_ready = has_bit(13);
+  bool fill_water = has_bit(1);
   std::vector<std::string> blocking_alerts;
   std::vector<std::string> nonblocking_alerts;
   std::vector<std::string> visible_alerts;
@@ -3144,36 +3079,29 @@ bool JuraComponent::publish_tf_status_(const std::string &response, const char *
 
   this->has_valid_tf_status_ = true;
   this->last_tf_status_ms_ = esphome::millis();
-  this->note_machine_comm_(this->last_tf_status_ms_, "valid_tf");
   this->bluefrog_original_core_round_success_ = true;
+  this->bluefrog_original_core_round_retry_count_ = 0;
+  this->bluefrog_original_core_round_retry_blocked_logged_ = false;
   this->last_tf_status_frame_ = trimmed;
   this->current_live_status_source_ = source != nullptr ? source : "@TF";
   this->fill_water_required_ = fill_water;
   this->tf_coffee_ready_active_ = coffee_ready;
-  this->current_tf_enjoy_product_active_ = enjoy_product_active;
-  this->current_tf_program_mode_active_ = program_mode_active;
   this->current_blocking_alert_active_ = !blocking_alerts.empty();
 
   if (!blocking_alerts.empty()) {
     this->current_machine_warning_ = join_values(blocking_alerts, ", ");
     this->current_display_status_ = blocking_alerts.front();
-    this->clear_tv_state_("tf_blocking_alert");
-  } else if (coffee_ready && !enjoy_product_active && !program_mode_active) {
-    const char *clear_reason = this->current_tv_pmode_active_ ? "tf_ready_after_pmode" : "tf_ready_no_enjoy_product";
-    this->clear_tv_state_(clear_reason);
-    this->current_display_status_ = "Bereit";
-    this->current_machine_warning_ = nonblocking_alerts.empty() ? std::string{} : join_values(nonblocking_alerts, ", ");
+    this->current_tv_progress_active_ = false;
   } else if (!nonblocking_alerts.empty()) {
     this->current_machine_warning_ = join_values(nonblocking_alerts, ", ");
-    if (!this->current_tv_progress_active_ && !this->current_tv_pmode_active_) {
+    if (!this->current_tv_progress_active_) {
       this->current_display_status_ = coffee_ready ? "Bereit" : nonblocking_alerts.front();
     }
   } else {
     this->current_machine_warning_.clear();
-    if (coffee_ready && !this->current_tv_progress_active_ && !this->current_tv_pmode_active_) {
+    if (coffee_ready && !this->current_tv_progress_active_) {
       this->current_display_status_ = "Bereit";
-    } else if (!coffee_ready && !enjoy_product_active && !this->current_tv_progress_active_ &&
-               !this->current_tv_pmode_active_) {
+    } else if (!coffee_ready && !this->current_tv_progress_active_) {
       this->current_display_status_.clear();
     }
   }
@@ -3181,19 +3109,16 @@ bool JuraComponent::publish_tf_status_(const std::string &response, const char *
 
   if (this->bluefrog_live_debug_) {
     const std::string active_alerts_log = this->current_active_alerts_.empty() ? "keine" : this->current_active_alerts_;
-    ESP_LOGD(TAG,
-             "tf_status decoded=\"%s\" bits=\"%s\" active_alerts=\"%s\" blocking=%s coffee_ready=%s "
-             "enjoy_product=%s program_mode=%s",
+    ESP_LOGD(TAG, "tf_status decoded=\"%s\" bits=\"%s\" active_alerts=\"%s\" blocking=%s coffee_ready=%s",
              sanitize_text_for_api(trimmed).c_str(), bits_text.c_str(), sanitize_text_for_api(active_alerts_log).c_str(),
-             YESNO(this->current_blocking_alert_active_), YESNO(coffee_ready), YESNO(enjoy_product_active),
-             YESNO(program_mode_active));
+             YESNO(this->current_blocking_alert_active_), YESNO(coffee_ready));
   }
 
   if (this->tf_welcome_sensor_ != nullptr) {
     this->tf_welcome_sensor_->publish_state(has_bit(11));
   }
   if (this->tf_coffee_ready_sensor_ != nullptr) {
-    this->tf_coffee_ready_sensor_->publish_state(has_bit(coffee_ready_bit));
+    this->tf_coffee_ready_sensor_->publish_state(has_bit(13));
   }
   if (this->tf_energy_safe_sensor_ != nullptr) {
     this->tf_energy_safe_sensor_->publish_state(has_bit(36));
@@ -3259,17 +3184,14 @@ bool JuraComponent::handle_tv_progress_(const std::string &response, const char 
   const bool has_progress = bytes.size() >= 5U;
   const uint8_t progress_value = has_progress ? bytes[3] : 0;
   const uint8_t progress_total = has_progress ? bytes[4] : 0;
-  const uint32_t now = esphome::millis();
+
+  this->has_valid_tv_status_ = true;
+  this->last_tv_progress_frame_ = trimmed;
+  this->last_tv_progress_ms_ = esphome::millis();
+  this->current_live_status_source_ = source != nullptr ? source : "@TV";
 
   if (state_desc == nullptr) {
     if (state_code == 0x3C) {
-      if (this->current_tv_progress_active_ || this->current_tf_enjoy_product_active_ || this->current_tv_pmode_active_) {
-        this->has_valid_tv_status_ = true;
-        this->last_tv_progress_frame_ = trimmed;
-        this->last_tv_progress_ms_ = now;
-        this->current_live_status_source_ = source != nullptr ? source : "@TV";
-      }
-      this->note_machine_comm_(now, "valid_tv_detail");
       if (this->bluefrog_live_debug_) {
         ESP_LOGD(TAG, "tv_progress detail_frame state=0x%02X product=0x%02X len=%u raw=\"%s\"",
                  static_cast<unsigned>(state_code), static_cast<unsigned>(product_code),
@@ -3278,62 +3200,26 @@ bool JuraComponent::handle_tv_progress_(const std::string &response, const char 
       this->update_machine_status_from_state_(source != nullptr ? source : "tv_detail");
       return true;
     }
-    if (this->current_tv_progress_active_ || this->current_tf_enjoy_product_active_ || this->current_tv_pmode_active_) {
-      this->has_valid_tv_status_ = true;
-      this->last_tv_progress_frame_ = trimmed;
-      this->last_tv_progress_ms_ = now;
-      this->current_live_status_source_ = source != nullptr ? source : "@TV";
-    }
-    this->note_machine_comm_(now, "valid_tv_unknown");
     if (this->bluefrog_live_debug_) {
-      ESP_LOGD(TAG, "tv_progress state=0x%02X state=unknown raw=\"%s\" preserved=%s active_context=%s",
-               static_cast<unsigned>(state_code), sanitize_text_for_api(trimmed).c_str(),
-               YESNO(this->has_valid_tv_status_),
-               YESNO(this->current_tv_progress_active_ || this->current_tf_enjoy_product_active_ ||
-                     this->current_tv_pmode_active_));
+      ESP_LOGD(TAG, "tv_progress state=0x%02X state=unknown raw=\"%s\" preserved=YES",
+               static_cast<unsigned>(state_code), sanitize_text_for_api(trimmed).c_str());
     }
-    this->update_machine_status_from_state_(source != nullptr ? source : "tv_unknown");
     return true;
   }
 
   const std::string state_text = jura_live_display_name(state_desc->name);
-  const std::string product_name =
-      product_desc != nullptr ? (!product_desc->text.empty() ? product_desc->text : product_desc->name) : std::string{};
-  const std::string product_text = product_desc != nullptr ? jura_live_display_name(product_name) : std::string{};
-  const std::string state_key = to_lower_copy(collapse_whitespace(state_desc->name));
-  const bool state_is_ready = state_key == "coffee ready" || state_code == 0x24;
-  const bool state_is_pmode = state_key == "p_mode" || state_key == "p mode" || state_code == 0xFF;
+  const std::string product_text = product_desc != nullptr ? jura_live_display_name(product_desc->name) : std::string{};
+  const bool state_is_ready = to_lower_copy(collapse_whitespace(state_desc->name)) == "coffee ready" || state_code == 0x24;
   const bool progress_state = state_desc->progress || (has_progress && progress_total != 0 && progress_value < progress_total);
-  const bool product_context = !state_is_ready && !state_is_pmode &&
-                               (progress_state || has_progress || product_desc != nullptr ||
-                                state_key.find("enjoy") != std::string::npos || state_key.find("heating") != std::string::npos);
-
-  this->has_valid_tv_status_ = true;
-  this->last_tv_progress_frame_ = trimmed;
-  this->last_tv_progress_ms_ = now;
-  this->last_tv_progress_state_ = state_text;
-  this->last_tv_product_ = product_text;
-  this->current_live_status_source_ = source != nullptr ? source : "@TV";
-  this->note_machine_comm_(now, state_is_pmode ? "valid_tv_pmode" : "valid_tv");
 
   if (state_is_ready) {
-    this->clear_tv_state_("tv_ready");
+    this->current_tv_progress_active_ = false;
     if (!this->current_blocking_alert_active_) {
       this->current_display_status_ = "Bereit";
     }
     this->tf_coffee_ready_active_ = true;
-  } else if (state_is_pmode) {
-    this->current_tv_progress_active_ = false;
-    this->current_tv_pmode_active_ = true;
-    if (!state_text.empty() && !this->current_blocking_alert_active_) {
-      this->current_display_status_ = state_text;
-    }
-    if (this->bluefrog_live_debug_) {
-      ESP_LOGD(TAG, "tv_pmode_seen raw=\"%s\"", sanitize_text_for_api(trimmed).c_str());
-    }
   } else {
-    this->current_tv_progress_active_ = product_context;
-    this->current_tv_pmode_active_ = false;
+    this->current_tv_progress_active_ = progress_state || has_progress;
     const std::string display = format_live_progress_text(state_text, product_text, has_progress, progress_value, progress_total);
     if (!display.empty() && !this->current_blocking_alert_active_) {
       this->current_display_status_ = display;
@@ -9065,12 +8951,6 @@ bool JuraComponent::should_start_bluefrog_original_core_round_(uint32_t now, con
   if (reason != nullptr) {
     *reason = "unknown";
   }
-  if (!this->enable_bluefrog_original_core_round_) {
-    if (reason != nullptr) {
-      *reason = "disabled";
-    }
-    return false;
-  }
   if (!this->bluefrog_live_daten_) {
     if (reason != nullptr) {
       *reason = "live_disabled";
@@ -9098,17 +8978,44 @@ bool JuraComponent::should_start_bluefrog_original_core_round_(uint32_t now, con
     return true;
   }
 
-  if (this->bluefrog_original_core_round_success_) {
+  if (this->bluefrog_original_core_round_success_ && this->last_tf_status_ms_ == 0) {
     if (reason != nullptr) {
       *reason = "core_round_success_already_done";
     }
     return false;
   }
 
-  if (reason != nullptr) {
-    *reason = "core_round_attempt_failed_no_auto_retry";
+  if (this->bluefrog_original_core_round_retry_count_ >= kBluefrogOriginalCoreRoundMaxRetries) {
+    if (reason != nullptr) {
+      *reason = "max_retries_reached";
+    }
+    if (!this->bluefrog_original_core_round_retry_blocked_logged_) {
+      ESP_LOGI(TAG, "bluefrog_original_core_round_retry_blocked reason=max_retries_reached");
+      this->bluefrog_original_core_round_retry_blocked_logged_ = true;
+    }
+    return false;
   }
-  return false;
+
+  const uint32_t retry_due_ms =
+      this->bluefrog_original_core_round_last_attempt_ms_ + kBluefrogOriginalCoreRoundRetryDelayMs;
+  if (!time_reached(now, retry_due_ms)) {
+    if (reason != nullptr) {
+      *reason = "retry_wait";
+    }
+    return false;
+  }
+
+  ++this->bluefrog_original_core_round_retry_count_;
+  this->bluefrog_original_core_round_retry_blocked_logged_ = false;
+  this->bluefrog_original_core_round_last_attempt_ms_ = now;
+  if (reason != nullptr) {
+    *reason = "no_tf_after_attempt";
+  }
+  ESP_LOGI(TAG, "bluefrog_original_core_round_retry reason=no_tf_after_attempt");
+  if (this->last_tf_status_ms_ != 0 && this->bluefrog_live_debug_) {
+    ESP_LOGD(TAG, "bluefrog_live_session_rearm reason=tf_timeout");
+  }
+  return true;
 }
 
 void JuraComponent::finish_bluefrog_original_core_round_(uint32_t now, bool timeout, const char *missing_step) {
@@ -9901,7 +9808,7 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         static_cast<unsigned>(this->xml_next_poll_), static_cast<unsigned>(this->xml_next_poll_),
         this->stats_session_ready_ && this->stats_inner_tx_required_ ? "post_gate" : "legacy",
         YESNO(this->stats_inner_tx_required_), YESNO(this->xml_stats_use_ts_lock_));
-    if (this->xml_stats_handshake_before_cycle_ && this->xml_dongle_startup_ && !this->stats_session_ready_) {
+    if (this->xml_stats_handshake_before_cycle_ && this->xml_dongle_startup_) {
       if (this->bluefrog_live_tf_active_(now) && this->stats_session_ready_ && this->stats_inner_tx_required_) {
         if (this->bluefrog_live_debug_) {
           ESP_LOGD(TAG, "bluefrog_original_core_round_skip reason=live_tf_already_active");
@@ -9933,8 +9840,8 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
     }
     if (this->xml_stats_reprime_tr37_before_cycle_ && this->stats_session_ready_ &&
         this->stats_inner_tx_required_ && this->post_gate_reprime_required_for_next_stats_) {
-      XML_STATS_LOGD("stats_reprime_tr37_skipped reason=live_session_no_stats_rearm");
-      this->post_gate_reprime_required_for_next_stats_ = false;
+      this->transition_to_state_(XmlPollState::REPRIME_TR37, now);
+      return;
     }
     this->transition_to_state_(this->xml_stats_use_ts_lock_ ? XmlPollState::TS_LOCK : XmlPollState::TR32_PAGE, now);
   }
@@ -11731,7 +11638,6 @@ bool JuraComponent::parse_tr32_page_line_(const std::string &line, uint8_t expec
   if (!any) {
     XML_STATS_LOGD("stats_tr32_page_empty page=%02X action=ok", static_cast<unsigned>(page));
   }
-  this->note_machine_comm_(esphome::millis(), "valid_stats_tr32");
   return true;
 }
 
@@ -11778,9 +11684,6 @@ bool JuraComponent::parse_tg43_line_(const std::string &line) {
              static_cast<unsigned>(byte_offset), static_cast<unsigned>(bytes[byte_offset]),
              static_cast<unsigned>(bytes[byte_offset + 1]), format_numeric_text(value).c_str());
     any = this->stage_xml_stat_value_(field.name, field.label, value, XmlSensorKind::Counter, "@TG:43") || any;
-  }
-  if (any) {
-    this->note_machine_comm_(esphome::millis(), "valid_stats_tg43");
   }
   return any;
 }
@@ -11841,9 +11744,6 @@ bool JuraComponent::parse_tgc0_line_(const std::string &line) {
              field.name.c_str(), static_cast<unsigned>(raw));
     any = this->stage_xml_stat_value_(field.name, field.label, static_cast<double>(raw),
                                       XmlSensorKind::Measurement, "@TG:C0") || any;
-  }
-  if (any) {
-    this->note_machine_comm_(esphome::millis(), "valid_stats_tgc0");
   }
   return any;
 }
