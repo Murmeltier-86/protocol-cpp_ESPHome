@@ -347,7 +347,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     this->live_db_status_debug_ = enabled;
   }
   void set_enable_bluefrog_26_replay(bool enabled) { this->enable_bluefrog_26_replay_ = enabled; }
-  void set_enable_bluefrog_original_core_round(bool enabled) { (void) enabled; }
+  void set_enable_bluefrog_original_core_round(bool enabled) { this->enable_bluefrog_original_core_round_ = enabled; }
   void note_deprecated_live_option(const std::string &option) { this->deprecated_live_options_.push_back(option); }
   void set_allow_unsafe_debug_commands(bool allow) {
     (void) allow;
@@ -853,8 +853,6 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool bluefrog_original_core_round_success_{false};
   bool bluefrog_original_core_round_tf_seen_{false};
   bool bluefrog_original_core_round_tv_seen_{false};
-  uint8_t bluefrog_original_core_round_retry_count_{0};
-  bool bluefrog_original_core_round_retry_blocked_logged_{false};
   uint32_t bluefrog_original_core_round_last_attempt_ms_{0};
   uint32_t bluefrog_original_core_round_deadline_ms_{0};
   uint32_t bluefrog_original_core_round_observe_start_ms_{0};

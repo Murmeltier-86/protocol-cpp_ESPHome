@@ -632,11 +632,12 @@ async def to_code(config):
         CONF_LIVE_DB_STATUS_POLL_ENABLED,
         CONF_LIVE_DB_STATUS_POLL_INTERVAL_MS,
         CONF_LIVE_DB_STATUS_RESPONSE_TIMEOUT_MS,
-        CONF_ENABLE_BLUEFROG_ORIGINAL_CORE_ROUND,
     ):
         if deprecated_option in config:
             cg.add(var.note_deprecated_live_option(deprecated_option))
     cg.add(var.set_enable_bluefrog_26_replay(config[CONF_ENABLE_BLUEFROG_26_REPLAY]))
+    if CONF_ENABLE_BLUEFROG_ORIGINAL_CORE_ROUND in config:
+        cg.add(var.set_enable_bluefrog_original_core_round(config[CONF_ENABLE_BLUEFROG_ORIGINAL_CORE_ROUND]))
     cg.add(var.set_pmode_key(config[CONF_PMODE_KEY]))
     mapping_path = config[CONF_XML_MAPPING_PATH]
     if mapping_path == "embedded":

@@ -57,8 +57,6 @@ constexpr uint32_t kDongleStartupT3QuietMs = 1000;
 constexpr uint32_t kPostT3RuntimeObserveMs = 5000;
 constexpr uint32_t kBluefrogOriginalCoreRoundObserveMs = 5000;
 constexpr uint32_t kBluefrogOriginalCoreRoundStepTimeoutMs = 3000;
-constexpr uint32_t kBluefrogOriginalCoreRoundRetryDelayMs = 45000;
-constexpr uint8_t kBluefrogOriginalCoreRoundMaxRetries = 1;
 constexpr uint32_t kBluefrogLiveTfTimeoutMs = 90000;
 constexpr uint32_t kDongleStartupGateOnlyQuietMs = 2000;
 constexpr uint32_t kDongleStartupMaxWaitAfterT3Ms = 5000;
@@ -3148,8 +3146,6 @@ bool JuraComponent::publish_tf_status_(const std::string &response, const char *
   this->last_tf_status_ms_ = esphome::millis();
   this->note_machine_comm_(this->last_tf_status_ms_, "valid_tf");
   this->bluefrog_original_core_round_success_ = true;
-  this->bluefrog_original_core_round_retry_count_ = 0;
-  this->bluefrog_original_core_round_retry_blocked_logged_ = false;
   this->last_tf_status_frame_ = trimmed;
   this->current_live_status_source_ = source != nullptr ? source : "@TF";
   this->fill_water_required_ = fill_water;
@@ -9069,6 +9065,12 @@ bool JuraComponent::should_start_bluefrog_original_core_round_(uint32_t now, con
   if (reason != nullptr) {
     *reason = "unknown";
   }
+  if (!this->enable_bluefrog_original_core_round_) {
+    if (reason != nullptr) {
+      *reason = "disabled";
+    }
+    return false;
+  }
   if (!this->bluefrog_live_daten_) {
     if (reason != nullptr) {
       *reason = "live_disabled";
@@ -9096,44 +9098,17 @@ bool JuraComponent::should_start_bluefrog_original_core_round_(uint32_t now, con
     return true;
   }
 
-  if (this->bluefrog_original_core_round_success_ && this->last_tf_status_ms_ == 0) {
+  if (this->bluefrog_original_core_round_success_) {
     if (reason != nullptr) {
       *reason = "core_round_success_already_done";
     }
     return false;
   }
 
-  if (this->bluefrog_original_core_round_retry_count_ >= kBluefrogOriginalCoreRoundMaxRetries) {
-    if (reason != nullptr) {
-      *reason = "max_retries_reached";
-    }
-    if (!this->bluefrog_original_core_round_retry_blocked_logged_) {
-      ESP_LOGI(TAG, "bluefrog_original_core_round_retry_blocked reason=max_retries_reached");
-      this->bluefrog_original_core_round_retry_blocked_logged_ = true;
-    }
-    return false;
-  }
-
-  const uint32_t retry_due_ms =
-      this->bluefrog_original_core_round_last_attempt_ms_ + kBluefrogOriginalCoreRoundRetryDelayMs;
-  if (!time_reached(now, retry_due_ms)) {
-    if (reason != nullptr) {
-      *reason = "retry_wait";
-    }
-    return false;
-  }
-
-  ++this->bluefrog_original_core_round_retry_count_;
-  this->bluefrog_original_core_round_retry_blocked_logged_ = false;
-  this->bluefrog_original_core_round_last_attempt_ms_ = now;
   if (reason != nullptr) {
-    *reason = "no_tf_after_attempt";
+    *reason = "core_round_attempt_failed_no_auto_retry";
   }
-  ESP_LOGI(TAG, "bluefrog_original_core_round_retry reason=no_tf_after_attempt");
-  if (this->last_tf_status_ms_ != 0 && this->bluefrog_live_debug_) {
-    ESP_LOGD(TAG, "bluefrog_live_session_rearm reason=tf_timeout");
-  }
-  return true;
+  return false;
 }
 
 void JuraComponent::finish_bluefrog_original_core_round_(uint32_t now, bool timeout, const char *missing_step) {
@@ -9926,7 +9901,7 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         static_cast<unsigned>(this->xml_next_poll_), static_cast<unsigned>(this->xml_next_poll_),
         this->stats_session_ready_ && this->stats_inner_tx_required_ ? "post_gate" : "legacy",
         YESNO(this->stats_inner_tx_required_), YESNO(this->xml_stats_use_ts_lock_));
-    if (this->xml_stats_handshake_before_cycle_ && this->xml_dongle_startup_) {
+    if (this->xml_stats_handshake_before_cycle_ && this->xml_dongle_startup_ && !this->stats_session_ready_) {
       if (this->bluefrog_live_tf_active_(now) && this->stats_session_ready_ && this->stats_inner_tx_required_) {
         if (this->bluefrog_live_debug_) {
           ESP_LOGD(TAG, "bluefrog_original_core_round_skip reason=live_tf_already_active");
@@ -9958,8 +9933,8 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
     }
     if (this->xml_stats_reprime_tr37_before_cycle_ && this->stats_session_ready_ &&
         this->stats_inner_tx_required_ && this->post_gate_reprime_required_for_next_stats_) {
-      this->transition_to_state_(XmlPollState::REPRIME_TR37, now);
-      return;
+      XML_STATS_LOGD("stats_reprime_tr37_skipped reason=live_session_no_stats_rearm");
+      this->post_gate_reprime_required_for_next_stats_ = false;
     }
     this->transition_to_state_(this->xml_stats_use_ts_lock_ ? XmlPollState::TS_LOCK : XmlPollState::TR32_PAGE, now);
   }
