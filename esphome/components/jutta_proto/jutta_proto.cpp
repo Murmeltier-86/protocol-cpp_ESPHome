@@ -2330,9 +2330,6 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
   if (this->post_t3_runtime_observe_active_) {
     ESP_LOGI(TAG, "post_t3_runtime_observe_decoded line=\"%s\"",
              transport_payload_log_text(decoded).c_str());
-    if (std::strcmp(route, "session_core") == 0) {
-      ++this->post_t3_runtime_observe_session_core_;
-    }
   }
 
   if (lower.rfind("@tf", 0) == 0) {
@@ -8602,6 +8599,12 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
   if (bit == 0) {
     return;
   }
+  if (this->post_t3_runtime_observe_active_ &&
+      (bit == DONGLE_EVENT_T0 || bit == DONGLE_EVENT_T3 || bit == DONGLE_EVENT_TR)) {
+    ++this->post_t3_runtime_observe_session_core_;
+    ESP_LOGI(TAG, "post_t3_runtime_observe_session_core line=\"%s\"",
+             sanitize_text_for_api(trimmed).c_str());
+  }
 
   bool newly_set = (this->dongle_events_ & bit) == 0;
   this->dongle_events_ |= bit;
@@ -8734,6 +8737,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       this->post_t3_runtime_observe_tv_seen_ = 0;
       this->post_t3_runtime_observe_binary_candidates_ = 0;
       this->post_t3_runtime_observe_session_core_ = 0;
+      this->post_t3_tr37_fallback_once_active_ = false;
       this->bluefrog_26_replay_active_ = false;
       this->bluefrog_26_replay_response_seen_ = false;
       this->bluefrog_26_replay_result_logged_ = false;
@@ -9001,12 +9005,18 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
     case DongleStartupState::WAIT_AFTER_T3:
       if (this->dongle_startup_t3_seen_during_quiet_) {
         this->dongle_startup_t3_seen_during_quiet_ = false;
-        this->dongle_startup_next_action_ms_ = now + kPostT3RuntimeObserveMs;
-        this->dongle_startup_deadline_ms_ = now + kPostT3RuntimeObserveMs + 1000U;
-        ESP_LOGI(TAG, "post_t3_runtime_observe_start duration_ms=%u reason=t3_seen_during_observe",
-                 static_cast<unsigned>(kPostT3RuntimeObserveMs));
-        XML_STATS_LOGD("dongle_startup_t3_seen_during_quiet restart_quiet_timer duration_ms=%u",
-                 static_cast<unsigned>(kPostT3RuntimeObserveMs));
+        if (this->post_t3_runtime_observe_active_) {
+          XML_STATS_LOGD("dongle_startup_t3_seen_during_observe no_restart=YES");
+        } else {
+          this->dongle_startup_next_action_ms_ = now + kPostT3RuntimeObserveMs;
+          this->dongle_startup_deadline_ms_ = now + kPostT3RuntimeObserveMs + 1000U;
+          this->post_t3_runtime_observe_active_ = true;
+          this->post_t3_runtime_observe_start_ms_ = now;
+          ESP_LOGI(TAG, "post_t3_runtime_observe_start duration_ms=%u",
+                   static_cast<unsigned>(kPostT3RuntimeObserveMs));
+          XML_STATS_LOGD("dongle_startup_t3_seen_during_quiet start_observe duration_ms=%u",
+                   static_cast<unsigned>(kPostT3RuntimeObserveMs));
+        }
       }
       if (time_reached(now, this->dongle_startup_next_action_ms_)) {
         if (this->coffee_maker_ != nullptr && this->coffee_maker_->connection != nullptr) {
@@ -9015,6 +9025,9 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
           this->coffee_maker_->connection->drain_serial_input_nonblocking();
         }
         this->dongle_startup_rx_buffer_.clear();
+        const uint32_t observe_elapsed_ms = this->post_t3_runtime_observe_start_ms_ != 0
+                                                ? now - this->post_t3_runtime_observe_start_ms_
+                                                : now - this->dongle_startup_quiet_start_ms_;
         ESP_LOGI(TAG,
                  "post_t3_runtime_observe_result tf_seen=%u tv_seen=%u binary_candidates=%u session_core=%u "
                  "rx_26=%u elapsed_ms=%u",
@@ -9023,11 +9036,19 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
                  static_cast<unsigned>(this->post_t3_runtime_observe_binary_candidates_),
                  static_cast<unsigned>(this->post_t3_runtime_observe_session_core_),
                  static_cast<unsigned>(this->post_t3_runtime_observe_rx_26_count_),
-                 static_cast<unsigned>(now - this->dongle_startup_quiet_start_ms_));
+                 static_cast<unsigned>(observe_elapsed_ms));
+        if (this->post_t3_runtime_observe_rx_26_count_ == 0) {
+          ESP_LOGI(TAG, "post_t3_runtime_observe_result=no_runtime_26_after_t3");
+        }
         this->post_t3_runtime_observe_active_ = false;
         XML_STATS_LOGD("dongle_startup_t3_quiet_ok elapsed_ms=%u",
                  static_cast<unsigned>(now - this->dongle_startup_quiet_start_ms_));
-        if (this->dongle_startup_quiet_then_prep_tr37_) {
+        if (this->post_t3_runtime_observe_tf_seen_ != 0 || this->post_t3_runtime_observe_tv_seen_ != 0) {
+          this->post_t3_tr37_fallback_once_active_ = false;
+          ESP_LOGI(TAG, "continue_to_stats_after_post_t3_cachewriter");
+          this->transition_dongle_startup_(DongleStartupState::READY, now);
+        } else if (this->dongle_startup_quiet_then_prep_tr37_) {
+          this->post_t3_tr37_fallback_once_active_ = true;
           this->transition_dongle_startup_(DongleStartupState::PREP_TR37, now);
         } else {
           this->transition_dongle_startup_(DongleStartupState::SEND_TR37, now);
@@ -9058,6 +9079,9 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       }
       ++this->dongle_startup_tr37_attempt_;
       this->dongle_startup_rx_buffer_.clear();
+      if (this->post_t3_tr37_fallback_once_active_) {
+        ESP_LOGI(TAG, "tr37_fallback_once_start");
+      }
       if (!this->send_dongle_startup_command_("@TR:37", now, this->xml_dongle_startup_mode_ == "full")) {
         this->fail_dongle_startup_(now, "send_tr37_failed");
         return false;
@@ -9071,6 +9095,11 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
 
     case DongleStartupState::WAIT_TR37:
       if ((this->dongle_events_ & DONGLE_EVENT_TR) != 0) {
+        if (this->post_t3_tr37_fallback_once_active_) {
+          ESP_LOGI(TAG, "tr37_fallback_once_result=ok");
+          ESP_LOGI(TAG, "continue_to_stats_after_tr37_fallback");
+          this->post_t3_tr37_fallback_once_active_ = false;
+        }
         if ((this->dongle_events_ & DONGLE_STARTUP_READY_MASK) == DONGLE_STARTUP_READY_MASK) {
           this->transition_dongle_startup_(DongleStartupState::READY, now);
           return false;
@@ -9079,6 +9108,14 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         return false;
       }
       if (time_reached(now, this->dongle_startup_deadline_ms_)) {
+        if (this->post_t3_tr37_fallback_once_active_) {
+          ESP_LOGI(TAG, "tr37_fallback_once_result=timeout");
+          ESP_LOGI(TAG, "continue_to_stats_after_tr37_fallback");
+          this->post_t3_tr37_fallback_once_active_ = false;
+          this->post_gate_tx_ready_event_ = true;
+          this->transition_dongle_startup_(DongleStartupState::READY, now);
+          return false;
+        }
         if (this->dongle_startup_tr37_attempt_ < kDongleStartupMaxTr37Attempts) {
           XML_STATS_LOGD("dongle_startup_retry state=SEND_TR37 attempt=%u",
                    static_cast<unsigned>(this->dongle_startup_tr37_attempt_));

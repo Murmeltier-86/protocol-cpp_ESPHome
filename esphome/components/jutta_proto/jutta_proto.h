@@ -908,6 +908,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint16_t post_t3_runtime_observe_tv_seen_{0};
   uint16_t post_t3_runtime_observe_binary_candidates_{0};
   uint16_t post_t3_runtime_observe_session_core_{0};
+  bool post_t3_tr37_fallback_once_active_{false};
   bool live_idle_observe_active_{false};
   bool live_idle_observe_done_{false};
   bool live_idle_observe_tf_seen_{false};
