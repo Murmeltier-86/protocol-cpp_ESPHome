@@ -55,6 +55,8 @@ constexpr uint32_t kDongleStartupTimeoutMs = 1500;
 constexpr uint32_t kDongleStartupT0AfterT3TimeoutMs = 5000;
 constexpr uint32_t kDongleStartupT3QuietMs = 1000;
 constexpr uint32_t kPostT3RuntimeObserveMs = 5000;
+constexpr uint32_t kBluefrogOriginalCoreRoundObserveMs = 5000;
+constexpr uint32_t kBluefrogOriginalCoreRoundStepTimeoutMs = 3000;
 constexpr uint32_t kDongleStartupGateOnlyQuietMs = 2000;
 constexpr uint32_t kDongleStartupMaxWaitAfterT3Ms = 5000;
 constexpr uint32_t kDongleStartupTr37TimeoutMs = 3000;
@@ -4387,6 +4389,33 @@ std::string JuraComponent::startup_pending_followup_tx_() const {
     case DongleStartupState::WAIT_TR37:
       pending.emplace_back("wait_@tr:37");
       break;
+    case DongleStartupState::CORE_ROUND_SEND_T0:
+      pending.emplace_back("@T0");
+      break;
+    case DongleStartupState::CORE_ROUND_WAIT_T0:
+      pending.emplace_back("wait_@t0");
+      break;
+    case DongleStartupState::CORE_ROUND_SEND_T1:
+      pending.emplace_back("@T1");
+      break;
+    case DongleStartupState::CORE_ROUND_WAIT_T1:
+      pending.emplace_back("wait_@t1");
+      break;
+    case DongleStartupState::CORE_ROUND_WAIT_T2:
+      pending.emplace_back("wait_@T2");
+      break;
+    case DongleStartupState::CORE_ROUND_SEND_T2:
+      pending.emplace_back("@t2:8100000000");
+      break;
+    case DongleStartupState::CORE_ROUND_WAIT_T3:
+      pending.emplace_back("wait_@T3");
+      break;
+    case DongleStartupState::CORE_ROUND_SEND_T3:
+      pending.emplace_back("@t3");
+      break;
+    case DongleStartupState::CORE_ROUND_OBSERVE:
+      pending.emplace_back("observe_@TF_@TV");
+      break;
     default:
       break;
   }
@@ -8389,6 +8418,24 @@ const char *JuraComponent::dongle_startup_state_name_(DongleStartupState state) 
       return "send_tr37";
     case DongleStartupState::WAIT_TR37:
       return "wait_tr37";
+    case DongleStartupState::CORE_ROUND_SEND_T0:
+      return "core_round_send_t0";
+    case DongleStartupState::CORE_ROUND_WAIT_T0:
+      return "core_round_wait_t0";
+    case DongleStartupState::CORE_ROUND_SEND_T1:
+      return "core_round_send_t1";
+    case DongleStartupState::CORE_ROUND_WAIT_T1:
+      return "core_round_wait_t1";
+    case DongleStartupState::CORE_ROUND_WAIT_T2:
+      return "core_round_wait_t2";
+    case DongleStartupState::CORE_ROUND_SEND_T2:
+      return "core_round_send_t2";
+    case DongleStartupState::CORE_ROUND_WAIT_T3:
+      return "core_round_wait_t3";
+    case DongleStartupState::CORE_ROUND_SEND_T3:
+      return "core_round_send_t3";
+    case DongleStartupState::CORE_ROUND_OBSERVE:
+      return "core_round_observe";
     case DongleStartupState::READY:
       return "ready";
     case DongleStartupState::FAILED:
@@ -8578,6 +8625,9 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
     this->dongle_tr_payload_ = trimmed;
   } else if (lower.rfind("@tf:", 0) == 0) {
     bit = DONGLE_EVENT_TF;
+    if (this->bluefrog_original_core_round_active_) {
+      this->bluefrog_original_core_round_tf_seen_ = true;
+    }
     if (this->status_debug_) {
       ESP_LOGD(TAG, "passive_status_frame type=tf line=\"%s\"",
                sanitize_text_for_api(trimmed).c_str());
@@ -8587,6 +8637,10 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
                sanitize_text_for_api(trimmed).c_str());
     }
   } else if (lower.rfind("@tv:", 0) == 0) {
+    if (this->bluefrog_original_core_round_active_) {
+      this->bluefrog_original_core_round_tv_seen_ = true;
+      ESP_LOGI(TAG, "bluefrog_original_core_round_rx line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
+    }
     if (this->status_debug_) {
       ESP_LOGD(TAG, "passive_status_frame type=tv line=\"%s\"",
                sanitize_text_for_api(trimmed).c_str());
@@ -8604,6 +8658,11 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
     ++this->post_t3_runtime_observe_session_core_;
     ESP_LOGI(TAG, "post_t3_runtime_observe_session_core line=\"%s\"",
              sanitize_text_for_api(trimmed).c_str());
+  }
+  if (this->bluefrog_original_core_round_active_ &&
+      (bit == DONGLE_EVENT_T0 || bit == DONGLE_EVENT_T1 || bit == DONGLE_EVENT_T2 ||
+       bit == DONGLE_EVENT_T3 || bit == DONGLE_EVENT_TF)) {
+    ESP_LOGI(TAG, "bluefrog_original_core_round_rx line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
   }
 
   bool newly_set = (this->dongle_events_ & bit) == 0;
@@ -8693,6 +8752,27 @@ void JuraComponent::process_dongle_startup_rx_(uint32_t now) {
   this->dongle_startup_rx_buffer_ = remainder;
 }
 
+void JuraComponent::finish_bluefrog_original_core_round_(uint32_t now, bool timeout) {
+  const uint32_t rx_26 =
+      this->bluefrog_26_rx_machine_to_esp_count_ - this->bluefrog_original_core_round_rx26_baseline_;
+  const bool tf_seen =
+      this->bluefrog_original_core_round_tf_seen_ ||
+      this->bluefrog_26_tf_seen_count_ > this->bluefrog_original_core_round_tf_baseline_;
+  const bool tv_seen =
+      this->bluefrog_original_core_round_tv_seen_ ||
+      this->bluefrog_26_tv_seen_count_ > this->bluefrog_original_core_round_tv_baseline_;
+  this->bluefrog_original_core_round_tf_seen_ = tf_seen;
+  this->bluefrog_original_core_round_tv_seen_ = tv_seen;
+  ESP_LOGI(TAG, "bluefrog_original_core_round_result tf_seen=%s tv_seen=%s rx_26=%u timeout=%s",
+           YESNO(tf_seen), YESNO(tv_seen), static_cast<unsigned>(rx_26), YESNO(timeout));
+  this->bluefrog_original_core_round_active_ = false;
+  this->bluefrog_original_core_round_done_ = true;
+  this->bluefrog_original_core_round_deadline_ms_ = 0;
+  this->bluefrog_original_core_round_observe_start_ms_ = 0;
+  this->post_gate_tx_ready_event_ = true;
+  this->transition_dongle_startup_(DongleStartupState::READY, now);
+}
+
 bool JuraComponent::process_dongle_startup_(uint32_t now) {
   if (!this->xml_dongle_startup_) {
     this->stats_session_ready_ = true;
@@ -8744,6 +8824,15 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       this->bluefrog_26_replay_rx_baseline_ = this->bluefrog_26_rx_machine_to_esp_count_;
       this->bluefrog_26_replay_start_ms_ = 0;
       this->bluefrog_26_replay_deadline_ms_ = 0;
+      this->bluefrog_original_core_round_active_ = false;
+      this->bluefrog_original_core_round_done_ = false;
+      this->bluefrog_original_core_round_tf_seen_ = false;
+      this->bluefrog_original_core_round_tv_seen_ = false;
+      this->bluefrog_original_core_round_deadline_ms_ = 0;
+      this->bluefrog_original_core_round_observe_start_ms_ = 0;
+      this->bluefrog_original_core_round_rx26_baseline_ = this->bluefrog_26_rx_machine_to_esp_count_;
+      this->bluefrog_original_core_round_tf_baseline_ = this->bluefrog_26_tf_seen_count_;
+      this->bluefrog_original_core_round_tv_baseline_ = this->bluefrog_26_tv_seen_count_;
       this->dongle_startup_rx_buffer_.clear();
       this->dongle_startup_probe_attempt_ = 0;
       this->dongle_startup_t1_attempt_ = 0;
@@ -9101,6 +9190,19 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
           this->post_t3_tr37_fallback_once_active_ = false;
         }
         if ((this->dongle_events_ & DONGLE_STARTUP_READY_MASK) == DONGLE_STARTUP_READY_MASK) {
+          if (this->enable_bluefrog_original_core_round_ && !this->bluefrog_original_core_round_done_) {
+            this->bluefrog_original_core_round_active_ = true;
+            this->bluefrog_original_core_round_tf_seen_ = false;
+            this->bluefrog_original_core_round_tv_seen_ = false;
+            this->bluefrog_original_core_round_deadline_ms_ = 0;
+            this->bluefrog_original_core_round_observe_start_ms_ = 0;
+            this->bluefrog_original_core_round_rx26_baseline_ = this->bluefrog_26_rx_machine_to_esp_count_;
+            this->bluefrog_original_core_round_tf_baseline_ = this->bluefrog_26_tf_seen_count_;
+            this->bluefrog_original_core_round_tv_baseline_ = this->bluefrog_26_tv_seen_count_;
+            ESP_LOGI(TAG, "bluefrog_original_core_round_start");
+            this->transition_dongle_startup_(DongleStartupState::CORE_ROUND_SEND_T0, now);
+            return false;
+          }
           this->transition_dongle_startup_(DongleStartupState::READY, now);
           return false;
         }
@@ -9146,6 +9248,109 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
           this->fail_dongle_startup_(now, this->xml_dongle_startup_mode_ == "gate_only" ? "gate_only_tr37_timeout"
                                                                                         : "tr37_timeout");
         }
+      }
+      return false;
+
+    case DongleStartupState::CORE_ROUND_SEND_T0:
+      this->dongle_events_ &= ~DONGLE_EVENT_T0;
+      ESP_LOGI(TAG, "bluefrog_original_core_round_tx line=\"@T0\"");
+      if (!this->send_dongle_startup_command_("@T0", now, true)) {
+        this->finish_bluefrog_original_core_round_(now, true);
+        return false;
+      }
+      this->bluefrog_original_core_round_deadline_ms_ = now + kBluefrogOriginalCoreRoundStepTimeoutMs;
+      this->transition_dongle_startup_(DongleStartupState::CORE_ROUND_WAIT_T0, now);
+      return false;
+
+    case DongleStartupState::CORE_ROUND_WAIT_T0:
+      if ((this->dongle_events_ & DONGLE_EVENT_T0) != 0) {
+        this->transition_dongle_startup_(DongleStartupState::CORE_ROUND_SEND_T1, now);
+        return false;
+      }
+      if (time_reached(now, this->bluefrog_original_core_round_deadline_ms_)) {
+        this->finish_bluefrog_original_core_round_(now, true);
+      }
+      return false;
+
+    case DongleStartupState::CORE_ROUND_SEND_T1:
+      this->dongle_events_ &= ~DONGLE_EVENT_T1;
+      this->dongle_events_ &= ~DONGLE_EVENT_T2;
+      ESP_LOGI(TAG, "bluefrog_original_core_round_tx line=\"@T1\"");
+      if (!this->send_dongle_startup_command_("@T1", now, true)) {
+        this->finish_bluefrog_original_core_round_(now, true);
+        return false;
+      }
+      this->bluefrog_original_core_round_deadline_ms_ = now + kBluefrogOriginalCoreRoundStepTimeoutMs;
+      this->transition_dongle_startup_(DongleStartupState::CORE_ROUND_WAIT_T1, now);
+      return false;
+
+    case DongleStartupState::CORE_ROUND_WAIT_T1:
+      if ((this->dongle_events_ & DONGLE_EVENT_T1) != 0) {
+        this->bluefrog_original_core_round_deadline_ms_ = now + kBluefrogOriginalCoreRoundStepTimeoutMs;
+        this->transition_dongle_startup_(DongleStartupState::CORE_ROUND_WAIT_T2, now);
+        return false;
+      }
+      if (time_reached(now, this->bluefrog_original_core_round_deadline_ms_)) {
+        this->finish_bluefrog_original_core_round_(now, true);
+      }
+      return false;
+
+    case DongleStartupState::CORE_ROUND_WAIT_T2:
+      if ((this->dongle_events_ & DONGLE_EVENT_T2) != 0) {
+        this->transition_dongle_startup_(DongleStartupState::CORE_ROUND_SEND_T2, now);
+        return false;
+      }
+      if (time_reached(now, this->bluefrog_original_core_round_deadline_ms_)) {
+        this->finish_bluefrog_original_core_round_(now, true);
+      }
+      return false;
+
+    case DongleStartupState::CORE_ROUND_SEND_T2:
+      this->dongle_events_ &= ~DONGLE_EVENT_T3;
+      ESP_LOGI(TAG, "bluefrog_original_core_round_tx line=\"@t2:8100000000\"");
+      if (!this->send_dongle_startup_command_("@t2:8100000000", now, true)) {
+        this->finish_bluefrog_original_core_round_(now, true);
+        return false;
+      }
+      this->bluefrog_original_core_round_deadline_ms_ = now + kBluefrogOriginalCoreRoundStepTimeoutMs;
+      this->transition_dongle_startup_(DongleStartupState::CORE_ROUND_WAIT_T3, now);
+      return false;
+
+    case DongleStartupState::CORE_ROUND_WAIT_T3:
+      if ((this->dongle_events_ & DONGLE_EVENT_T3) != 0) {
+        this->transition_dongle_startup_(DongleStartupState::CORE_ROUND_SEND_T3, now);
+        return false;
+      }
+      if (time_reached(now, this->bluefrog_original_core_round_deadline_ms_)) {
+        this->finish_bluefrog_original_core_round_(now, true);
+      }
+      return false;
+
+    case DongleStartupState::CORE_ROUND_SEND_T3:
+      ESP_LOGI(TAG, "bluefrog_original_core_round_tx line=\"@t3\"");
+      if (!this->send_dongle_startup_command_("@t3", now, true)) {
+        this->finish_bluefrog_original_core_round_(now, true);
+        return false;
+      }
+      this->bluefrog_original_core_round_observe_start_ms_ = now;
+      this->bluefrog_original_core_round_deadline_ms_ = now + kBluefrogOriginalCoreRoundObserveMs;
+      this->bluefrog_original_core_round_rx26_baseline_ = this->bluefrog_26_rx_machine_to_esp_count_;
+      this->bluefrog_original_core_round_tf_baseline_ = this->bluefrog_26_tf_seen_count_;
+      this->bluefrog_original_core_round_tv_baseline_ = this->bluefrog_26_tv_seen_count_;
+      ESP_LOGI(TAG, "bluefrog_original_core_round_observe_start duration_ms=%u",
+               static_cast<unsigned>(kBluefrogOriginalCoreRoundObserveMs));
+      this->transition_dongle_startup_(DongleStartupState::CORE_ROUND_OBSERVE, now);
+      return false;
+
+    case DongleStartupState::CORE_ROUND_OBSERVE:
+      if (this->bluefrog_original_core_round_tf_seen_ || this->bluefrog_original_core_round_tv_seen_ ||
+          this->bluefrog_26_tf_seen_count_ > this->bluefrog_original_core_round_tf_baseline_ ||
+          this->bluefrog_26_tv_seen_count_ > this->bluefrog_original_core_round_tv_baseline_) {
+        this->finish_bluefrog_original_core_round_(now, false);
+        return false;
+      }
+      if (time_reached(now, this->bluefrog_original_core_round_deadline_ms_)) {
+        this->finish_bluefrog_original_core_round_(now, true);
       }
       return false;
 
