@@ -39,6 +39,7 @@ struct JuraDecodedField {
 struct JuraProductDesc {
   uint32_t code{0};
   std::string name;
+  std::string text;
   std::string kind;
   bool active{true};
   bool double_product{false};

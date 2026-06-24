@@ -1357,6 +1357,90 @@ std::string to_lower_copy(const std::string &value) {
   return result;
 }
 
+std::string jura_live_display_name(const std::string &raw_name) {
+  std::string key = to_lower_copy(collapse_whitespace(raw_name));
+  if (key == "fill water" || key == "fill watertank" || key == "fill water tank") {
+    return "Wassertank füllen";
+  }
+  if (key == "empty grounds") {
+    return "Kaffeesatzbehälter leeren";
+  }
+  if (key == "empty tray") {
+    return "Restwasserschale leeren";
+  }
+  if (key == "insert coffee bin" || key == "insert grounds box") {
+    return "Kaffeesatzbehälter einsetzen";
+  }
+  if (key == "insert tray") {
+    return "Restwasserschale einsetzen";
+  }
+  if (key == "no beans" || key == "add beans") {
+    return "Bohnen füllen";
+  }
+  if (key == "coffee ready" || key == "cappurinse finished") {
+    return "Bereit";
+  }
+  if (key == "heating up") {
+    return "Gerät heizt auf";
+  }
+  if (key == "startup") {
+    return "Startet";
+  }
+  if (key == "rinse process" || key == "coffee rinsing") {
+    return "Spülung läuft";
+  }
+  if (key == "press rinse") {
+    return "Pflege drücken";
+  }
+  if (key == "please wait" || key == "waiting") {
+    return "Bitte warten";
+  }
+  if (key == "system filling" || key == "filling process") {
+    return "System füllt";
+  }
+  if (key == "system emptying") {
+    return "System leert";
+  }
+  if (key == "press button") {
+    return "Taste drücken";
+  }
+  return raw_name;
+}
+
+bool jura_alert_type_is_blocking(const std::string &type) {
+  std::string lower = to_lower_copy(type);
+  trim_in_place(lower);
+  return lower == "block";
+}
+
+bool jura_alert_type_is_user_visible_nonblocking(const std::string &type) {
+  std::string lower = to_lower_copy(type);
+  trim_in_place(lower);
+  return lower == "info" || lower == "ip";
+}
+
+std::string format_live_progress_text(const std::string &state_text, const std::string &product_text,
+                                      bool has_progress, uint8_t progress_value, uint8_t progress_total) {
+  std::string result = state_text;
+  if (!product_text.empty()) {
+    if (!result.empty()) {
+      result.append(" · ");
+    }
+    result.append(product_text);
+  }
+  if (has_progress) {
+    if (!result.empty()) {
+      result.push_back(' ');
+    }
+    result.push_back('(');
+    result.append(std::to_string(static_cast<unsigned>(progress_value)));
+    result.push_back('/');
+    result.append(std::to_string(static_cast<unsigned>(progress_total)));
+    result.push_back(')');
+  }
+  return result;
+}
+
 std::string sanitize_identifier(const std::string &value) {
   std::string result;
   bool last_was_underscore = false;
@@ -2254,13 +2338,17 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
       break;
     }
   }
-  ESP_LOGI(TAG, "bluefrog_26_frame direction=%s source=%s time_ms=%u len=%u hex=\"%s\" ascii_preview=\"%s\" rx_counter=%u",
-           direction != nullptr ? direction : "unknown", source != nullptr ? source : "unknown",
-           static_cast<unsigned>(now), static_cast<unsigned>(frame.size()), this->last_26_frame_hex_.c_str(),
-           sanitize_text_for_api(ascii_preview).c_str(),
-           static_cast<unsigned>(this->bluefrog_26_rx_machine_to_esp_count_));
-  ESP_LOGI(TAG, "bluefrog_26_response_cluster direction=%s source=%s cluster=\"%s\"",
-           direction != nullptr ? direction : "unknown", source != nullptr ? source : "unknown", cluster.c_str());
+  if (this->bluefrog_live_debug_ || this->xml_stats_debug_) {
+    ESP_LOGI(TAG,
+             "bluefrog_26_frame direction=%s source=%s time_ms=%u len=%u hex=\"%s\" ascii_preview=\"%s\" "
+             "rx_counter=%u",
+             direction != nullptr ? direction : "unknown", source != nullptr ? source : "unknown",
+             static_cast<unsigned>(now), static_cast<unsigned>(frame.size()), this->last_26_frame_hex_.c_str(),
+             sanitize_text_for_api(ascii_preview).c_str(),
+             static_cast<unsigned>(this->bluefrog_26_rx_machine_to_esp_count_));
+    ESP_LOGI(TAG, "bluefrog_26_response_cluster direction=%s source=%s cluster=\"%s\"",
+             direction != nullptr ? direction : "unknown", source != nullptr ? source : "unknown", cluster.c_str());
+  }
 
   const std::vector<InnerTransportDecodeResult> candidates = decode_inner_transport_candidates(frame);
   const InnerTransportDecodeResult *selected = nullptr;
@@ -2290,23 +2378,25 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
     }
     this->publish_text_if_changed_(this->live_db_status_source_sensor_, this->current_live_db_status_source_,
                                    has_binary_candidate ? "bluefrog_26_binary_cache_candidate" : "unknown_26_frame");
-    ESP_LOGI(TAG,
-             "bluefrog_26_class direction=%s class=%s decoded=NO unknown_count=%u maybe_binary_cacheframe=%s",
-             direction != nullptr ? direction : "unknown",
-             has_binary_candidate ? "binary_or_nonprintable" : "unknown", static_cast<unsigned>(this->bluefrog_26_unknown_count_),
-             YESNO(has_binary_candidate));
-    ESP_LOGI(TAG, "bluefrog_26_decoded_class class=%s decoded=NO cluster=\"%s\"",
-             has_binary_candidate ? "binary_or_nonprintable" : "unknown", cluster.c_str());
-    ESP_LOGI(TAG,
-             "bluefrog_26_dispatch binary_cache_candidate len=%u prefix=\"%s\" cluster=\"%s\" "
-             "binary_candidate_total=%u non_uart_ascii_candidate=%s",
-             static_cast<unsigned>(frame.size()), compact_hex_string(frame.substr(0, std::min<size_t>(frame.size(), 6U)), 6).c_str(),
-             cluster.c_str(), static_cast<unsigned>(this->bluefrog_26_binary_candidate_count_),
-             YESNO(has_non_uart_ascii_candidate));
-    ESP_LOGI(TAG, "bluefrog_26_binary_cache_candidate len=%u prefix=\"%s\" cluster=\"%s\" total=%u",
-             static_cast<unsigned>(frame.size()),
-             compact_hex_string(frame.substr(0, std::min<size_t>(frame.size(), 6U)), 6).c_str(), cluster.c_str(),
-             static_cast<unsigned>(this->bluefrog_26_binary_candidate_count_));
+    if (this->bluefrog_live_debug_) {
+      ESP_LOGI(TAG,
+               "bluefrog_26_class direction=%s class=%s decoded=NO unknown_count=%u maybe_binary_cacheframe=%s",
+               direction != nullptr ? direction : "unknown",
+               has_binary_candidate ? "binary_or_nonprintable" : "unknown",
+               static_cast<unsigned>(this->bluefrog_26_unknown_count_), YESNO(has_binary_candidate));
+      ESP_LOGI(TAG, "bluefrog_26_decoded_class class=%s decoded=NO cluster=\"%s\"",
+               has_binary_candidate ? "binary_or_nonprintable" : "unknown", cluster.c_str());
+      ESP_LOGI(TAG,
+               "bluefrog_26_dispatch binary_cache_candidate len=%u prefix=\"%s\" cluster=\"%s\" "
+               "binary_candidate_total=%u non_uart_ascii_candidate=%s",
+               static_cast<unsigned>(frame.size()),
+               compact_hex_string(frame.substr(0, std::min<size_t>(frame.size(), 6U)), 6).c_str(), cluster.c_str(),
+               static_cast<unsigned>(this->bluefrog_26_binary_candidate_count_), YESNO(has_non_uart_ascii_candidate));
+      ESP_LOGI(TAG, "bluefrog_26_binary_cache_candidate len=%u prefix=\"%s\" cluster=\"%s\" total=%u",
+               static_cast<unsigned>(frame.size()),
+               compact_hex_string(frame.substr(0, std::min<size_t>(frame.size(), 6U)), 6).c_str(), cluster.c_str(),
+               static_cast<unsigned>(this->bluefrog_26_binary_candidate_count_));
+    }
     return false;
   }
 
@@ -2330,13 +2420,16 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
     route = "session_core";
   }
 
-  ESP_LOGI(TAG, "bluefrog_26_decoded direction=%s table=%s class=%s line=\"%s\"",
-           direction != nullptr ? direction : "unknown", selected->table_name, klass,
-           transport_payload_log_text(decoded).c_str());
-  ESP_LOGI(TAG, "bluefrog_26_decoded_line table=%s line=\"%s\" known_ascii=%s",
-           selected->table_name, transport_payload_log_text(decoded).c_str(), YESNO(!decoded.empty() && decoded[0] == '@'));
-  ESP_LOGI(TAG, "bluefrog_26_decoded_class class=%s table=%s cluster=\"%s\"", klass, selected->table_name,
-           cluster.c_str());
+  if (this->bluefrog_live_debug_ || std::strcmp(route, "tf_cachewriter") == 0 ||
+      std::strcmp(route, "tv_cachewriter") == 0) {
+    ESP_LOGI(TAG, "bluefrog_26_decoded direction=%s table=%s class=%s line=\"%s\"",
+             direction != nullptr ? direction : "unknown", selected->table_name, klass,
+             transport_payload_log_text(decoded).c_str());
+    ESP_LOGI(TAG, "bluefrog_26_decoded_line table=%s line=\"%s\" known_ascii=%s",
+             selected->table_name, transport_payload_log_text(decoded).c_str(), YESNO(!decoded.empty() && decoded[0] == '@'));
+    ESP_LOGI(TAG, "bluefrog_26_decoded_class class=%s table=%s cluster=\"%s\"", klass, selected->table_name,
+             cluster.c_str());
+  }
   this->publish_text_if_changed_(this->live_db_status_source_sensor_, this->current_live_db_status_source_, klass);
   if (this->post_t3_runtime_observe_active_) {
     ESP_LOGI(TAG, "post_t3_runtime_observe_decoded line=\"%s\"",
@@ -2369,14 +2462,18 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
     this->handle_decoded_machine_line_(decoded, "bluefrog_26_tv_cachewriter");
     return true;
   }
-  ESP_LOGI(TAG, "bluefrog_26_dispatch decoded_line=\"%s\" route=%s ascii_decoded_total=%u",
-           transport_payload_log_text(decoded).c_str(), route,
-           static_cast<unsigned>(this->bluefrog_26_ascii_decoded_count_));
+  if (this->bluefrog_live_debug_) {
+    ESP_LOGI(TAG, "bluefrog_26_dispatch decoded_line=\"%s\" route=%s ascii_decoded_total=%u",
+             transport_payload_log_text(decoded).c_str(), route,
+             static_cast<unsigned>(this->bluefrog_26_ascii_decoded_count_));
+  }
   if (std::strcmp(route, "session_core") == 0) {
     this->handle_decoded_machine_line_(decoded, "bluefrog_26_ascii");
   } else {
-    ESP_LOGI(TAG, "bluefrog_26_decoded_unknown_ascii line=\"%s\" table=%s cluster=\"%s\"",
-             transport_payload_log_text(decoded).c_str(), selected->table_name, cluster.c_str());
+    if (this->bluefrog_live_debug_) {
+      ESP_LOGI(TAG, "bluefrog_26_decoded_unknown_ascii line=\"%s\" table=%s cluster=\"%s\"",
+               transport_payload_log_text(decoded).c_str(), selected->table_name, cluster.c_str());
+    }
   }
   return true;
 }
@@ -2801,7 +2898,7 @@ void JuraComponent::update_machine_status_from_state_(const char *source) {
   const char *safe_source = source != nullptr ? source : "unknown";
   const bool online = this->machine_online_state_ || this->is_ready();
   const bool live_status_seen = this->has_valid_tf_status_ || this->has_valid_tv_status_;
-  const bool blocking_alert = this->fill_water_required_ || !this->current_machine_warning_.empty();
+  const bool blocking_alert = this->current_blocking_alert_active_;
   std::string status;
   bool ready = this->machine_ready_state_ || this->is_ready();
 
@@ -2847,6 +2944,11 @@ void JuraComponent::update_machine_status_from_state_(const char *source) {
       ESP_LOGD(TAG, "machine_status_update source=handshake ignored_reason=active_blocking_alert");
     }
     ESP_LOGD(TAG, "machine_status_update source=%s priority=alert status=\"%s\"", safe_source,
+             sanitize_text_for_api(status).c_str());
+  } else if (this->current_tv_progress_active_ && !this->current_display_status_.empty()) {
+    status = this->current_display_status_;
+    ready = false;
+    ESP_LOGD(TAG, "machine_status_update source=%s priority=tv_progress status=\"%s\"", safe_source,
              sanitize_text_for_api(status).c_str());
   } else if (!this->current_display_status_.empty()) {
     status = this->current_display_status_;
@@ -2905,11 +3007,19 @@ bool JuraComponent::publish_tf_status_(const std::string &response, const char *
     data.push_back(static_cast<uint8_t>(std::strtoul(byte_text, nullptr, 16)));
   }
 
+  auto has_bit = [&data](size_t bit) -> bool {
+    const size_t byte_index = bit / 8U;
+    if (byte_index >= data.size()) {
+      return false;
+    }
+    const uint8_t mask = static_cast<uint8_t>(0x80U >> (bit % 8U));
+    return (data[byte_index] & mask) != 0;
+  };
+
   std::vector<uint16_t> bits;
   bits.reserve(data.size() * 8);
   for (size_t bit = 0; bit < data.size() * 8; ++bit) {
-    const uint8_t mask = static_cast<uint8_t>(1U << (7U - (bit % 8U)));
-    if ((data[bit / 8U] & mask) != 0) {
+    if (has_bit(bit)) {
       bits.push_back(static_cast<uint16_t>(bit));
     }
   }
@@ -2922,15 +3032,50 @@ bool JuraComponent::publish_tf_status_(const std::string &response, const char *
     bits_stream << bits[i];
   }
   const std::string bits_text = bits_stream.str();
-  ESP_LOGD(TAG, "tf_status decoded=\"%s\" bits=\"%s\"", sanitize_text_for_api(trimmed).c_str(), bits_text.c_str());
 
-  auto has_bit = [&data](size_t bit) -> bool {
-    if (bit >= data.size() * 8) {
-      return false;
+  this->ensure_xml_mapping_loaded_();
+
+  bool coffee_ready = has_bit(13);
+  bool fill_water = has_bit(1);
+  std::vector<std::string> blocking_alerts;
+  std::vector<std::string> nonblocking_alerts;
+  std::vector<std::string> visible_alerts;
+
+  if (this->xml_mapping_.valid && !this->xml_mapping_.alerts.empty()) {
+    for (const auto &alert : this->xml_mapping_.alerts) {
+      if (!has_bit(alert.bit)) {
+        continue;
+      }
+      std::string alert_key = to_lower_copy(collapse_whitespace(alert.name));
+      const std::string display = jura_live_display_name(alert.name);
+      if (alert_key == "coffee ready") {
+        coffee_ready = true;
+        continue;
+      }
+      if (alert_key == "fill water") {
+        fill_water = true;
+      }
+      if (jura_alert_type_is_blocking(alert.type)) {
+        append_unique(blocking_alerts, display.empty() ? alert.name : display);
+        append_unique(visible_alerts, display.empty() ? alert.name : display);
+      } else if (jura_alert_type_is_user_visible_nonblocking(alert.type)) {
+        append_unique(nonblocking_alerts, display.empty() ? alert.name : display);
+        append_unique(visible_alerts, display.empty() ? alert.name : display);
+      }
+      if (this->bluefrog_live_debug_) {
+        const size_t byte_index = alert.bit / 8U;
+        const uint8_t mask = static_cast<uint8_t>(0x80U >> (alert.bit % 8U));
+        ESP_LOGD(TAG, "tf_xml_alert bit=%u byte=%u mask=0x%02X name=\"%s\" type=\"%s\" active=YES",
+                 static_cast<unsigned>(alert.bit), static_cast<unsigned>(byte_index), static_cast<unsigned>(mask),
+                 sanitize_text_for_api(alert.name).c_str(), sanitize_text_for_api(alert.type).c_str());
+      }
     }
-    const uint8_t mask = static_cast<uint8_t>(1U << (7U - (bit % 8U)));
-    return (data[bit / 8U] & mask) != 0;
-  };
+  } else {
+    if (fill_water) {
+      blocking_alerts.emplace_back("Wassertank füllen");
+      visible_alerts.emplace_back("Wassertank füllen");
+    }
+  }
 
   this->has_valid_tf_status_ = true;
   this->last_tf_status_ms_ = esphome::millis();
@@ -2939,54 +3084,35 @@ bool JuraComponent::publish_tf_status_(const std::string &response, const char *
   this->bluefrog_original_core_round_retry_blocked_logged_ = false;
   this->last_tf_status_frame_ = trimmed;
   this->current_live_status_source_ = source != nullptr ? source : "@TF";
-  const bool fill_water = has_bit(1);
-  const bool coffee_ready = has_bit(13);
   this->fill_water_required_ = fill_water;
   this->tf_coffee_ready_active_ = coffee_ready;
+  this->current_blocking_alert_active_ = !blocking_alerts.empty();
 
-  auto log_alert_check = [&has_bit](size_t xml_bit) {
-    const size_t zero_based_index = xml_bit;
-    const size_t one_based_index = xml_bit > 0 ? xml_bit - 1 : 0;
-    const uint8_t zero_based_mask = static_cast<uint8_t>(1U << (7U - (zero_based_index % 8U)));
-    const uint8_t one_based_mask = static_cast<uint8_t>(1U << (7U - (one_based_index % 8U)));
-    const bool active_zero_based = has_bit(zero_based_index);
-    const bool active_one_based = xml_bit > 0 && has_bit(one_based_index);
-    ESP_LOGD(TAG,
-             "tf_alert_check xml_bit=%u zero_based_mask=0x%02X one_based_mask=0x%02X "
-             "active_zero_based=%s active_one_based=%s",
-             static_cast<unsigned>(xml_bit), static_cast<unsigned>(zero_based_mask),
-             static_cast<unsigned>(one_based_mask), YESNO(active_zero_based), YESNO(active_one_based));
-  };
-
-  std::vector<std::string> active_alerts;
-  if (fill_water) {
-    active_alerts.emplace_back("Wassertank füllen");
-    this->current_machine_warning_ = "Wassertank füllen";
-    this->current_display_status_ = "Wassertank füllen";
-  } else if (this->current_machine_warning_ == "Wassertank füllen") {
-    this->current_machine_warning_.clear();
-  }
-  if (coffee_ready) {
-    if (!fill_water) {
-      this->current_display_status_ = "Bereit";
+  if (!blocking_alerts.empty()) {
+    this->current_machine_warning_ = join_values(blocking_alerts, ", ");
+    this->current_display_status_ = blocking_alerts.front();
+    this->current_tv_progress_active_ = false;
+  } else if (!nonblocking_alerts.empty()) {
+    this->current_machine_warning_ = join_values(nonblocking_alerts, ", ");
+    if (!this->current_tv_progress_active_) {
+      this->current_display_status_ = coffee_ready ? "Bereit" : nonblocking_alerts.front();
     }
-  } else if (!fill_water && this->current_display_status_ == "Wassertank füllen") {
-    this->current_display_status_.clear();
+  } else {
+    this->current_machine_warning_.clear();
+    if (coffee_ready && !this->current_tv_progress_active_) {
+      this->current_display_status_ = "Bereit";
+    } else if (!coffee_ready && !this->current_tv_progress_active_) {
+      this->current_display_status_.clear();
+    }
   }
-  this->current_active_alerts_ = join_values(active_alerts, ", ");
+  this->current_active_alerts_ = join_values(visible_alerts, ", ");
 
-  const std::string active_alerts_log =
-      this->current_active_alerts_.empty() ? "keine" : sanitize_text_for_api(this->current_active_alerts_);
-  ESP_LOGD(TAG, "tf_decode raw=\"%s\" valid=YES active_alerts=\"%s\"",
-           sanitize_text_for_api(trimmed).c_str(), active_alerts_log.c_str());
-  ESP_LOGD(TAG, "tf_status decoded payload=\"%s\" active_alerts=\"%s\"",
-           sanitize_text_for_api(payload).c_str(), active_alerts_log.c_str());
-  ESP_LOGD(TAG, "tf_payload raw=%s bytes=%s", sanitize_text_for_api(payload).c_str(),
-           format_hex_string(data).c_str());
-  log_alert_check(1);
-  log_alert_check(13);
-  ESP_LOGD(TAG, "tf_alert bit=1 name=\"fill water\" active=%s type=block", YESNO(fill_water));
-  ESP_LOGD(TAG, "tf_alert bit=13 name=\"coffee ready\" active=%s", YESNO(coffee_ready));
+  if (this->bluefrog_live_debug_) {
+    const std::string active_alerts_log = this->current_active_alerts_.empty() ? "keine" : this->current_active_alerts_;
+    ESP_LOGD(TAG, "tf_status decoded=\"%s\" bits=\"%s\" active_alerts=\"%s\" blocking=%s coffee_ready=%s",
+             sanitize_text_for_api(trimmed).c_str(), bits_text.c_str(), sanitize_text_for_api(active_alerts_log).c_str(),
+             YESNO(this->current_blocking_alert_active_), YESNO(coffee_ready));
+  }
 
   if (this->tf_welcome_sensor_ != nullptr) {
     this->tf_welcome_sensor_->publish_state(has_bit(11));
@@ -3016,61 +3142,100 @@ bool JuraComponent::handle_tv_progress_(const std::string &response, const char 
   }
 
   const std::string payload = trimmed.substr(4);
-  if (payload.size() < 2 || !std::isxdigit(static_cast<unsigned char>(payload[0])) ||
-      !std::isxdigit(static_cast<unsigned char>(payload[1]))) {
-    ESP_LOGD(TAG, "tv_progress ignored decoded=\"%s\" reason=invalid_hex",
-             sanitize_text_for_api(trimmed).c_str());
+  if (payload.size() < 2 || (payload.size() % 2U) != 0) {
+    ESP_LOGD(TAG, "tv_progress ignored decoded=\"%s\" reason=invalid_hex", sanitize_text_for_api(trimmed).c_str());
     return false;
   }
 
-  char code_text[3] = {payload[0], payload[1], '\0'};
-  const uint8_t code = static_cast<uint8_t>(std::strtoul(code_text, nullptr, 16));
+  std::vector<uint8_t> bytes;
+  bytes.reserve(payload.size() / 2U);
+  for (size_t i = 0; i < payload.size(); i += 2U) {
+    if (!std::isxdigit(static_cast<unsigned char>(payload[i])) ||
+        !std::isxdigit(static_cast<unsigned char>(payload[i + 1U]))) {
+      ESP_LOGD(TAG, "tv_progress ignored decoded=\"%s\" reason=invalid_hex", sanitize_text_for_api(trimmed).c_str());
+      return false;
+    }
+    char byte_text[3] = {payload[i], payload[i + 1U], '\0'};
+    bytes.push_back(static_cast<uint8_t>(std::strtoul(byte_text, nullptr, 16)));
+  }
+
+  this->ensure_xml_mapping_loaded_();
+
+  const uint8_t state_code = bytes[0];
+  const bool has_product = bytes.size() >= 2U;
+  const uint8_t product_code = has_product ? bytes[1] : 0;
+  const JuraStatusDesc *state_desc = nullptr;
+  const JuraProductDesc *product_desc = nullptr;
+  for (const auto &state : this->xml_mapping_.status_values) {
+    if ((state.value & 0xFFU) == state_code) {
+      state_desc = &state;
+      break;
+    }
+  }
+  if (has_product) {
+    for (const auto &product : this->xml_mapping_.products) {
+      if ((product.code & 0xFFU) == product_code) {
+        product_desc = &product;
+        break;
+      }
+    }
+  }
+
+  const bool has_progress = bytes.size() >= 5U;
+  const uint8_t progress_value = has_progress ? bytes[3] : 0;
+  const uint8_t progress_total = has_progress ? bytes[4] : 0;
+
   this->has_valid_tv_status_ = true;
   this->last_tv_progress_frame_ = trimmed;
+  this->last_tv_progress_ms_ = esphome::millis();
   this->current_live_status_source_ = source != nullptr ? source : "@TV";
-  const char *state = nullptr;
-  bool blocking = false;
-  switch (code) {
-    case 0x02:
-      state = "Wassertank füllen";
-      blocking = true;
-      break;
-    case 0x24:
-      state = "Bereit";
-      break;
-    case 0x0E:
-      state = "Alarm";
-      blocking = true;
-      break;
-    default:
-      ESP_LOGD(TAG, "tv_progress code=%02X state=\"unknown\" raw=\"%s\"", code,
-               sanitize_text_for_api(trimmed).c_str());
-      ESP_LOGD(TAG, "tv_decode raw=\"%s\" valid=YES state=\"unknown\"", sanitize_text_for_api(trimmed).c_str());
+
+  if (state_desc == nullptr) {
+    if (state_code == 0x3C) {
+      if (this->bluefrog_live_debug_) {
+        ESP_LOGD(TAG, "tv_progress detail_frame state=0x%02X product=0x%02X len=%u raw=\"%s\"",
+                 static_cast<unsigned>(state_code), static_cast<unsigned>(product_code),
+                 static_cast<unsigned>(bytes.size()), sanitize_text_for_api(trimmed).c_str());
+      }
+      this->update_machine_status_from_state_(source != nullptr ? source : "tv_detail");
       return true;
+    }
+    if (this->bluefrog_live_debug_) {
+      ESP_LOGD(TAG, "tv_progress state=0x%02X state=unknown raw=\"%s\" preserved=YES",
+               static_cast<unsigned>(state_code), sanitize_text_for_api(trimmed).c_str());
+    }
+    return true;
   }
 
-  this->current_display_status_ = state;
-  if (blocking) {
-    this->current_machine_warning_ = state;
-    this->current_active_alerts_ = state;
-    if (code == 0x02) {
-      this->fill_water_required_ = true;
+  const std::string state_text = jura_live_display_name(state_desc->name);
+  const std::string product_text = product_desc != nullptr ? jura_live_display_name(product_desc->name) : std::string{};
+  const bool state_is_ready = to_lower_copy(collapse_whitespace(state_desc->name)) == "coffee ready" || state_code == 0x24;
+  const bool progress_state = state_desc->progress || (has_progress && progress_total != 0 && progress_value < progress_total);
+
+  if (state_is_ready) {
+    this->current_tv_progress_active_ = false;
+    if (!this->current_blocking_alert_active_) {
+      this->current_display_status_ = "Bereit";
     }
+    this->tf_coffee_ready_active_ = true;
   } else {
-    if (this->current_machine_warning_ == state || this->current_machine_warning_ == "Wassertank füllen" ||
-        this->current_machine_warning_ == "Alarm") {
-      this->current_machine_warning_.clear();
-    }
-    if (code == 0x24) {
-      this->fill_water_required_ = false;
-      this->tf_coffee_ready_active_ = true;
-      this->current_active_alerts_.clear();
+    this->current_tv_progress_active_ = progress_state || has_progress;
+    const std::string display = format_live_progress_text(state_text, product_text, has_progress, progress_value, progress_total);
+    if (!display.empty() && !this->current_blocking_alert_active_) {
+      this->current_display_status_ = display;
     }
   }
 
-  ESP_LOGD(TAG, "tv_progress code=%02X state=\"%s\"", code, sanitize_text_for_api(state).c_str());
-  ESP_LOGD(TAG, "tv_decode raw=\"%s\" valid=YES state=\"%s\"", sanitize_text_for_api(trimmed).c_str(),
-           sanitize_text_for_api(state).c_str());
+  if (this->bluefrog_live_debug_) {
+    ESP_LOGD(TAG,
+             "tv_progress state=0x%02X state_name=\"%s\" product=0x%02X product_name=\"%s\" "
+             "progress=%u/%u active=%s raw=\"%s\"",
+             static_cast<unsigned>(state_code), sanitize_text_for_api(state_desc->name).c_str(),
+             static_cast<unsigned>(product_code), product_desc != nullptr ? sanitize_text_for_api(product_desc->name).c_str() : "",
+             static_cast<unsigned>(progress_value), static_cast<unsigned>(progress_total),
+             YESNO(this->current_tv_progress_active_), sanitize_text_for_api(trimmed).c_str());
+  }
+
   this->update_machine_status_from_state_(source != nullptr ? source : "tv");
   return true;
 }

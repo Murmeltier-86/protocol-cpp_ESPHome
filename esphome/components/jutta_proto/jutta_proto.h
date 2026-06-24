@@ -808,6 +808,9 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool has_valid_tv_status_{false};
   bool fill_water_required_{false};
   bool tf_coffee_ready_active_{false};
+  bool current_blocking_alert_active_{false};
+  bool current_tv_progress_active_{false};
+  uint32_t last_tv_progress_ms_{0};
   bool status_debug_{false};
   bool status_forensics_{false};
   bool status_forensics_verbose_candidates_{false};

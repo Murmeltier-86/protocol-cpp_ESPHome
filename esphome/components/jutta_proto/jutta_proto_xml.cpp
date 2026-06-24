@@ -714,6 +714,7 @@ std::vector<JuraProductDesc> parse_products(const std::string &xml) {
     if (!parse_u32_attr(attrs, {"code"}, 16, product.code)) {
       return;
     }
+    product.text = attrs.get("text");
     product.name = resolve_text_attrs(attrs, {"name", "text", "code"});
     if (product.name.empty()) {
       char buf[12];
@@ -730,6 +731,7 @@ std::vector<JuraProductDesc> parse_products(const std::string &xml) {
     if (!parse_u32_attr(attrs, {"code"}, 16, product.code)) {
       return;
     }
+    product.text = attrs.get("text");
     product.name = resolve_text_attrs(attrs, {"name", "text", "code"});
     if (product.name.empty()) {
       char buf[12];
@@ -1084,7 +1086,7 @@ bool decode_status_payload(const std::vector<uint8_t> &payload, const std::strin
   if (!g_mapping.alerts.empty() && alert_like_frame && payload.size() > 1) {
     for (const auto &alert : g_mapping.alerts) {
       std::size_t byte_index = 1U + static_cast<std::size_t>(alert.bit / 8U);
-      uint8_t bit_mask = static_cast<uint8_t>(1U << (alert.bit % 8U));
+      uint8_t bit_mask = static_cast<uint8_t>(0x80U >> (alert.bit % 8U));
       if (byte_index >= payload.size()) {
         continue;
       }
