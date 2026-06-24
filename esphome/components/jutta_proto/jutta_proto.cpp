@@ -57,6 +57,8 @@ constexpr uint32_t kDongleStartupT3QuietMs = 1000;
 constexpr uint32_t kPostT3RuntimeObserveMs = 5000;
 constexpr uint32_t kBluefrogOriginalCoreRoundObserveMs = 5000;
 constexpr uint32_t kBluefrogOriginalCoreRoundStepTimeoutMs = 3000;
+constexpr uint32_t kBluefrogOriginalCoreRoundRetryDelayMs = 45000;
+constexpr uint8_t kBluefrogOriginalCoreRoundMaxRetries = 1;
 constexpr uint32_t kBluefrogLiveTfTimeoutMs = 90000;
 constexpr uint32_t kDongleStartupGateOnlyQuietMs = 2000;
 constexpr uint32_t kDongleStartupMaxWaitAfterT3Ms = 5000;
@@ -2932,7 +2934,9 @@ bool JuraComponent::publish_tf_status_(const std::string &response, const char *
 
   this->has_valid_tf_status_ = true;
   this->last_tf_status_ms_ = esphome::millis();
-  this->bluefrog_live_rearm_attempted_ = false;
+  this->bluefrog_original_core_round_success_ = true;
+  this->bluefrog_original_core_round_retry_count_ = 0;
+  this->bluefrog_original_core_round_retry_blocked_logged_ = false;
   this->last_tf_status_frame_ = trimmed;
   this->current_live_status_source_ = source != nullptr ? source : "@TF";
   const bool fill_water = has_bit(1);
@@ -8800,50 +8804,80 @@ bool JuraComponent::should_start_bluefrog_original_core_round_(uint32_t now, con
     }
     return false;
   }
-  if (this->last_tf_status_ms_ != 0) {
-    if (this->bluefrog_live_rearm_attempted_) {
-      if (reason != nullptr) {
-        *reason = "tf_timeout_rearm_already_attempted";
-      }
-      return false;
-    }
-    this->bluefrog_live_rearm_attempted_ = true;
+  if (!this->bluefrog_original_core_round_attempted_) {
+    this->bluefrog_original_core_round_attempted_ = true;
+    this->bluefrog_original_core_round_last_attempt_ms_ = now;
     if (reason != nullptr) {
-      *reason = "tf_timeout";
-    }
-    if (this->bluefrog_live_debug_) {
-      ESP_LOGD(TAG, "bluefrog_live_session_rearm reason=tf_timeout");
+      *reason = "initial_live_session";
     }
     return true;
   }
-  if (this->bluefrog_live_initial_core_round_attempted_) {
+
+  if (this->bluefrog_original_core_round_success_ && this->last_tf_status_ms_ == 0) {
     if (reason != nullptr) {
-      *reason = "initial_core_round_already_attempted";
+      *reason = "core_round_success_already_done";
     }
     return false;
   }
-  this->bluefrog_live_initial_core_round_attempted_ = true;
+
+  if (this->bluefrog_original_core_round_retry_count_ >= kBluefrogOriginalCoreRoundMaxRetries) {
+    if (reason != nullptr) {
+      *reason = "max_retries_reached";
+    }
+    if (!this->bluefrog_original_core_round_retry_blocked_logged_) {
+      ESP_LOGI(TAG, "bluefrog_original_core_round_retry_blocked reason=max_retries_reached");
+      this->bluefrog_original_core_round_retry_blocked_logged_ = true;
+    }
+    return false;
+  }
+
+  const uint32_t retry_due_ms =
+      this->bluefrog_original_core_round_last_attempt_ms_ + kBluefrogOriginalCoreRoundRetryDelayMs;
+  if (!time_reached(now, retry_due_ms)) {
+    if (reason != nullptr) {
+      *reason = "retry_wait";
+    }
+    return false;
+  }
+
+  ++this->bluefrog_original_core_round_retry_count_;
+  this->bluefrog_original_core_round_retry_blocked_logged_ = false;
+  this->bluefrog_original_core_round_last_attempt_ms_ = now;
   if (reason != nullptr) {
-    *reason = "initial_live_session";
+    *reason = "no_tf_after_attempt";
+  }
+  ESP_LOGI(TAG, "bluefrog_original_core_round_retry reason=no_tf_after_attempt");
+  if (this->last_tf_status_ms_ != 0 && this->bluefrog_live_debug_) {
+    ESP_LOGD(TAG, "bluefrog_live_session_rearm reason=tf_timeout");
   }
   return true;
 }
 
-void JuraComponent::finish_bluefrog_original_core_round_(uint32_t now, bool timeout) {
+void JuraComponent::finish_bluefrog_original_core_round_(uint32_t now, bool timeout, const char *missing_step) {
   const uint32_t rx_26 =
       this->bluefrog_26_rx_machine_to_esp_count_ - this->bluefrog_original_core_round_rx26_baseline_;
   const bool tf_seen =
       this->bluefrog_original_core_round_tf_seen_ ||
-      this->bluefrog_26_tf_seen_count_ > this->bluefrog_original_core_round_tf_baseline_;
+      this->bluefrog_26_tf_seen_count_ > this->bluefrog_original_core_round_tf_baseline_ ||
+      this->has_valid_tf_status_;
   const bool tv_seen =
       this->bluefrog_original_core_round_tv_seen_ ||
       this->bluefrog_26_tv_seen_count_ > this->bluefrog_original_core_round_tv_baseline_;
   this->bluefrog_original_core_round_tf_seen_ = tf_seen;
   this->bluefrog_original_core_round_tv_seen_ = tv_seen;
-  ESP_LOGI(TAG, "bluefrog_original_core_round_result tf_seen=%s tv_seen=%s rx_26=%u timeout=%s",
-           YESNO(tf_seen), YESNO(tv_seen), static_cast<unsigned>(rx_26), YESNO(timeout));
+  if (tf_seen) {
+    this->bluefrog_original_core_round_success_ = true;
+  }
+  if (missing_step != nullptr && missing_step[0] != '\0') {
+    ESP_LOGI(TAG, "bluefrog_original_core_round_result tf_seen=%s tv_seen=%s rx_26=%u timeout=%s missing_step=%s",
+             YESNO(tf_seen), YESNO(tv_seen), static_cast<unsigned>(rx_26), YESNO(timeout), missing_step);
+  } else {
+    ESP_LOGI(TAG, "bluefrog_original_core_round_result tf_seen=%s tv_seen=%s rx_26=%u timeout=%s",
+             YESNO(tf_seen), YESNO(tv_seen), static_cast<unsigned>(rx_26), YESNO(timeout));
+  }
   this->bluefrog_original_core_round_active_ = false;
   this->bluefrog_original_core_round_done_ = true;
+  this->bluefrog_original_core_round_stats_delay_logged_ = false;
   this->bluefrog_original_core_round_deadline_ms_ = 0;
   this->bluefrog_original_core_round_observe_start_ms_ = 0;
   this->post_gate_tx_ready_event_ = true;
@@ -8907,6 +8941,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       this->bluefrog_original_core_round_tv_seen_ = false;
       this->bluefrog_original_core_round_deadline_ms_ = 0;
       this->bluefrog_original_core_round_observe_start_ms_ = 0;
+      this->bluefrog_original_core_round_stats_delay_logged_ = false;
       this->bluefrog_original_core_round_rx26_baseline_ = this->bluefrog_26_rx_machine_to_esp_count_;
       this->bluefrog_original_core_round_tf_baseline_ = this->bluefrog_26_tf_seen_count_;
       this->bluefrog_original_core_round_tv_baseline_ = this->bluefrog_26_tv_seen_count_;
@@ -9275,6 +9310,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
             this->bluefrog_original_core_round_tv_seen_ = false;
             this->bluefrog_original_core_round_deadline_ms_ = 0;
             this->bluefrog_original_core_round_observe_start_ms_ = 0;
+            this->bluefrog_original_core_round_stats_delay_logged_ = false;
             this->bluefrog_original_core_round_rx26_baseline_ = this->bluefrog_26_rx_machine_to_esp_count_;
             this->bluefrog_original_core_round_tf_baseline_ = this->bluefrog_26_tf_seen_count_;
             this->bluefrog_original_core_round_tv_baseline_ = this->bluefrog_26_tv_seen_count_;
@@ -9283,7 +9319,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
             this->transition_dongle_startup_(DongleStartupState::CORE_ROUND_SEND_T0, now);
             return false;
           } else if (this->bluefrog_live_debug_ && core_round_reason != nullptr &&
-                     std::strcmp(core_round_reason, "live_tf_already_active") != 0) {
+                     std::strcmp(core_round_reason, "core_round_success_already_done") == 0) {
             ESP_LOGD(TAG, "bluefrog_original_core_round_skip reason=%s", core_round_reason);
           }
           this->transition_dongle_startup_(DongleStartupState::READY, now);
@@ -9338,7 +9374,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       this->dongle_events_ &= ~DONGLE_EVENT_T0;
       ESP_LOGI(TAG, "bluefrog_original_core_round_tx line=\"@T0\"");
       if (!this->send_dongle_startup_command_("@T0", now, true)) {
-        this->finish_bluefrog_original_core_round_(now, true);
+        this->finish_bluefrog_original_core_round_(now, true, "send_@T0");
         return false;
       }
       this->bluefrog_original_core_round_deadline_ms_ = now + kBluefrogOriginalCoreRoundStepTimeoutMs;
@@ -9351,7 +9387,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         return false;
       }
       if (time_reached(now, this->bluefrog_original_core_round_deadline_ms_)) {
-        this->finish_bluefrog_original_core_round_(now, true);
+        this->finish_bluefrog_original_core_round_(now, true, "@t0");
       }
       return false;
 
@@ -9360,7 +9396,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       this->dongle_events_ &= ~DONGLE_EVENT_T2;
       ESP_LOGI(TAG, "bluefrog_original_core_round_tx line=\"@T1\"");
       if (!this->send_dongle_startup_command_("@T1", now, true)) {
-        this->finish_bluefrog_original_core_round_(now, true);
+        this->finish_bluefrog_original_core_round_(now, true, "send_@T1");
         return false;
       }
       this->bluefrog_original_core_round_deadline_ms_ = now + kBluefrogOriginalCoreRoundStepTimeoutMs;
@@ -9374,7 +9410,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         return false;
       }
       if (time_reached(now, this->bluefrog_original_core_round_deadline_ms_)) {
-        this->finish_bluefrog_original_core_round_(now, true);
+        this->finish_bluefrog_original_core_round_(now, true, "@t1");
       }
       return false;
 
@@ -9384,7 +9420,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         return false;
       }
       if (time_reached(now, this->bluefrog_original_core_round_deadline_ms_)) {
-        this->finish_bluefrog_original_core_round_(now, true);
+        this->finish_bluefrog_original_core_round_(now, true, "@T2");
       }
       return false;
 
@@ -9392,7 +9428,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       this->dongle_events_ &= ~DONGLE_EVENT_T3;
       ESP_LOGI(TAG, "bluefrog_original_core_round_tx line=\"@t2:8100000000\"");
       if (!this->send_dongle_startup_command_("@t2:8100000000", now, true)) {
-        this->finish_bluefrog_original_core_round_(now, true);
+        this->finish_bluefrog_original_core_round_(now, true, "send_@t2");
         return false;
       }
       this->bluefrog_original_core_round_deadline_ms_ = now + kBluefrogOriginalCoreRoundStepTimeoutMs;
@@ -9405,14 +9441,14 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         return false;
       }
       if (time_reached(now, this->bluefrog_original_core_round_deadline_ms_)) {
-        this->finish_bluefrog_original_core_round_(now, true);
+        this->finish_bluefrog_original_core_round_(now, true, "@T3");
       }
       return false;
 
     case DongleStartupState::CORE_ROUND_SEND_T3:
       ESP_LOGI(TAG, "bluefrog_original_core_round_tx line=\"@t3\"");
       if (!this->send_dongle_startup_command_("@t3", now, true)) {
-        this->finish_bluefrog_original_core_round_(now, true);
+        this->finish_bluefrog_original_core_round_(now, true, "send_@t3");
         return false;
       }
       this->bluefrog_original_core_round_observe_start_ms_ = now;
@@ -9433,7 +9469,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         return false;
       }
       if (time_reached(now, this->bluefrog_original_core_round_deadline_ms_)) {
-        this->finish_bluefrog_original_core_round_(now, true);
+        this->finish_bluefrog_original_core_round_(now, true, "@TF/@TV");
       }
       return false;
 
@@ -9584,6 +9620,15 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
     }
     if (this->xml_run_tablet_start_sequence_ && !this->xml_tablet_start_sequence_done_) {
       this->process_tablet_start_sequence_(now);
+      return;
+    }
+    if (this->bluefrog_original_core_round_active_) {
+      if (this->bluefrog_live_debug_ || !this->bluefrog_original_core_round_stats_delay_logged_) {
+        ESP_LOGI(TAG, "xml_stats_delay reason=bluefrog_original_core_round_active");
+        this->bluefrog_original_core_round_stats_delay_logged_ = true;
+      }
+      this->xml_next_poll_ = now + 1000;
+      this->xml_next_poll_is_retry_ = false;
       return;
     }
     this->start_new_xml_cycle_(now);
