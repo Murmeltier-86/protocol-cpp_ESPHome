@@ -330,16 +330,25 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
     this->pmode_key_ = key;
     this->pmode_key_available_ = true;
   }
-  void set_live_db_status_enabled(bool enabled) { this->live_db_status_enabled_ = enabled; }
-  void set_live_db_status_debug(bool enabled) { this->live_db_status_debug_ = enabled; }
-  void set_live_db_status_publish_raw(bool enabled) { this->live_db_status_publish_raw_ = enabled; }
-  void set_live_db_status_poll_enabled(bool enabled) { this->live_db_status_poll_enabled_ = enabled; }
-  void set_live_db_status_poll_interval(uint32_t interval_ms) { this->live_db_status_poll_interval_ms_ = interval_ms; }
+  void set_live_db_status_enabled(bool enabled) { (void) enabled; }
+  void set_live_db_status_debug(bool enabled) { (void) enabled; }
+  void set_live_db_status_publish_raw(bool enabled) { (void) enabled; }
+  void set_live_db_status_poll_enabled(bool enabled) { (void) enabled; }
+  void set_live_db_status_poll_interval(uint32_t interval_ms) { (void) interval_ms; }
   void set_live_db_status_response_timeout(uint32_t timeout_ms) {
-    this->live_db_status_response_timeout_ms_ = timeout_ms;
+    (void) timeout_ms;
+  }
+  void set_bluefrog_live_daten(bool enabled) {
+    this->bluefrog_live_daten_ = enabled;
+    this->live_db_status_enabled_ = enabled;
+  }
+  void set_bluefrog_live_debug(bool enabled) {
+    this->bluefrog_live_debug_ = enabled;
+    this->live_db_status_debug_ = enabled;
   }
   void set_enable_bluefrog_26_replay(bool enabled) { this->enable_bluefrog_26_replay_ = enabled; }
-  void set_enable_bluefrog_original_core_round(bool enabled) { this->enable_bluefrog_original_core_round_ = enabled; }
+  void set_enable_bluefrog_original_core_round(bool enabled) { (void) enabled; }
+  void note_deprecated_live_option(const std::string &option) { this->deprecated_live_options_.push_back(option); }
   void set_allow_unsafe_debug_commands(bool allow) {
     (void) allow;
     this->allow_unsafe_debug_commands_ = false;
@@ -589,6 +598,8 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool send_dongle_startup_command_(const std::string &command, uint32_t now, bool inner_uart0 = false);
   bool send_decoded_binary_line_(const uint8_t *data, size_t len, const char *source, const char *reason);
   void finish_bluefrog_original_core_round_(uint32_t now, bool timeout);
+  bool bluefrog_live_tf_active_(uint32_t now) const;
+  bool should_start_bluefrog_original_core_round_(uint32_t now, const char **reason);
   bool write_inner_uart0_command_(const std::string &command, uint32_t now, bool no_rx_flush = false);
   void fail_dongle_startup_(uint32_t now, const char *reason);
   void update_dongle_events_from_line_(const std::string &line);
@@ -816,6 +827,13 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   uint32_t live_db_status_next_poll_ms_{0};
   uint32_t live_db_status_after_stats_hold_until_ms_{0};
   bool enable_bluefrog_26_replay_{false};
+  bool bluefrog_live_daten_{true};
+  bool bluefrog_live_debug_{false};
+  uint32_t last_tf_status_ms_{0};
+  bool bluefrog_live_initial_core_round_attempted_{false};
+  bool bluefrog_live_rearm_attempted_{false};
+  bool deprecated_live_options_warned_{false};
+  std::vector<std::string> deprecated_live_options_{};
   bool enable_bluefrog_original_core_round_{false};
   bool bluefrog_original_core_round_active_{false};
   bool bluefrog_original_core_round_done_{false};

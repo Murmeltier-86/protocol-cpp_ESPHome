@@ -57,6 +57,7 @@ constexpr uint32_t kDongleStartupT3QuietMs = 1000;
 constexpr uint32_t kPostT3RuntimeObserveMs = 5000;
 constexpr uint32_t kBluefrogOriginalCoreRoundObserveMs = 5000;
 constexpr uint32_t kBluefrogOriginalCoreRoundStepTimeoutMs = 3000;
+constexpr uint32_t kBluefrogLiveTfTimeoutMs = 90000;
 constexpr uint32_t kDongleStartupGateOnlyQuietMs = 2000;
 constexpr uint32_t kDongleStartupMaxWaitAfterT3Ms = 5000;
 constexpr uint32_t kDongleStartupTr37TimeoutMs = 3000;
@@ -1651,6 +1652,12 @@ void JuraComponent::setup() {
     ESP_LOGI(TAG, "xml_dongle_startup enabled; mode=%s; XML statistics will wait for @TR:37 gate",
              this->xml_dongle_startup_mode_.c_str());
   }
+  if (!this->deprecated_live_options_warned_ && !this->deprecated_live_options_.empty()) {
+    this->deprecated_live_options_warned_ = true;
+    for (const auto &option : this->deprecated_live_options_) {
+      ESP_LOGW(TAG, "deprecated_live_option_ignored option=%s", option.c_str());
+    }
+  }
   if (this->status_debug_) {
     ESP_LOGI(TAG,
              "status_path_app_firmware_summary app_udp=0010A5F3_to_51515 firmware_cache=DAT_400d0738_TF "
@@ -2377,6 +2384,10 @@ void JuraComponent::log_bluefrog_26_tx_(const std::string &frame, const char *so
     return;
   }
   ++this->bluefrog_26_tx_esp_to_machine_count_;
+  if (source != nullptr && std::strcmp(source, "inner_uart0_tx") == 0 &&
+      !this->xml_stats_debug_ && !this->bluefrog_live_debug_) {
+    return;
+  }
   const std::string cluster = bluefrog_26_cluster_key(frame);
   ESP_LOGI(TAG, "bluefrog_26_frame direction=esp_to_machine source=%s time_ms=%u len=%u hex=\"%s\" tx_count=%u",
            source != nullptr ? source : "unknown", static_cast<unsigned>(now), static_cast<unsigned>(frame.size()),
@@ -2487,7 +2498,7 @@ void JuraComponent::publish_live_db_status_decoded_(const std::string &summary, 
     return;
   }
   this->publish_text_if_changed_(this->live_db_status_decoded_sensor_, this->current_live_db_status_decoded_,
-                                 sanitize_text_for_api(summary));
+                                 summary);
   this->publish_text_if_changed_(this->live_db_status_source_sensor_, this->current_live_db_status_source_,
                                  "db_frame");
   if (this->live_db_status_debug_) {
@@ -2752,7 +2763,7 @@ void JuraComponent::publish_last_command_result_(const std::string &result) {
 
 void JuraComponent::publish_machine_type_() {
   if (this->machine_type_sensor_ != nullptr && !this->device_type_.empty()) {
-    this->machine_type_sensor_->publish_state(sanitize_text_for_api(this->device_type_));
+    this->machine_type_sensor_->publish_state(this->device_type_);
   }
 }
 
@@ -2764,7 +2775,7 @@ void JuraComponent::publish_machine_status_(const std::string &status) {
   std::string safe = sanitize_text_for_api(status);
   ESP_LOGV(TAG, "Machine status: %s", safe.c_str());
   if (this->machine_status_sensor_ != nullptr) {
-    this->machine_status_sensor_->publish_state(safe);
+    this->machine_status_sensor_->publish_state(status);
   }
 }
 
@@ -2794,25 +2805,25 @@ void JuraComponent::update_machine_status_from_state_(const char *source) {
 
   if (this->live_status_source_sensor_ != nullptr) {
     this->live_status_source_sensor_->publish_state(
-        live_status_seen ? sanitize_text_for_api(this->current_live_status_source_) : "nicht verfügbar");
+        live_status_seen ? this->current_live_status_source_ : "nicht verfügbar");
   }
 
   if (this->machine_display_status_sensor_ != nullptr) {
     this->machine_display_status_sensor_->publish_state(
         live_status_seen ? (this->current_display_status_.empty() ? "keine"
-                                                                  : sanitize_text_for_api(this->current_display_status_))
+                                                                  : this->current_display_status_)
                          : "nicht verfügbar");
   }
   if (this->machine_warning_sensor_ != nullptr) {
     this->machine_warning_sensor_->publish_state(
         live_status_seen ? (this->current_machine_warning_.empty() ? "keine"
-                                                                   : sanitize_text_for_api(this->current_machine_warning_))
+                                                                   : this->current_machine_warning_)
                          : "nicht verfügbar");
   }
   if (this->active_alerts_sensor_ != nullptr) {
     this->active_alerts_sensor_->publish_state(
         live_status_seen ? (this->current_active_alerts_.empty() ? "keine"
-                                                                 : sanitize_text_for_api(this->current_active_alerts_))
+                                                                 : this->current_active_alerts_)
                          : "nicht verfügbar");
   }
   if (this->fill_water_required_sensor_ != nullptr && live_status_seen) {
@@ -2920,6 +2931,8 @@ bool JuraComponent::publish_tf_status_(const std::string &response, const char *
   };
 
   this->has_valid_tf_status_ = true;
+  this->last_tf_status_ms_ = esphome::millis();
+  this->bluefrog_live_rearm_attempted_ = false;
   this->last_tf_status_frame_ = trimmed;
   this->current_live_status_source_ = source != nullptr ? source : "@TF";
   const bool fill_water = has_bit(1);
@@ -4196,6 +4209,9 @@ void JuraComponent::trace_machine_tx_startup_(const char *source, const std::str
   }
   if (source != nullptr && std::strcmp(source, "dongle_startup") == 0 && this->startup_trace_tx_sequence_.size() < 64) {
     this->startup_trace_tx_sequence_.push_back(normalized);
+  }
+  if (source != nullptr && std::strcmp(source, "xml_stats") == 0 && !this->xml_stats_debug_) {
+    return;
   }
   ESP_LOGI(TAG, "machine_tx_startup_trace source=%s line=\"%s\" encoded=%s reason=\"%s\"",
            source != nullptr ? source : "unknown", sanitize_text_for_api(normalized).c_str(), YESNO(encoded),
@@ -8752,6 +8768,67 @@ void JuraComponent::process_dongle_startup_rx_(uint32_t now) {
   this->dongle_startup_rx_buffer_ = remainder;
 }
 
+bool JuraComponent::bluefrog_live_tf_active_(uint32_t now) const {
+  if (!this->has_valid_tf_status_ && this->bluefrog_26_tf_seen_count_ == 0) {
+    return false;
+  }
+  if (this->last_tf_status_ms_ == 0) {
+    return true;
+  }
+  return !time_reached(now, this->last_tf_status_ms_ + kBluefrogLiveTfTimeoutMs);
+}
+
+bool JuraComponent::should_start_bluefrog_original_core_round_(uint32_t now, const char **reason) {
+  if (reason != nullptr) {
+    *reason = "unknown";
+  }
+  if (!this->bluefrog_live_daten_) {
+    if (reason != nullptr) {
+      *reason = "live_disabled";
+    }
+    return false;
+  }
+  if (this->bluefrog_live_tf_active_(now)) {
+    if (reason != nullptr) {
+      *reason = "live_tf_already_active";
+    }
+    if (this->bluefrog_live_debug_) {
+      ESP_LOGD(TAG, "bluefrog_original_core_round_skip reason=live_tf_already_active");
+      ESP_LOGD(TAG, "bluefrog_live_session_active tf_seen_total=%u last_tf_ms=%u",
+               static_cast<unsigned>(this->bluefrog_26_tf_seen_count_),
+               static_cast<unsigned>(this->last_tf_status_ms_));
+    }
+    return false;
+  }
+  if (this->last_tf_status_ms_ != 0) {
+    if (this->bluefrog_live_rearm_attempted_) {
+      if (reason != nullptr) {
+        *reason = "tf_timeout_rearm_already_attempted";
+      }
+      return false;
+    }
+    this->bluefrog_live_rearm_attempted_ = true;
+    if (reason != nullptr) {
+      *reason = "tf_timeout";
+    }
+    if (this->bluefrog_live_debug_) {
+      ESP_LOGD(TAG, "bluefrog_live_session_rearm reason=tf_timeout");
+    }
+    return true;
+  }
+  if (this->bluefrog_live_initial_core_round_attempted_) {
+    if (reason != nullptr) {
+      *reason = "initial_core_round_already_attempted";
+    }
+    return false;
+  }
+  this->bluefrog_live_initial_core_round_attempted_ = true;
+  if (reason != nullptr) {
+    *reason = "initial_live_session";
+  }
+  return true;
+}
+
 void JuraComponent::finish_bluefrog_original_core_round_(uint32_t now, bool timeout) {
   const uint32_t rx_26 =
       this->bluefrog_26_rx_machine_to_esp_count_ - this->bluefrog_original_core_round_rx26_baseline_;
@@ -9190,7 +9267,9 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
           this->post_t3_tr37_fallback_once_active_ = false;
         }
         if ((this->dongle_events_ & DONGLE_STARTUP_READY_MASK) == DONGLE_STARTUP_READY_MASK) {
-          if (this->enable_bluefrog_original_core_round_ && !this->bluefrog_original_core_round_done_) {
+          const char *core_round_reason = nullptr;
+          if (!this->bluefrog_original_core_round_done_ &&
+              this->should_start_bluefrog_original_core_round_(now, &core_round_reason)) {
             this->bluefrog_original_core_round_active_ = true;
             this->bluefrog_original_core_round_tf_seen_ = false;
             this->bluefrog_original_core_round_tv_seen_ = false;
@@ -9199,9 +9278,13 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
             this->bluefrog_original_core_round_rx26_baseline_ = this->bluefrog_26_rx_machine_to_esp_count_;
             this->bluefrog_original_core_round_tf_baseline_ = this->bluefrog_26_tf_seen_count_;
             this->bluefrog_original_core_round_tv_baseline_ = this->bluefrog_26_tv_seen_count_;
-            ESP_LOGI(TAG, "bluefrog_original_core_round_start");
+            ESP_LOGI(TAG, "bluefrog_original_core_round_start reason=%s",
+                     core_round_reason != nullptr ? core_round_reason : "unknown");
             this->transition_dongle_startup_(DongleStartupState::CORE_ROUND_SEND_T0, now);
             return false;
+          } else if (this->bluefrog_live_debug_ && core_round_reason != nullptr &&
+                     std::strcmp(core_round_reason, "live_tf_already_active") != 0) {
+            ESP_LOGD(TAG, "bluefrog_original_core_round_skip reason=%s", core_round_reason);
           }
           this->transition_dongle_startup_(DongleStartupState::READY, now);
           return false;
@@ -9508,33 +9591,42 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
     const char *start_reason = this->xml_stats_cycle_id_ == 1
                                    ? "boot_after_delay"
                                    : (this->xml_next_poll_is_retry_ ? "retry_due" : "poll_interval_due");
-    ESP_LOGD(TAG,
-             "stats_cycle_start cycle_id=%u reason=%s now_ms=%u next_poll_due_ms=%u next_retry_due_ms=%u forced=NO "
-             "mode=%s inner_tx=%s ts_lock=%s",
-             static_cast<unsigned>(this->xml_stats_cycle_id_), start_reason, static_cast<unsigned>(now),
-             static_cast<unsigned>(this->xml_next_poll_), static_cast<unsigned>(this->xml_next_poll_),
-             this->stats_session_ready_ && this->stats_inner_tx_required_ ? "post_gate" : "legacy",
-             YESNO(this->stats_inner_tx_required_), YESNO(this->xml_stats_use_ts_lock_));
+    XML_STATS_LOGD(
+        "stats_cycle_start cycle_id=%u reason=%s now_ms=%u next_poll_due_ms=%u next_retry_due_ms=%u forced=NO "
+        "mode=%s inner_tx=%s ts_lock=%s",
+        static_cast<unsigned>(this->xml_stats_cycle_id_), start_reason, static_cast<unsigned>(now),
+        static_cast<unsigned>(this->xml_next_poll_), static_cast<unsigned>(this->xml_next_poll_),
+        this->stats_session_ready_ && this->stats_inner_tx_required_ ? "post_gate" : "legacy",
+        YESNO(this->stats_inner_tx_required_), YESNO(this->xml_stats_use_ts_lock_));
     if (this->xml_stats_handshake_before_cycle_ && this->xml_dongle_startup_) {
-      if (this->db_transaction_owner_ != DbTransactionOwner::NONE) {
-        XML_STATS_LOGD("stats_cycle_abort reason=owner_active owner=%s",
-                 this->db_transaction_owner_name_(this->db_transaction_owner_));
-        this->xml_cycle_failed_ = true;
-        this->finish_stats_cycle_(now, "owner_active_before_stats_handshake");
+      if (this->bluefrog_live_tf_active_(now) && this->stats_session_ready_ && this->stats_inner_tx_required_) {
+        if (this->bluefrog_live_debug_) {
+          ESP_LOGD(TAG, "bluefrog_original_core_round_skip reason=live_tf_already_active");
+          ESP_LOGD(TAG, "bluefrog_live_session_active tf_seen_total=%u last_tf_ms=%u",
+                   static_cast<unsigned>(this->bluefrog_26_tf_seen_count_),
+                   static_cast<unsigned>(this->last_tf_status_ms_));
+        }
+      } else {
+        if (this->db_transaction_owner_ != DbTransactionOwner::NONE) {
+          XML_STATS_LOGD("stats_cycle_abort reason=owner_active owner=%s",
+                   this->db_transaction_owner_name_(this->db_transaction_owner_));
+          this->xml_cycle_failed_ = true;
+          this->finish_stats_cycle_(now, "owner_active_before_stats_handshake");
+          return;
+        }
+        this->stats_handshake_before_cycle_active_ = true;
+        this->db_transaction_owner_ = DbTransactionOwner::STATS_HANDSHAKE;
+        this->stats_session_ready_ = false;
+        this->stats_inner_tx_required_ = false;
+        this->post_gate_tx_ready_event_ = true;
+        this->dongle_startup_state_ = DongleStartupState::IDLE;
+        this->dongle_startup_next_retry_ms_ = 0;
+        this->dongle_startup_rx_buffer_.clear();
+        this->dongle_startup_last_error_.clear();
+        XML_STATS_LOGD("stats_handshake_begin cycle_id=%u", static_cast<unsigned>(this->xml_stats_cycle_id_));
+        this->transition_to_state_(XmlPollState::STATS_HANDSHAKE, now);
         return;
       }
-      this->stats_handshake_before_cycle_active_ = true;
-      this->db_transaction_owner_ = DbTransactionOwner::STATS_HANDSHAKE;
-      this->stats_session_ready_ = false;
-      this->stats_inner_tx_required_ = false;
-      this->post_gate_tx_ready_event_ = true;
-      this->dongle_startup_state_ = DongleStartupState::IDLE;
-      this->dongle_startup_next_retry_ms_ = 0;
-      this->dongle_startup_rx_buffer_.clear();
-      this->dongle_startup_last_error_.clear();
-      XML_STATS_LOGD("stats_handshake_begin cycle_id=%u", static_cast<unsigned>(this->xml_stats_cycle_id_));
-      this->transition_to_state_(XmlPollState::STATS_HANDSHAKE, now);
-      return;
     }
     if (this->xml_stats_reprime_tr37_before_cycle_ && this->stats_session_ready_ &&
         this->stats_inner_tx_required_ && this->post_gate_reprime_required_for_next_stats_) {
@@ -11459,7 +11551,9 @@ void JuraComponent::finish_stats_cycle_(uint32_t now, const char *reason) {
   if (this->db_transaction_owner_ == DbTransactionOwner::XML_POLL) {
     this->xml_transaction_cmd_ = "stats_cycle";
   }
-  this->log_startup_tx_diff_();
+  if (this->xml_stats_debug_) {
+    this->log_startup_tx_diff_();
+  }
   this->end_xml_transaction_(end_reason);
   this->clear_db_transaction_(DbTransactionOwner::NONE);
   this->stats_handshake_before_cycle_active_ = false;
@@ -11518,8 +11612,8 @@ void JuraComponent::finish_stats_cycle_(uint32_t now, const char *reason) {
              YESNO(this->xml_tg43_ok_), YESNO(this->xml_tgc0_ok_),
              static_cast<unsigned>(this->xml_stats_changed_count_), static_cast<unsigned>(next_poll_ms));
     if (!this->xml_stats_changed_fields_.empty()) {
-      ESP_LOGI(TAG, "xml_stats cycle=%u changed fields=%s", static_cast<unsigned>(this->xml_stats_cycle_id_),
-               this->xml_stats_changed_fields_.c_str());
+      XML_STATS_LOGD("xml_stats cycle=%u changed fields=%s", static_cast<unsigned>(this->xml_stats_cycle_id_),
+                     this->xml_stats_changed_fields_.c_str());
     }
     XML_STATS_LOGD("stats_cycle_end result=success pages_ok=%u tg43_ok=%s tgc0_ok=%s next_poll_ms=%u retry_ms=%u",
              static_cast<unsigned>(this->xml_tr32_pages_ok_), YESNO(this->xml_tg43_ok_), YESNO(this->xml_tgc0_ok_),

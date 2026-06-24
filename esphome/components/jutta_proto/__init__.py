@@ -98,6 +98,8 @@ CONF_LIVE_DB_STATUS_POLL_INTERVAL_MS = "live_db_status_poll_interval_ms"
 CONF_LIVE_DB_STATUS_RESPONSE_TIMEOUT_MS = "live_db_status_response_timeout_ms"
 CONF_ENABLE_BLUEFROG_26_REPLAY = "enable_bluefrog_26_replay"
 CONF_ENABLE_BLUEFROG_ORIGINAL_CORE_ROUND = "enable_bluefrog_original_core_round"
+CONF_BLUEFROG_LIVE_DATEN = "bluefrog_live_daten"
+CONF_BLUEFROG_LIVE_DEBUG = "bluefrog_live_debug"
 CONF_ALLOW_UNSAFE_DEBUG_COMMANDS = "allow_unsafe_debug_commands"
 CONF_PMODE_KEY = "pmode_key"
 CONF_RESPOND_IDENTITY = "respond_identity"
@@ -304,18 +306,20 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_STATUS_PROBE_INTERVAL_MS, default=300000): cv.All(
                 cv.positive_int, cv.Range(min=10000)
             ),
-            cv.Optional(CONF_LIVE_DB_STATUS_ENABLED, default=True): cv.boolean,
-            cv.Optional(CONF_LIVE_DB_STATUS_DEBUG, default=False): cv.boolean,
-            cv.Optional(CONF_LIVE_DB_STATUS_PUBLISH_RAW, default=True): cv.boolean,
-            cv.Optional(CONF_LIVE_DB_STATUS_POLL_ENABLED, default=False): cv.boolean,
-            cv.Optional(CONF_LIVE_DB_STATUS_POLL_INTERVAL_MS, default=10000): cv.All(
+            cv.Optional(CONF_LIVE_DB_STATUS_ENABLED): cv.boolean,
+            cv.Optional(CONF_LIVE_DB_STATUS_DEBUG): cv.boolean,
+            cv.Optional(CONF_LIVE_DB_STATUS_PUBLISH_RAW): cv.boolean,
+            cv.Optional(CONF_LIVE_DB_STATUS_POLL_ENABLED): cv.boolean,
+            cv.Optional(CONF_LIVE_DB_STATUS_POLL_INTERVAL_MS): cv.All(
                 cv.positive_int, cv.Range(min=10000)
             ),
-            cv.Optional(CONF_LIVE_DB_STATUS_RESPONSE_TIMEOUT_MS, default=1200): cv.All(
+            cv.Optional(CONF_LIVE_DB_STATUS_RESPONSE_TIMEOUT_MS): cv.All(
                 cv.positive_int, cv.Range(min=1200)
             ),
             cv.Optional(CONF_ENABLE_BLUEFROG_26_REPLAY, default=False): cv.boolean,
-            cv.Optional(CONF_ENABLE_BLUEFROG_ORIGINAL_CORE_ROUND, default=False): cv.boolean,
+            cv.Optional(CONF_ENABLE_BLUEFROG_ORIGINAL_CORE_ROUND): cv.boolean,
+            cv.Optional(CONF_BLUEFROG_LIVE_DATEN, default=True): cv.boolean,
+            cv.Optional(CONF_BLUEFROG_LIVE_DEBUG, default=False): cv.boolean,
             cv.Optional(CONF_ALLOW_UNSAFE_DEBUG_COMMANDS, default=False): cv.boolean,
             cv.Optional(CONF_PMODE_KEY, default=0x02): cv.int_range(min=0, max=255),
             cv.Optional(CONF_XML_SENSORS, default=[]): cv.ensure_list(XML_SENSOR_SCHEMA),
@@ -617,14 +621,20 @@ async def to_code(config):
     cg.add(var.set_xml_tablet_sequence_mode(config[CONF_XML_TABLET_SEQUENCE_MODE]))
     cg.add(var.set_xml_counter_max(config[CONF_XML_COUNTER_MAX]))
     cg.add(var.set_status_debug(config[CONF_STATUS_DEBUG]))
-    cg.add(var.set_live_db_status_enabled(config[CONF_LIVE_DB_STATUS_ENABLED]))
-    cg.add(var.set_live_db_status_debug(config[CONF_LIVE_DB_STATUS_DEBUG]))
-    cg.add(var.set_live_db_status_publish_raw(config[CONF_LIVE_DB_STATUS_PUBLISH_RAW]))
-    cg.add(var.set_live_db_status_poll_enabled(config[CONF_LIVE_DB_STATUS_POLL_ENABLED]))
-    cg.add(var.set_live_db_status_poll_interval(config[CONF_LIVE_DB_STATUS_POLL_INTERVAL_MS]))
-    cg.add(var.set_live_db_status_response_timeout(config[CONF_LIVE_DB_STATUS_RESPONSE_TIMEOUT_MS]))
+    cg.add(var.set_bluefrog_live_daten(config[CONF_BLUEFROG_LIVE_DATEN]))
+    cg.add(var.set_bluefrog_live_debug(config[CONF_BLUEFROG_LIVE_DEBUG]))
+    for deprecated_option in (
+        CONF_LIVE_DB_STATUS_ENABLED,
+        CONF_LIVE_DB_STATUS_DEBUG,
+        CONF_LIVE_DB_STATUS_PUBLISH_RAW,
+        CONF_LIVE_DB_STATUS_POLL_ENABLED,
+        CONF_LIVE_DB_STATUS_POLL_INTERVAL_MS,
+        CONF_LIVE_DB_STATUS_RESPONSE_TIMEOUT_MS,
+        CONF_ENABLE_BLUEFROG_ORIGINAL_CORE_ROUND,
+    ):
+        if deprecated_option in config:
+            cg.add(var.note_deprecated_live_option(deprecated_option))
     cg.add(var.set_enable_bluefrog_26_replay(config[CONF_ENABLE_BLUEFROG_26_REPLAY]))
-    cg.add(var.set_enable_bluefrog_original_core_round(config[CONF_ENABLE_BLUEFROG_ORIGINAL_CORE_ROUND]))
     cg.add(var.set_pmode_key(config[CONF_PMODE_KEY]))
     mapping_path = config[CONF_XML_MAPPING_PATH]
     if mapping_path == "embedded":
