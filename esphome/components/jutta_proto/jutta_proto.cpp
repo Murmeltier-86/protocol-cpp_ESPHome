@@ -127,6 +127,7 @@ constexpr uint32_t kXmlAlertBitFillWater = 1;
 constexpr uint32_t kXmlAlertBitCoffeeReady = 13;
 constexpr uint32_t kXmlAlertBitProgramMode = 29;
 constexpr uint32_t kXmlAlertBitEnjoyProduct = 31;
+constexpr uint32_t kXmlAlertBitSwitchOffDelay = 47;
 
 #define XML_STATS_LOGD(fmt, ...) \
   do { \
@@ -2933,6 +2934,13 @@ void JuraComponent::update_machine_available_(bool available, const char *reason
 
 void JuraComponent::note_machine_comm_(uint32_t now, const char *reason) {
   this->last_machine_comm_ms_ = now;
+  const std::string reason_text = reason != nullptr ? reason : "valid_comm";
+  if (reason_text == "handshake_done") {
+    this->tf_switch_off_delay_active_ = false;
+  }
+  if (this->tf_switch_off_delay_active_ && reason_text != "valid_tf" && reason_text != "handshake_done") {
+    return;
+  }
   this->update_machine_available_(true, reason != nullptr ? reason : "valid_comm");
 }
 
@@ -2981,7 +2989,8 @@ void JuraComponent::update_machine_status_from_state_(const char *source) {
     this->clear_tv_state_("pmode_ttl_expired");
   }
   const bool online = this->machine_available_;
-  const bool live_status_seen = online && (this->has_valid_tf_status_ || this->has_valid_tv_status_);
+  const bool switch_off_delay = this->tf_switch_off_delay_active_;
+  const bool live_status_seen = (online || switch_off_delay) && (this->has_valid_tf_status_ || this->has_valid_tv_status_);
   const bool blocking_alert = this->current_blocking_alert_active_;
   std::string status;
   bool ready = false;
@@ -2993,15 +3002,17 @@ void JuraComponent::update_machine_status_from_state_(const char *source) {
 
   if (this->machine_display_status_sensor_ != nullptr) {
     this->machine_display_status_sensor_->publish_state(
-        live_status_seen ? (this->current_display_status_.empty() ? "keine"
-                                                                  : this->current_display_status_)
-                         : (online ? "Online" : "nicht verfügbar"));
+        switch_off_delay ? "SwitchOff Delay active"
+                         : (live_status_seen ? (this->current_display_status_.empty() ? "keine"
+                                                                                      : this->current_display_status_)
+                                             : (online ? "Online" : "nicht verfügbar")));
   }
   if (this->machine_warning_sensor_ != nullptr) {
     this->machine_warning_sensor_->publish_state(
-        live_status_seen ? (this->current_machine_warning_.empty() ? "keine"
-                                                                   : this->current_machine_warning_)
-                         : (online ? "keine" : "nicht verfügbar"));
+        switch_off_delay ? "SwitchOff Delay active"
+                         : (live_status_seen ? (this->current_machine_warning_.empty() ? "keine"
+                                                                                       : this->current_machine_warning_)
+                                             : (online ? "keine" : "nicht verfügbar")));
   }
   if (this->active_alerts_sensor_ != nullptr) {
     this->active_alerts_sensor_->publish_state(
@@ -3013,7 +3024,12 @@ void JuraComponent::update_machine_status_from_state_(const char *source) {
     this->fill_water_required_sensor_->publish_state(this->fill_water_required_);
   }
 
-  if (!online) {
+  if (switch_off_delay) {
+    status = this->current_machine_warning_.empty() ? "SwitchOff Delay active" : this->current_machine_warning_;
+    ready = false;
+    ESP_LOGD(TAG, "machine_status_update source=%s priority=switch_off_delay status=\"%s\"", safe_source,
+             sanitize_text_for_api(status).c_str());
+  } else if (!online) {
     status = "offline";
     ready = false;
     ESP_LOGD(TAG, "machine_status_update source=%s priority=offline status=\"offline\"", safe_source);
@@ -3131,6 +3147,7 @@ bool JuraComponent::publish_tf_status_(const std::string &response, const char *
   bool fill_water = has_bit(fill_water_bit);
   const bool program_mode_active = has_bit(program_mode_bit);
   const bool enjoy_product_active = has_bit(enjoy_product_bit);
+  bool switch_off_delay_active = false;
   std::vector<std::string> blocking_alerts;
   std::vector<std::string> nonblocking_alerts;
   std::vector<std::string> visible_alerts;
@@ -3148,6 +3165,9 @@ bool JuraComponent::publish_tf_status_(const std::string &response, const char *
       }
       if (alert_key == "fill water") {
         fill_water = true;
+      }
+      if (alert_key == "switchoff delay active" || alert.bit == kXmlAlertBitSwitchOffDelay) {
+        switch_off_delay_active = true;
       }
       if (jura_alert_type_is_blocking(alert.type)) {
         append_unique(blocking_alerts, display.empty() ? alert.name : display);
@@ -3173,7 +3193,6 @@ bool JuraComponent::publish_tf_status_(const std::string &response, const char *
 
   this->has_valid_tf_status_ = true;
   this->last_tf_status_ms_ = esphome::millis();
-  this->note_machine_comm_(this->last_tf_status_ms_, "valid_tf");
   this->bluefrog_original_core_round_success_ = true;
   this->bluefrog_original_core_round_retry_count_ = 0;
   this->bluefrog_original_core_round_retry_blocked_logged_ = false;
@@ -3181,11 +3200,29 @@ bool JuraComponent::publish_tf_status_(const std::string &response, const char *
   this->current_live_status_source_ = source != nullptr ? source : "@TF";
   this->fill_water_required_ = fill_water;
   this->tf_coffee_ready_active_ = coffee_ready;
+  this->tf_switch_off_delay_active_ = switch_off_delay_active;
   this->current_tf_enjoy_product_active_ = enjoy_product_active;
   this->current_tf_program_mode_active_ = program_mode_active;
   this->current_blocking_alert_active_ = !blocking_alerts.empty();
 
-  if (!blocking_alerts.empty()) {
+  if (switch_off_delay_active) {
+    this->tf_coffee_ready_active_ = false;
+    this->current_tf_enjoy_product_active_ = false;
+    this->current_tf_program_mode_active_ = false;
+    this->current_blocking_alert_active_ = true;
+    this->current_machine_warning_ = "SwitchOff Delay active";
+    this->current_display_status_ = "SwitchOff Delay active";
+    this->current_active_alerts_ = this->current_machine_warning_;
+    this->clear_tv_state_("tf_switch_off_delay_active");
+    this->update_machine_available_(false, "switch_off_delay_active");
+  } else {
+    this->note_machine_comm_(this->last_tf_status_ms_, "valid_tf");
+  }
+
+  if (switch_off_delay_active) {
+    // SwitchOff Delay means the machine is shutting down for automation purposes;
+    // do not allow stale ready/product state to win over this TF frame.
+  } else if (!blocking_alerts.empty()) {
     this->current_machine_warning_ = join_values(blocking_alerts, ", ");
     this->current_display_status_ = blocking_alerts.front();
     this->clear_tv_state_("tf_blocking_alert");
@@ -3214,17 +3251,17 @@ bool JuraComponent::publish_tf_status_(const std::string &response, const char *
     const std::string active_alerts_log = this->current_active_alerts_.empty() ? "keine" : this->current_active_alerts_;
     ESP_LOGD(TAG,
              "tf_status decoded=\"%s\" bits=\"%s\" active_alerts=\"%s\" blocking=%s coffee_ready=%s "
-             "enjoy_product=%s program_mode=%s",
+             "enjoy_product=%s program_mode=%s switch_off_delay=%s",
              sanitize_text_for_api(trimmed).c_str(), bits_text.c_str(), sanitize_text_for_api(active_alerts_log).c_str(),
              YESNO(this->current_blocking_alert_active_), YESNO(coffee_ready), YESNO(enjoy_product_active),
-             YESNO(program_mode_active));
+             YESNO(program_mode_active), YESNO(switch_off_delay_active));
   }
 
   if (this->tf_welcome_sensor_ != nullptr) {
     this->tf_welcome_sensor_->publish_state(has_bit(11));
   }
   if (this->tf_coffee_ready_sensor_ != nullptr) {
-    this->tf_coffee_ready_sensor_->publish_state(has_bit(coffee_ready_bit));
+    this->tf_coffee_ready_sensor_->publish_state(has_bit(coffee_ready_bit) && !switch_off_delay_active);
   }
   if (this->tf_energy_safe_sensor_ != nullptr) {
     this->tf_energy_safe_sensor_->publish_state(has_bit(36));

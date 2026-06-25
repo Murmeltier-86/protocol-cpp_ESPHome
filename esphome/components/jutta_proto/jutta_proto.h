@@ -814,6 +814,7 @@ class JuraComponent : public esphome::Component, public esphome::uart::UARTDevic
   bool has_valid_tv_status_{false};
   bool fill_water_required_{false};
   bool tf_coffee_ready_active_{false};
+  bool tf_switch_off_delay_active_{false};
   bool current_tf_enjoy_product_active_{false};
   bool current_tf_program_mode_active_{false};
   bool current_blocking_alert_active_{false};
