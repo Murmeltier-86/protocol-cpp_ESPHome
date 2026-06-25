@@ -1427,6 +1427,27 @@ bool jura_alert_type_is_user_visible_nonblocking(const std::string &type) {
   return lower == "info" || lower == "ip";
 }
 
+bool text_looks_like_label_id(const std::string &text) {
+  if (text.empty()) {
+    return false;
+  }
+  return std::all_of(text.begin(), text.end(),
+                     [](unsigned char c) { return std::isdigit(c) != 0; });
+}
+
+std::string product_display_name(const JuraProductDesc *product) {
+  if (product == nullptr) {
+    return {};
+  }
+  // PRODUCT.Text in the embedded XML is often a numeric app string-table id
+  // (for example Coffee has Text="10"). Use it only when it is already a
+  // display label; otherwise the product Name is the meaningful UI text.
+  if (!product->text.empty() && !text_looks_like_label_id(product->text)) {
+    return jura_live_display_name(product->text);
+  }
+  return jura_live_display_name(product->name);
+}
+
 std::string format_live_progress_text(const std::string &state_text, const std::string &product_text,
                                       bool has_progress, uint8_t progress_value, uint8_t progress_total) {
   std::string result = state_text;
@@ -2974,19 +2995,19 @@ void JuraComponent::update_machine_status_from_state_(const char *source) {
     this->machine_display_status_sensor_->publish_state(
         live_status_seen ? (this->current_display_status_.empty() ? "keine"
                                                                   : this->current_display_status_)
-                         : "nicht verfügbar");
+                         : (online ? "Online" : "nicht verfügbar"));
   }
   if (this->machine_warning_sensor_ != nullptr) {
     this->machine_warning_sensor_->publish_state(
         live_status_seen ? (this->current_machine_warning_.empty() ? "keine"
                                                                    : this->current_machine_warning_)
-                         : "nicht verfügbar");
+                         : (online ? "keine" : "nicht verfügbar"));
   }
   if (this->active_alerts_sensor_ != nullptr) {
     this->active_alerts_sensor_->publish_state(
         live_status_seen ? (this->current_active_alerts_.empty() ? "keine"
                                                                  : this->current_active_alerts_)
-                         : "nicht verfügbar");
+                         : (online ? "keine" : "nicht verfügbar"));
   }
   if (this->fill_water_required_sensor_ != nullptr && live_status_seen) {
     this->fill_water_required_sensor_->publish_state(this->fill_water_required_);
@@ -3307,9 +3328,7 @@ bool JuraComponent::handle_tv_progress_(const std::string &response, const char 
   }
 
   const std::string state_text = jura_live_display_name(state_desc->name);
-  const std::string product_name =
-      product_desc != nullptr ? (!product_desc->text.empty() ? product_desc->text : product_desc->name) : std::string{};
-  const std::string product_text = product_desc != nullptr ? jura_live_display_name(product_name) : std::string{};
+  const std::string product_text = product_display_name(product_desc);
   const std::string state_key = to_lower_copy(collapse_whitespace(state_desc->name));
   const bool state_is_ready = state_key == "coffee ready" || state_code == 0x24;
   const bool state_is_pmode = state_key == "p_mode" || state_key == "p mode" || state_code == 0xFF;
