@@ -2358,7 +2358,7 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
       this->bluefrog_26_rx_machine_to_esp_count_ > this->bluefrog_26_replay_rx_baseline_) {
     this->bluefrog_26_replay_response_seen_ = true;
     this->bluefrog_26_replay_result_logged_ = true;
-    ESP_LOGI(TAG, "bluefrog_26_replay_result=machine_26_response elapsed_ms=%u rx_counter=%u hex=\"%s\"",
+    ESP_LOGD(TAG, "bluefrog_26_replay_result=machine_26_response elapsed_ms=%u rx_counter=%u hex=\"%s\"",
              static_cast<unsigned>(now - this->bluefrog_26_replay_start_ms_),
              static_cast<unsigned>(this->bluefrog_26_rx_machine_to_esp_count_), this->last_26_frame_hex_.c_str());
   }
@@ -2376,14 +2376,14 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
     }
   }
   if (this->bluefrog_live_debug_ || this->xml_stats_debug_) {
-    ESP_LOGI(TAG,
+    ESP_LOGD(TAG,
              "bluefrog_26_frame direction=%s source=%s time_ms=%u len=%u hex=\"%s\" ascii_preview=\"%s\" "
              "rx_counter=%u",
              direction != nullptr ? direction : "unknown", source != nullptr ? source : "unknown",
              static_cast<unsigned>(now), static_cast<unsigned>(frame.size()), this->last_26_frame_hex_.c_str(),
              sanitize_text_for_api(ascii_preview).c_str(),
              static_cast<unsigned>(this->bluefrog_26_rx_machine_to_esp_count_));
-    ESP_LOGI(TAG, "bluefrog_26_response_cluster direction=%s source=%s cluster=\"%s\"",
+    ESP_LOGD(TAG, "bluefrog_26_response_cluster direction=%s source=%s cluster=\"%s\"",
              direction != nullptr ? direction : "unknown", source != nullptr ? source : "unknown", cluster.c_str());
   }
 
@@ -2416,20 +2416,20 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
     this->publish_text_if_changed_(this->live_db_status_source_sensor_, this->current_live_db_status_source_,
                                    has_binary_candidate ? "bluefrog_26_binary_cache_candidate" : "unknown_26_frame");
     if (this->bluefrog_live_debug_) {
-      ESP_LOGI(TAG,
+      ESP_LOGD(TAG,
                "bluefrog_26_class direction=%s class=%s decoded=NO unknown_count=%u maybe_binary_cacheframe=%s",
                direction != nullptr ? direction : "unknown",
                has_binary_candidate ? "binary_or_nonprintable" : "unknown",
                static_cast<unsigned>(this->bluefrog_26_unknown_count_), YESNO(has_binary_candidate));
-      ESP_LOGI(TAG, "bluefrog_26_decoded_class class=%s decoded=NO cluster=\"%s\"",
+      ESP_LOGD(TAG, "bluefrog_26_decoded_class class=%s decoded=NO cluster=\"%s\"",
                has_binary_candidate ? "binary_or_nonprintable" : "unknown", cluster.c_str());
-      ESP_LOGI(TAG,
+      ESP_LOGD(TAG,
                "bluefrog_26_dispatch binary_cache_candidate len=%u prefix=\"%s\" cluster=\"%s\" "
                "binary_candidate_total=%u non_uart_ascii_candidate=%s",
                static_cast<unsigned>(frame.size()),
                compact_hex_string(frame.substr(0, std::min<size_t>(frame.size(), 6U)), 6).c_str(), cluster.c_str(),
                static_cast<unsigned>(this->bluefrog_26_binary_candidate_count_), YESNO(has_non_uart_ascii_candidate));
-      ESP_LOGI(TAG, "bluefrog_26_binary_cache_candidate len=%u prefix=\"%s\" cluster=\"%s\" total=%u",
+      ESP_LOGD(TAG, "bluefrog_26_binary_cache_candidate len=%u prefix=\"%s\" cluster=\"%s\" total=%u",
                static_cast<unsigned>(frame.size()),
                compact_hex_string(frame.substr(0, std::min<size_t>(frame.size(), 6U)), 6).c_str(), cluster.c_str(),
                static_cast<unsigned>(this->bluefrog_26_binary_candidate_count_));
@@ -2459,17 +2459,17 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
 
   if (this->bluefrog_live_debug_ || std::strcmp(route, "tf_cachewriter") == 0 ||
       std::strcmp(route, "tv_cachewriter") == 0) {
-    ESP_LOGI(TAG, "bluefrog_26_decoded direction=%s table=%s class=%s line=\"%s\"",
+    ESP_LOGD(TAG, "bluefrog_26_decoded direction=%s table=%s class=%s line=\"%s\"",
              direction != nullptr ? direction : "unknown", selected->table_name, klass,
              transport_payload_log_text(decoded).c_str());
-    ESP_LOGI(TAG, "bluefrog_26_decoded_line table=%s line=\"%s\" known_ascii=%s",
+    ESP_LOGD(TAG, "bluefrog_26_decoded_line table=%s line=\"%s\" known_ascii=%s",
              selected->table_name, transport_payload_log_text(decoded).c_str(), YESNO(!decoded.empty() && decoded[0] == '@'));
-    ESP_LOGI(TAG, "bluefrog_26_decoded_class class=%s table=%s cluster=\"%s\"", klass, selected->table_name,
+    ESP_LOGD(TAG, "bluefrog_26_decoded_class class=%s table=%s cluster=\"%s\"", klass, selected->table_name,
              cluster.c_str());
   }
   this->publish_text_if_changed_(this->live_db_status_source_sensor_, this->current_live_db_status_source_, klass);
   if (this->post_t3_runtime_observe_active_) {
-    ESP_LOGI(TAG, "post_t3_runtime_observe_decoded line=\"%s\"",
+    ESP_LOGD(TAG, "post_t3_runtime_observe_decoded line=\"%s\"",
              transport_payload_log_text(decoded).c_str());
   }
 
@@ -2480,7 +2480,7 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
       this->dongle_startup_next_action_ms_ = now;
     }
     this->last_bluefrog_26_cachewriter_source_ = "bluefrog_26_tf_cachewriter";
-    ESP_LOGI(TAG, "bluefrog_26_dispatch decoded_line=\"%s\" route=%s tf_seen_total=%u ascii_decoded_total=%u",
+    ESP_LOGD(TAG, "bluefrog_26_dispatch decoded_line=\"%s\" route=%s tf_seen_total=%u ascii_decoded_total=%u",
              transport_payload_log_text(decoded).c_str(), route, static_cast<unsigned>(this->bluefrog_26_tf_seen_count_),
              static_cast<unsigned>(this->bluefrog_26_ascii_decoded_count_));
     this->handle_decoded_machine_line_(decoded, "bluefrog_26_tf_cachewriter");
@@ -2493,14 +2493,14 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
       this->dongle_startup_next_action_ms_ = now;
     }
     this->last_bluefrog_26_cachewriter_source_ = "bluefrog_26_tv_cachewriter";
-    ESP_LOGI(TAG, "bluefrog_26_dispatch decoded_line=\"%s\" route=%s tv_seen_total=%u ascii_decoded_total=%u",
+    ESP_LOGD(TAG, "bluefrog_26_dispatch decoded_line=\"%s\" route=%s tv_seen_total=%u ascii_decoded_total=%u",
              transport_payload_log_text(decoded).c_str(), route, static_cast<unsigned>(this->bluefrog_26_tv_seen_count_),
              static_cast<unsigned>(this->bluefrog_26_ascii_decoded_count_));
     this->handle_decoded_machine_line_(decoded, "bluefrog_26_tv_cachewriter");
     return true;
   }
   if (this->bluefrog_live_debug_) {
-    ESP_LOGI(TAG, "bluefrog_26_dispatch decoded_line=\"%s\" route=%s ascii_decoded_total=%u",
+    ESP_LOGD(TAG, "bluefrog_26_dispatch decoded_line=\"%s\" route=%s ascii_decoded_total=%u",
              transport_payload_log_text(decoded).c_str(), route,
              static_cast<unsigned>(this->bluefrog_26_ascii_decoded_count_));
   }
@@ -2508,7 +2508,7 @@ bool JuraComponent::handle_bluefrog_26_frame_(const std::string &frame, const ch
     this->handle_decoded_machine_line_(decoded, "bluefrog_26_ascii");
   } else {
     if (this->bluefrog_live_debug_) {
-      ESP_LOGI(TAG, "bluefrog_26_decoded_unknown_ascii line=\"%s\" table=%s cluster=\"%s\"",
+      ESP_LOGD(TAG, "bluefrog_26_decoded_unknown_ascii line=\"%s\" table=%s cluster=\"%s\"",
                transport_payload_log_text(decoded).c_str(), selected->table_name, cluster.c_str());
     }
   }
@@ -2525,10 +2525,10 @@ void JuraComponent::log_bluefrog_26_tx_(const std::string &frame, const char *so
     return;
   }
   const std::string cluster = bluefrog_26_cluster_key(frame);
-  ESP_LOGI(TAG, "bluefrog_26_frame direction=esp_to_machine source=%s time_ms=%u len=%u hex=\"%s\" tx_count=%u",
+  ESP_LOGD(TAG, "bluefrog_26_frame direction=esp_to_machine source=%s time_ms=%u len=%u hex=\"%s\" tx_count=%u",
            source != nullptr ? source : "unknown", static_cast<unsigned>(now), static_cast<unsigned>(frame.size()),
            compact_hex_string(frame, 96).c_str(), static_cast<unsigned>(this->bluefrog_26_tx_esp_to_machine_count_));
-  ESP_LOGI(TAG, "bluefrog_26_request_cluster source=%s cluster=\"%s\" tx_count=%u",
+  ESP_LOGD(TAG, "bluefrog_26_request_cluster source=%s cluster=\"%s\" tx_count=%u",
            source != nullptr ? source : "unknown", cluster.c_str(),
            static_cast<unsigned>(this->bluefrog_26_tx_esp_to_machine_count_));
 }
@@ -4600,7 +4600,7 @@ void JuraComponent::log_startup_tx_diff_() {
     }
     missing_text.append(missing[i]);
   }
-  ESP_LOGI(TAG,
+  ESP_LOGD(TAG,
            "startup_tx_diff sends_T0=%s sends_T1=%s sends_H1=%s sends_TY=%s sends_TR37=%s sends_t3=%s "
            "sends_t2=%s sends_TP_stayinble=%s missing_original_startup_frames=[%s]",
            YESNO(this->startup_trace_sends_t0_), YESNO(this->startup_trace_sends_t1_),
@@ -4610,7 +4610,7 @@ void JuraComponent::log_startup_tx_diff_() {
 }
 
 void JuraComponent::log_normal_startup_sequence_() {
-  ESP_LOGI(TAG,
+  ESP_LOGD(TAG,
            "normal_startup_sequence tx_sequence=[%s] rx_sequence=[%s] sends_T0=%s sends_H1=%s sends_TY=%s "
            "sends_T1=%s sends_t2=%s sends_t3=%s sends_TR37=%s sends_D1=%s",
            join_values(this->startup_trace_tx_sequence_, ",").c_str(),
@@ -4668,7 +4668,7 @@ void JuraComponent::log_startup_sequence_diff_original_vs_esp_() {
     extra.emplace_back("@D1");
   }
 
-  ESP_LOGI(TAG,
+  ESP_LOGD(TAG,
            "startup_sequence_diff_original_vs_esp original_known_frames=[%s] esp_normal_frames=[%s] "
            "missing_in_esp_normal=[%s] extra_in_esp_normal=[%s] uncertain_frames=[@D1]",
            join_values(original_frames, ",").c_str(), join_values(esp_frames, ",").c_str(),
@@ -4801,7 +4801,7 @@ void JuraComponent::update_original_like_flags88_from_line_(const std::string &l
   if (lower.rfind("ty:", 0) == 0) {
     set_mask = ORIGINAL_LIKE_FLAGS88_TY_CONTEXT;
     this->original_like_flags88_ |= set_mask;
-    ESP_LOGI(TAG, "original_like_flags88 event=rx_ty set=0x%08X flags=0x%08X line=\"%s\"",
+    ESP_LOGD(TAG, "original_like_flags88 event=rx_ty set=0x%08X flags=0x%08X line=\"%s\"",
              static_cast<unsigned>(set_mask), static_cast<unsigned>(this->original_like_flags88_),
              sanitize_text_for_api(trimmed).c_str());
     return;
@@ -4818,12 +4818,12 @@ void JuraComponent::update_original_like_flags88_from_line_(const std::string &l
         set_mask |= ORIGINAL_LIKE_FLAGS88_CORE_LATCH;
       }
       this->original_like_flags88_ |= set_mask;
-      ESP_LOGI(TAG, "original_like_flags88 event=rx_T2 t2_first=0x%02X set=0x%08X flags=0x%08X line=\"%s\"",
+      ESP_LOGD(TAG, "original_like_flags88 event=rx_T2 t2_first=0x%02X set=0x%08X flags=0x%08X line=\"%s\"",
                static_cast<unsigned>(t2_first), static_cast<unsigned>(set_mask),
                static_cast<unsigned>(this->original_like_flags88_), sanitize_text_for_api(trimmed).c_str());
     } else {
       this->original_like_flags88_ |= set_mask;
-      ESP_LOGI(TAG,
+      ESP_LOGD(TAG,
                "original_like_flags88 event=rx_T2 t2_first_unknown=YES set=0x%08X flags=0x%08X line=\"%s\"",
                static_cast<unsigned>(set_mask), static_cast<unsigned>(this->original_like_flags88_),
                sanitize_text_for_api(trimmed).c_str());
@@ -4840,12 +4840,12 @@ void JuraComponent::update_original_like_flags88_from_line_(const std::string &l
         set_mask |= ORIGINAL_LIKE_FLAGS88_CORE_LATCH;
       }
       this->original_like_flags88_ |= set_mask;
-      ESP_LOGI(TAG, "original_like_flags88 event=rx_T3 t2_first=0x%02X set=0x%08X flags=0x%08X line=\"%s\"",
+      ESP_LOGD(TAG, "original_like_flags88 event=rx_T3 t2_first=0x%02X set=0x%08X flags=0x%08X line=\"%s\"",
                static_cast<unsigned>(this->original_like_t2_first_byte_), static_cast<unsigned>(set_mask),
                static_cast<unsigned>(this->original_like_flags88_), sanitize_text_for_api(trimmed).c_str());
     } else {
       this->original_like_flags88_ |= set_mask;
-      ESP_LOGI(TAG, "original_like_flags88 event=rx_T3 t2_first_unknown=YES flags=0x%08X line=\"%s\"",
+      ESP_LOGD(TAG, "original_like_flags88 event=rx_T3 t2_first_unknown=YES flags=0x%08X line=\"%s\"",
                static_cast<unsigned>(this->original_like_flags88_), sanitize_text_for_api(trimmed).c_str());
     }
     return;
@@ -4855,7 +4855,7 @@ void JuraComponent::update_original_like_flags88_from_line_(const std::string &l
     set_mask = ORIGINAL_LIKE_FLAGS88_GATE_ACTIVE;
     this->original_like_tr37_seen_ = true;
     this->original_like_flags88_ |= set_mask;
-    ESP_LOGI(TAG, "original_like_flags88 event=rx_tr37 set=0x%08X flags=0x%08X line=\"%s\"",
+    ESP_LOGD(TAG, "original_like_flags88 event=rx_tr37 set=0x%08X flags=0x%08X line=\"%s\"",
              static_cast<unsigned>(set_mask), static_cast<unsigned>(this->original_like_flags88_),
              sanitize_text_for_api(trimmed).c_str());
     return;
@@ -4875,7 +4875,7 @@ void JuraComponent::update_original_like_flags88_from_line_(const std::string &l
     const bool not_0x200 = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_GATE_ACTIVE) == 0;
     const bool not_0x40 = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_TR37_ARM) == 0;
     const bool would_set_0x40 = has_0x100 && has_0x04 && not_0x200 && not_0x40;
-    ESP_LOGI(TAG,
+    ESP_LOGD(TAG,
              "original_like_flags88 event=%s flags=0x%08X gate_helper_condition_0x100=%d "
              "gate_helper_condition_0x04=%d gate_helper_condition_not_0x200=%d would_set_0x40=%d line=\"%s\"",
              is_tf ? "rx_TF" : "rx_TV", static_cast<unsigned>(this->original_like_flags88_), has_0x100 ? 1 : 0,
@@ -4886,7 +4886,7 @@ void JuraComponent::update_original_like_flags88_from_line_(const std::string &l
 
 void JuraComponent::log_original_like_tx_tr37_(const char *source, const char *reason) {
   const bool has_original_arm = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_TR37_ARM) != 0;
-  ESP_LOGI(TAG,
+  ESP_LOGD(TAG,
            "original_like_flags88 event=tx_TR37 flags=0x%08X has_0x40=%s would_need_0x40_for_original=%s "
            "source=%s reason=%s",
            static_cast<unsigned>(this->original_like_flags88_), YESNO(has_original_arm), YESNO(!has_original_arm),
@@ -4916,7 +4916,7 @@ void JuraComponent::log_original_like_session_summary_(const char *context) {
   if (!this->original_like_tv_seen_) {
     missing.emplace_back("TV");
   }
-  ESP_LOGI(TAG,
+  ESP_LOGD(TAG,
            "original_like_session_summary context=%s flags=0x%08X has_ty=%d has_T2=%d has_T3=%d has_0x100=%d "
            "has_tr37=%d has_TF=%d has_TV=%d missing=[%s]",
            context != nullptr ? context : "unknown", static_cast<unsigned>(this->original_like_flags88_),
@@ -4926,7 +4926,7 @@ void JuraComponent::log_original_like_session_summary_(const char *context) {
            (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_CORE_LATCH) != 0 ? 1 : 0,
            this->original_like_tr37_seen_ ? 1 : 0, this->original_like_tf_seen_ ? 1 : 0,
            this->original_like_tv_seen_ ? 1 : 0, join_values(missing, ",").c_str());
-  ESP_LOGI(TAG,
+  ESP_LOGD(TAG,
            "bluefrog_26_session_summary context=%s bluefrog_26_rx_total=%u tx_esp_to_machine=%u unknown=%u "
            "bluefrog_26_ascii_decoded_total=%u bluefrog_26_tf_seen_total=%u bluefrog_26_tv_seen_total=%u "
            "bluefrog_26_binary_candidate_total=%u last_rx_ms=%u last_hex=\"%s\" "
@@ -4964,19 +4964,19 @@ void JuraComponent::log_original_like_core_session_diff_() {
   } else if (!this->original_like_tf_seen_ && !this->original_like_tv_seen_) {
     likely_problem = "tf_tv_not_emitted_by_machine";
   }
-  ESP_LOGI(TAG,
+  ESP_LOGD(TAG,
            "original_like_core_session_diff ty=%d T2=%d T3=%d core_latch_0x100=%d tr37_gate_0x200=%d "
            "tf_seen=%d tv_seen=%d likely_problem=\"%s\"",
            has_ty ? 1 : 0, has_t2 ? 1 : 0, has_t3 ? 1 : 0, has_core ? 1 : 0, has_gate ? 1 : 0,
            this->original_like_tf_seen_ ? 1 : 0, this->original_like_tv_seen_ ? 1 : 0, likely_problem);
   const bool has_tr37_arm = (this->original_like_flags88_ & ORIGINAL_LIKE_FLAGS88_TR37_ARM) != 0;
   const bool cachewriter_rearm_allowed = has_core && has_ty && !has_gate && !has_tr37_arm;
-  ESP_LOGI(TAG,
+  ESP_LOGD(TAG,
            "firmware_flag_match flags=0x%08X ty_context_0x04=%s core_latch_0x100=%s gate_active_0x200=%s "
            "t2_seen_0x400=%s t3_seen_0x800=%s tr37_arm_0x40=%s",
            static_cast<unsigned>(this->original_like_flags88_), YESNO(has_ty), YESNO(has_core), YESNO(has_gate),
            YESNO(has_t2), YESNO(has_t3), YESNO(has_tr37_arm));
-  ESP_LOGI(TAG,
+  ESP_LOGD(TAG,
            "cachewriter_gate tf_allowed=%s tv_allowed=%s cond_0x100=%s cond_0x04=%s cond_not_0x200=%s "
            "cond_not_0x40=%s",
            YESNO(cachewriter_rearm_allowed), YESNO(cachewriter_rearm_allowed), YESNO(has_core), YESNO(has_ty),
@@ -5448,9 +5448,9 @@ bool JuraComponent::send_manual_live_trigger_stayinble_(uint32_t now) {
   std::snprintf(command, sizeof(command), "@TP:%02X7F", static_cast<unsigned>(this->pmode_key_));
   std::string line(command);
   if (this->manual_handshake_probe_mode_ == ManualHandshakeProbeMode::LIVE_EVENT_OBSERVE) {
-    ESP_LOGI(TAG, "manual_live_event_stayinble_tx mode=machine_uart line=\"%s\"", line.c_str());
+    ESP_LOGD(TAG, "manual_live_event_stayinble_tx mode=machine_uart line=\"%s\"", line.c_str());
   } else {
-    ESP_LOGI(TAG, "live_trigger_stayinble_tx mode=machine_uart line=\"%s\"", line.c_str());
+    ESP_LOGD(TAG, "live_trigger_stayinble_tx mode=machine_uart line=\"%s\"", line.c_str());
   }
   this->trace_machine_tx_startup_("manual_stayinble", line, true, "stayinble");
   this->manual_live_trigger_allow_stayinble_tx_ = true;
@@ -9021,13 +9021,13 @@ void JuraComponent::update_dongle_events_from_line_(const std::string &line) {
   if (this->post_t3_runtime_observe_active_ &&
       (bit == DONGLE_EVENT_T0 || bit == DONGLE_EVENT_T3 || bit == DONGLE_EVENT_TR)) {
     ++this->post_t3_runtime_observe_session_core_;
-    ESP_LOGI(TAG, "post_t3_runtime_observe_session_core line=\"%s\"",
+    ESP_LOGD(TAG, "post_t3_runtime_observe_session_core line=\"%s\"",
              sanitize_text_for_api(trimmed).c_str());
   }
   if (this->bluefrog_original_core_round_active_ &&
       (bit == DONGLE_EVENT_T0 || bit == DONGLE_EVENT_T1 || bit == DONGLE_EVENT_T2 ||
        bit == DONGLE_EVENT_T3 || bit == DONGLE_EVENT_TF)) {
-    ESP_LOGI(TAG, "bluefrog_original_core_round_rx line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
+    ESP_LOGD(TAG, "bluefrog_original_core_round_rx line=\"%s\"", sanitize_text_for_api(trimmed).c_str());
   }
 
   bool newly_set = (this->dongle_events_ & bit) == 0;
@@ -9170,7 +9170,7 @@ bool JuraComponent::should_start_bluefrog_original_core_round_(uint32_t now, con
       *reason = "max_retries_reached";
     }
     if (!this->bluefrog_original_core_round_retry_blocked_logged_) {
-      ESP_LOGI(TAG, "bluefrog_original_core_round_retry_blocked reason=max_retries_reached");
+      ESP_LOGD(TAG, "bluefrog_original_core_round_retry_blocked reason=max_retries_reached");
       this->bluefrog_original_core_round_retry_blocked_logged_ = true;
     }
     return false;
@@ -9191,7 +9191,7 @@ bool JuraComponent::should_start_bluefrog_original_core_round_(uint32_t now, con
   if (reason != nullptr) {
     *reason = "no_tf_after_attempt";
   }
-  ESP_LOGI(TAG, "bluefrog_original_core_round_retry reason=no_tf_after_attempt");
+  ESP_LOGD(TAG, "bluefrog_original_core_round_retry reason=no_tf_after_attempt");
   if (this->last_tf_status_ms_ != 0 && this->bluefrog_live_debug_) {
     ESP_LOGD(TAG, "bluefrog_live_session_rearm reason=tf_timeout");
   }
@@ -9214,10 +9214,10 @@ void JuraComponent::finish_bluefrog_original_core_round_(uint32_t now, bool time
     this->bluefrog_original_core_round_success_ = true;
   }
   if (missing_step != nullptr && missing_step[0] != '\0') {
-    ESP_LOGI(TAG, "bluefrog_original_core_round_result tf_seen=%s tv_seen=%s rx_26=%u timeout=%s missing_step=%s",
+    ESP_LOGD(TAG, "bluefrog_original_core_round_result tf_seen=%s tv_seen=%s rx_26=%u timeout=%s missing_step=%s",
              YESNO(tf_seen), YESNO(tv_seen), static_cast<unsigned>(rx_26), YESNO(timeout), missing_step);
   } else {
-    ESP_LOGI(TAG, "bluefrog_original_core_round_result tf_seen=%s tv_seen=%s rx_26=%u timeout=%s",
+    ESP_LOGD(TAG, "bluefrog_original_core_round_result tf_seen=%s tv_seen=%s rx_26=%u timeout=%s",
              YESNO(tf_seen), YESNO(tv_seen), static_cast<unsigned>(rx_26), YESNO(timeout));
   }
   this->bluefrog_original_core_round_active_ = false;
@@ -9434,13 +9434,13 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       this->bluefrog_26_replay_rx_baseline_ = this->bluefrog_26_rx_machine_to_esp_count_;
       this->bluefrog_26_replay_start_ms_ = now;
       this->bluefrog_26_replay_deadline_ms_ = now + kBluefrog26ReplayObserveMs;
-      ESP_LOGI(TAG, "bluefrog_26_tx_replay index=1 hex=26 85 74 BD 75 E5 54 0D 0A");
+      ESP_LOGD(TAG, "bluefrog_26_tx_replay index=1 hex=26 85 74 BD 75 E5 54 0D 0A");
       if (!this->send_decoded_binary_line_(REPLAY_FRAME_1, sizeof(REPLAY_FRAME_1), "dongle_startup_replay",
                                            "bluefrog_26_replay_1")) {
         this->fail_dongle_startup_(now, "send_26_replay_1_failed");
         return false;
       }
-      ESP_LOGI(TAG, "bluefrog_26_tx_replay index=2 hex=26 1C 0B 6A 29 B0 AA 7C 11 DE 0D 0A");
+      ESP_LOGD(TAG, "bluefrog_26_tx_replay index=2 hex=26 1C 0B 6A 29 B0 AA 7C 11 DE 0D 0A");
       if (!this->send_decoded_binary_line_(REPLAY_FRAME_2, sizeof(REPLAY_FRAME_2), "dongle_startup_replay",
                                            "bluefrog_26_replay_2")) {
         this->fail_dongle_startup_(now, "send_26_replay_2_failed");
@@ -9454,7 +9454,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       if (time_reached(now, this->bluefrog_26_replay_deadline_ms_)) {
         if (!this->bluefrog_26_replay_response_seen_) {
           this->bluefrog_26_replay_result_logged_ = true;
-          ESP_LOGI(TAG, "bluefrog_26_replay_result=no_machine_26_response rx_counter=%u observe_ms=%u",
+          ESP_LOGD(TAG, "bluefrog_26_replay_result=no_machine_26_response rx_counter=%u observe_ms=%u",
                    static_cast<unsigned>(this->bluefrog_26_rx_machine_to_esp_count_),
                    static_cast<unsigned>(kBluefrog26ReplayObserveMs));
         }
@@ -9508,7 +9508,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
         this->post_t3_runtime_observe_tv_seen_ = 0;
         this->post_t3_runtime_observe_binary_candidates_ = 0;
         this->post_t3_runtime_observe_session_core_ = 0;
-        ESP_LOGI(TAG, "post_t3_runtime_observe_start duration_ms=%u",
+        ESP_LOGD(TAG, "post_t3_runtime_observe_start duration_ms=%u",
                  static_cast<unsigned>(kPostT3RuntimeObserveMs));
         XML_STATS_LOGD("dongle_startup_wait_t3_quiet start events=0x%02X duration_ms=%u",
                  static_cast<unsigned>(this->dongle_events_), static_cast<unsigned>(kPostT3RuntimeObserveMs));
@@ -9717,7 +9717,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
 
     case DongleStartupState::CORE_ROUND_SEND_T0:
       this->dongle_events_ &= ~DONGLE_EVENT_T0;
-      ESP_LOGI(TAG, "bluefrog_original_core_round_tx line=\"@T0\"");
+      ESP_LOGD(TAG, "bluefrog_original_core_round_tx line=\"@T0\"");
       if (!this->send_dongle_startup_command_("@T0", now, true)) {
         this->finish_bluefrog_original_core_round_(now, true, "send_@T0");
         return false;
@@ -9739,7 +9739,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
     case DongleStartupState::CORE_ROUND_SEND_T1:
       this->dongle_events_ &= ~DONGLE_EVENT_T1;
       this->dongle_events_ &= ~DONGLE_EVENT_T2;
-      ESP_LOGI(TAG, "bluefrog_original_core_round_tx line=\"@T1\"");
+      ESP_LOGD(TAG, "bluefrog_original_core_round_tx line=\"@T1\"");
       if (!this->send_dongle_startup_command_("@T1", now, true)) {
         this->finish_bluefrog_original_core_round_(now, true, "send_@T1");
         return false;
@@ -9771,7 +9771,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
 
     case DongleStartupState::CORE_ROUND_SEND_T2:
       this->dongle_events_ &= ~DONGLE_EVENT_T3;
-      ESP_LOGI(TAG, "bluefrog_original_core_round_tx line=\"@t2:8100000000\"");
+      ESP_LOGD(TAG, "bluefrog_original_core_round_tx line=\"@t2:8100000000\"");
       if (!this->send_dongle_startup_command_("@t2:8100000000", now, true)) {
         this->finish_bluefrog_original_core_round_(now, true, "send_@t2");
         return false;
@@ -9791,7 +9791,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       return false;
 
     case DongleStartupState::CORE_ROUND_SEND_T3:
-      ESP_LOGI(TAG, "bluefrog_original_core_round_tx line=\"@t3\"");
+      ESP_LOGD(TAG, "bluefrog_original_core_round_tx line=\"@t3\"");
       if (!this->send_dongle_startup_command_("@t3", now, true)) {
         this->finish_bluefrog_original_core_round_(now, true, "send_@t3");
         return false;
@@ -9801,7 +9801,7 @@ bool JuraComponent::process_dongle_startup_(uint32_t now) {
       this->bluefrog_original_core_round_rx26_baseline_ = this->bluefrog_26_rx_machine_to_esp_count_;
       this->bluefrog_original_core_round_tf_baseline_ = this->bluefrog_26_tf_seen_count_;
       this->bluefrog_original_core_round_tv_baseline_ = this->bluefrog_26_tv_seen_count_;
-      ESP_LOGI(TAG, "bluefrog_original_core_round_observe_start duration_ms=%u",
+      ESP_LOGD(TAG, "bluefrog_original_core_round_observe_start duration_ms=%u",
                static_cast<unsigned>(kBluefrogOriginalCoreRoundObserveMs));
       this->transition_dongle_startup_(DongleStartupState::CORE_ROUND_OBSERVE, now);
       return false;
@@ -9925,7 +9925,7 @@ void JuraComponent::handle_xml_state_machine_(uint32_t now) {
         if (this->live_idle_observe_last_block_log_ms_ == 0 ||
             static_cast<uint32_t>(now - this->live_idle_observe_last_block_log_ms_) >= 10000) {
           this->live_idle_observe_last_block_log_ms_ = now;
-          ESP_LOGI(TAG, "live_idle_observe_block_stats remaining_ms=%u flags=0x%08X",
+          ESP_LOGD(TAG, "live_idle_observe_block_stats remaining_ms=%u flags=0x%08X",
                    static_cast<unsigned>(this->live_idle_observe_end_ms_ - now),
                    static_cast<unsigned>(this->original_like_flags88_));
         }
